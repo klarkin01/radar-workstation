@@ -12,6 +12,7 @@ CLAUDE.md
 *.swp
 *.swo
 *~
+*.code-workspace
 
 # OS artifacts
 .DS_Store
