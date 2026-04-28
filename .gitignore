@@ -1,0 +1,27 @@
+# Rust
+/target/
+Cargo.lock
+
+# Claude workflow
+CLAUDE.md
+.claude/
+
+# Editor artifacts
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.*
+
+# Local notes
+scratch/
+notes/
+TODO.local.md
