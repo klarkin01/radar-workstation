@@ -8,27 +8,7 @@ an ADR if it is architecturally significant.*
 
 ## Critical — Must Resolve Before Implementation
 
-**Q1: What is the project name?**
-The application needs a name for the repository, binary, documentation, and community
-identity. The name should be short, memorable, and meaningful to the radar/meteorology
-community. This affects everything from the GitHub URL to how the application appears
-in a package manager.
 
-**Q2: What license specifically?**
-Open source is decided (ADR-0009). The specific license is not. Leading candidates:
-- MIT — permissive, simple, widely understood, common in Rust ecosystem.
-- Apache-2.0 — permissive, includes explicit patent grant, preferred in some government
-  contexts.
-- Dual MIT/Apache-2.0 — the Rust ecosystem convention; maximizes compatibility.
-Resolution should consider the government/defense use case and what license forms
-procurement officers are most comfortable approving.
-
-**Q3: What is the NEXRAD data source / polling endpoint?**
-NOAA publishes real-time NEXRAD Level II data to an AWS S3 bucket
-(`s3://noaa-nexrad-level2`), publicly accessible with no authentication. This is likely
-the correct primary source. Confirm: latency characteristics, rate limits if any,
-behavior during NOAA infrastructure incidents, and whether a fallback source
-(e.g. Iowa State Mesonet) should be supported.
 
 ---
 
@@ -74,6 +54,12 @@ Velocity aliasing is a known limitation of raw Doppler data that significantly a
 usability of the velocity product. GR2Analyst implements dealiasing. This is
 algorithmically non-trivial. Decide whether v1.0 ships with dealiasing, ships with
 a known limitation notice, or ships with a simple range-folding indicator only.
+
+**Q13: Backup data source?**
+We will default to NOAA S3 for our primary data source. However, we may want to implement
+a backup/secondary source, or the ability to configure multiple sources. The ability to 
+configure sources would be most flexible, but likely more involved. It is also likely that 
+the NOAA S3 source would be most authoritative and reliable.  
 
 ---
 
