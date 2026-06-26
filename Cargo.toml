@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "crates/radar-workstation",
+    "crates/nexrad-decoder",
+]
+resolver = "2"

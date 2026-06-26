@@ -1,0 +1,12 @@
+[package]
+name = "radar-workstation"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Radar Workstation, Meteorological — single-site NEXRAD Level II radar analysis"
+
+[dependencies]
+nexrad-decoder = { path = "../nexrad-decoder" }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "time"] }
+tempfile = "3"

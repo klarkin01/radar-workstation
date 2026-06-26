@@ -42,8 +42,8 @@ that must be honored at every layer of the architecture.
 Complexity is a cost. The correct solution is the simplest one that fully solves the
 problem. Code should be readable by someone unfamiliar with the codebase. Dependencies are
 maintenance surface and are chosen conservatively. Modules have clear, narrow
-responsibilities. This discipline is what makes the software maintainable and extensible
-over time.
+responsibilities. Code adheres to the DRY principle. This discipline is what makes the 
+software maintainable and extensible over time.
 
 ### 5. Basic Is a Feature
 

@@ -13,8 +13,7 @@ government and defense evaluators, and positioning for future opportunities in r
 network modernization. Revenue from software sales was evaluated against these goals.
 
 ## Decision
-The application is released as open source. License TBD (MIT, Apache-2.0, or dual
-MIT/Apache-2.0 are the leading candidates — see open-questions.md).
+The application is released as open source under the Apache License, Version 2.0.
 
 ## Consequences
 - The codebase is publicly auditable by security reviewers, government procurement
