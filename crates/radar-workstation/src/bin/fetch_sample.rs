@@ -20,7 +20,7 @@ async fn run() -> Result<(), String> {
 
     let filename = parsed_url
         .path_segments()
-        .and_then(|segments| segments.last())
+        .and_then(|mut segments| segments.next_back())
         .filter(|segment| !segment.is_empty())
         .ok_or_else(|| "sample URL must contain a filename".to_string())?;
 
