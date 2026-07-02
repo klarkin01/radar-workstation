@@ -1,0 +1,16 @@
+[package]
+name = "radar-viz"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Developer visualization utility — renders decoded NEXRAD data as a PNG PPI image"
+
+[[bin]]
+name = "radar-viz"
+path = "src/main.rs"
+
+[dependencies]
+nexrad-decoder = { path = "../../crates/nexrad-decoder" }
+radar-workstation = { path = "../../crates/radar-workstation" }
+image = { version = "0.25", default-features = false, features = ["png"] }
+shapefile = { version = "0.6", default-features = false }
