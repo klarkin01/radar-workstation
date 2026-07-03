@@ -51,11 +51,11 @@ ACCUMULATING
   │       → IDLE
   │
   ├─ (2) new -S chunk arrives before -E
-  │       close current tilt and VolumeScan as ClosedByNextVolume
+  │       close current tilt and VolumeScan as Superseded
   │       → AWAITING_DATA (begin new volume immediately)
   │
   └─ (3) watchdog timeout (no chunk for ~10-15 minutes)
-          close current tilt and VolumeScan as ClosedByTimeout
+          close current tilt and VolumeScan as TimedOut
           → IDLE
 ```
 
@@ -70,13 +70,13 @@ already displayed to the user. A visible gap is preferable to invisible data mod
 The `VolumeScan` struct carries an explicit completion status:
 
 - **`Complete`** — `-E` chunk received; all data present or accounted for
-- **`ClosedByNextVolume`** — a new `-S` arrived before `-E`; final chunk(s) absent
-- **`ClosedByTimeout`** — no chunk activity within the watchdog period; final state unknown
+- **`Superseded`** — a new `-S` arrived before `-E`; final chunk(s) absent
+- **`TimedOut`** — no chunk activity within the watchdog period; final state unknown
 - **`InProgress`** — currently accumulating; not yet closed
 
 The render loop and compute layer may use this field to decide whether to display a
 visual indicator that a volume is incomplete. No data is withheld or suppressed — a
-`ClosedByNextVolume` volume is rendered as-is, with gaps where data is absent.
+`Superseded` volume is rendered as-is, with gaps where data is absent.
 
 ## Missing Chunk Behavior by Type
 
@@ -111,11 +111,11 @@ Handling: volume completion is detected by two additional signals that do not de
 on `-E` arrival:
 
 1. **Next `-S` arrival.** The start of a new volume implicitly closes the previous one.
-   This is the primary fallback. The current `VolumeScan` is marked `ClosedByNextVolume`
+   This is the primary fallback. The current `VolumeScan` is marked `Superseded`
    and handed to the compute layer. The new `-S` immediately initializes the next volume.
 
 2. **Watchdog timeout.** If no chunk arrives within approximately 10-15 minutes (well
-   beyond the longest VCP cycle), the current `VolumeScan` is marked `ClosedByTimeout`
+   beyond the longest VCP cycle), the current `VolumeScan` is marked `TimedOut`
    and the pipeline returns to IDLE. This handles session-end and prolonged outages.
 
 Note: the end-of-volume radial status flag (code 4) is carried in the final radial of
