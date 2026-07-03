@@ -5,9 +5,9 @@ pub enum VolumeStatus {
     InProgress,
     Complete,
     /// A new start chunk arrived before the end chunk for this volume.
-    ClosedByNextVolume,
+    Superseded,
     /// No chunk activity within the watchdog window.
-    ClosedByTimeout,
+    TimedOut,
 }
 
 #[derive(Debug, Clone)]
@@ -18,7 +18,7 @@ pub struct VolumeScan {
     pub vcp_number: u16,
     pub latitude: f32,
     pub longitude: f32,
-    pub site_height_m: i16,
+    pub site_amsl_m: i16,
     pub tilts: Vec<Tilt>,
     pub status: VolumeStatus,
 }

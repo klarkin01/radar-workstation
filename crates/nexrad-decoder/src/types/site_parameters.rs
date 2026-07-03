@@ -1,5 +1,5 @@
 #[derive(Debug, Clone)]
-pub struct VolumeConstants {
+pub struct SiteParameters {
     pub latitude: f32,
     pub longitude: f32,
     /// Site elevation above mean sea level, meters.

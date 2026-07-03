@@ -1,21 +1,21 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum MomentKind {
+pub enum ProductKind {
     Ref,
     Vel,
-    Sw,
+    SpectrumWidth,
     Zdr,
     Phi,
     Rho,
     Cfp,
 }
 
-impl MomentKind {
+impl ProductKind {
     /// Map an ICD block_id (e.g. `b"DREF"`) to the corresponding variant.
     pub fn from_block_id(id: &[u8; 4]) -> Option<Self> {
         match id {
             b"DREF" => Some(Self::Ref),
             b"DVEL" => Some(Self::Vel),
-            b"DSW " => Some(Self::Sw),
+            b"DSW " => Some(Self::SpectrumWidth),
             b"DZDR" => Some(Self::Zdr),
             b"DPHI" => Some(Self::Phi),
             b"DRHO" => Some(Self::Rho),
@@ -26,19 +26,19 @@ impl MomentKind {
 }
 
 #[derive(Debug, Clone)]
-pub struct MomentData {
+pub struct ProductData {
     pub gate_count: u16,
     pub first_gate_m: u16,
     pub gate_width_m: u16,
-    /// Bits per gate: 8 for most moments, 16 for ZDR and PHI.
+    /// Bits per gate: 8 for most products, 16 for ZDR and PHI.
     pub word_size: u8,
     pub scale: f32,
     pub offset: f32,
-    /// Raw gate bytes. 16-bit moments store each gate as two consecutive big-endian bytes.
+    /// Raw gate bytes. 16-bit products store each gate as two consecutive big-endian bytes.
     pub data: Vec<u8>,
 }
 
-impl MomentData {
+impl ProductData {
     /// Raw encoded value at `index`. Returns `None` if `index` is out of range.
     pub fn raw_gate(&self, index: usize) -> Option<u16> {
         match self.word_size {

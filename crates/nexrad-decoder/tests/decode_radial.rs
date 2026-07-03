@@ -1,4 +1,4 @@
-use nexrad_decoder::{parse_radial_stream, MomentKind, RadialStatus};
+use nexrad_decoder::{parse_radial_stream, ProductKind, RadialStatus};
 
 // Each fixture is a complete Message 31 record (CTM header + message header +
 // body), extracted from real KDOX VCP 35 chunks by gen_fixtures.py. Passing
@@ -34,33 +34,33 @@ fn start_of_volume_rrad_values() {
     let data = fixture!("kdox_vcp35_start_of_volume.bin");
     let r = &parse_radial_stream(data).unwrap()[0];
 
-    assert!((r.unamb_range_km - 583.75).abs() < 0.01, "unamb={}", r.unamb_range_km);
-    assert!((r.nyquist_vel_ms - 8.37).abs() < 0.01, "nyquist={}", r.nyquist_vel_ms);
+    assert!((r.unambiguous_range_km - 583.75).abs() < 0.01, "unamb={}", r.unambiguous_range_km);
+    assert!((r.nyquist_velocity_mps - 8.37).abs() < 0.01, "nyquist={}", r.nyquist_velocity_mps);
 }
 
 #[test]
-fn start_of_volume_has_volume_constants() {
+fn start_of_volume_has_site_parameters() {
     let data = fixture!("kdox_vcp35_start_of_volume.bin");
     let r = &parse_radial_stream(data).unwrap()[0];
 
-    let vc = r.volume_constants.as_ref().expect("volume_constants absent on StartOfVolume");
-    assert_eq!(vc.vcp_number, 35);
-    assert!((vc.latitude - 38.8258).abs() < 0.001, "lat={}", vc.latitude);
-    assert!((vc.longitude - (-75.4401)).abs() < 0.001, "lon={}", vc.longitude);
-    assert_eq!(vc.site_amsl_m, 15);
+    let sp = r.site_parameters.as_ref().expect("site_parameters absent on StartOfVolume");
+    assert_eq!(sp.vcp_number, 35);
+    assert!((sp.latitude - 38.8258).abs() < 0.001, "lat={}", sp.latitude);
+    assert!((sp.longitude - (-75.4401)).abs() < 0.001, "lon={}", sp.longitude);
+    assert_eq!(sp.site_amsl_m, 15);
 }
 
 #[test]
-fn start_of_volume_moments_present() {
+fn start_of_volume_products_present() {
     let data = fixture!("kdox_vcp35_start_of_volume.bin");
     let r = &parse_radial_stream(data).unwrap()[0];
 
-    // Tilt 1 in VCP 35 has dual-pol moments but no velocity/width
-    for kind in [MomentKind::Ref, MomentKind::Zdr, MomentKind::Phi, MomentKind::Rho, MomentKind::Cfp] {
-        assert!(r.moments.contains_key(&kind), "missing moment {kind:?}");
+    // Tilt 1 in VCP 35 has dual-pol products but no velocity/spectrum width
+    for kind in [ProductKind::Ref, ProductKind::Zdr, ProductKind::Phi, ProductKind::Rho, ProductKind::Cfp] {
+        assert!(r.products.contains_key(&kind), "missing product {kind:?}");
     }
-    assert!(!r.moments.contains_key(&MomentKind::Vel), "unexpected VEL on tilt 1");
-    assert!(!r.moments.contains_key(&MomentKind::Sw), "unexpected SW on tilt 1");
+    assert!(!r.products.contains_key(&ProductKind::Vel), "unexpected VEL on tilt 1");
+    assert!(!r.products.contains_key(&ProductKind::SpectrumWidth), "unexpected SW on tilt 1");
 }
 
 #[test]
@@ -68,7 +68,7 @@ fn start_of_volume_dref_gate_geometry() {
     let data = fixture!("kdox_vcp35_start_of_volume.bin");
     let r = &parse_radial_stream(data).unwrap()[0];
 
-    let dref = r.moments.get(&MomentKind::Ref).expect("no DREF");
+    let dref = r.products.get(&ProductKind::Ref).expect("no DREF");
     assert_eq!(dref.gate_count, 1832);
     assert_eq!(dref.first_gate_m, 2125);
     assert_eq!(dref.gate_width_m, 250);
@@ -82,7 +82,7 @@ fn start_of_volume_drho_gate_geometry() {
     let data = fixture!("kdox_vcp35_start_of_volume.bin");
     let r = &parse_radial_stream(data).unwrap()[0];
 
-    let drho = r.moments.get(&MomentKind::Rho).expect("no DRHO");
+    let drho = r.products.get(&ProductKind::Rho).expect("no DRHO");
     assert_eq!(drho.gate_count, 1192);
     assert_eq!(drho.word_size, 8);
     assert!((drho.scale - 300.0).abs() < 1e-4);
@@ -94,7 +94,7 @@ fn start_of_volume_dzdr_is_16bit() {
     let data = fixture!("kdox_vcp35_start_of_volume.bin");
     let r = &parse_radial_stream(data).unwrap()[0];
 
-    let dzdr = r.moments.get(&MomentKind::Zdr).expect("no DZDR");
+    let dzdr = r.products.get(&ProductKind::Zdr).expect("no DZDR");
     assert_eq!(dzdr.word_size, 16);
     assert_eq!(dzdr.gate_count, 1192);
 }
@@ -103,7 +103,7 @@ fn start_of_volume_dzdr_is_16bit() {
 fn start_of_volume_physical_value_conversion() {
     let data = fixture!("kdox_vcp35_start_of_volume.bin");
     let r = &parse_radial_stream(data).unwrap()[0];
-    let dref = r.moments.get(&MomentKind::Ref).expect("no DREF");
+    let dref = r.products.get(&ProductKind::Ref).expect("no DREF");
 
     // At least one gate across 1832 must be non-reserved (even in clear air).
     // Gate 0 is near the radar — typically below SNR (raw=0 or 1), returns None.
@@ -140,16 +140,16 @@ fn intermediate_status_and_geometry() {
     assert_eq!(r.radial_status, RadialStatus::Intermediate);
     assert_eq!(r.elevation_number, 1);
     // RVOL is present on every radial in observed KDOX data (vol_ptr is always 72)
-    let vc = r.volume_constants.as_ref().expect("RVOL block absent");
-    assert_eq!(vc.vcp_number, 35);
+    let sp = r.site_parameters.as_ref().expect("RVOL block absent");
+    assert_eq!(sp.vcp_number, 35);
 }
 
 #[test]
 fn intermediate_rrad_values() {
     let data = fixture!("kdox_vcp35_intermediate.bin");
     let r = &parse_radial_stream(data).unwrap()[0];
-    assert!((r.unamb_range_km - 583.75).abs() < 0.01);
-    assert!((r.nyquist_vel_ms - 8.37).abs() < 0.01);
+    assert!((r.unambiguous_range_km - 583.75).abs() < 0.01);
+    assert!((r.nyquist_velocity_mps - 8.37).abs() < 0.01);
 }
 
 // ---------------------------------------------------------------------------
@@ -165,11 +165,11 @@ fn end_of_elevation_status() {
 }
 
 // ---------------------------------------------------------------------------
-// Start of Elevation (tilt 2 — Doppler-only, 3 moments)
+// Start of Elevation (tilt 2 — Doppler-only, 3 products)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn start_of_elevation_status_and_moments() {
+fn start_of_elevation_status_and_products() {
     let data = fixture!("kdox_vcp35_start_of_elevation.bin");
     let r = &parse_radial_stream(data).unwrap()[0];
 
@@ -177,12 +177,12 @@ fn start_of_elevation_status_and_moments() {
     assert_eq!(r.elevation_number, 2);
 
     // Tilt 2 in VCP 35 is a Doppler-only tilt: REF + VEL + SW, no dual-pol
-    assert!(r.moments.contains_key(&MomentKind::Ref));
-    assert!(r.moments.contains_key(&MomentKind::Vel));
-    assert!(r.moments.contains_key(&MomentKind::Sw));
-    assert!(!r.moments.contains_key(&MomentKind::Zdr));
-    assert!(!r.moments.contains_key(&MomentKind::Phi));
-    assert!(!r.moments.contains_key(&MomentKind::Rho));
+    assert!(r.products.contains_key(&ProductKind::Ref));
+    assert!(r.products.contains_key(&ProductKind::Vel));
+    assert!(r.products.contains_key(&ProductKind::SpectrumWidth));
+    assert!(!r.products.contains_key(&ProductKind::Zdr));
+    assert!(!r.products.contains_key(&ProductKind::Phi));
+    assert!(!r.products.contains_key(&ProductKind::Rho));
 }
 
 #[test]
@@ -190,8 +190,8 @@ fn start_of_elevation_dvel_gate_geometry() {
     let data = fixture!("kdox_vcp35_start_of_elevation.bin");
     let r = &parse_radial_stream(data).unwrap()[0];
 
-    // Tilt 2: all moments have 1192 gates (confirmed from binary inspection)
-    let dvel = r.moments.get(&MomentKind::Vel).expect("no DVEL");
+    // Tilt 2: all products have 1192 gates (confirmed from binary inspection)
+    let dvel = r.products.get(&ProductKind::Vel).expect("no DVEL");
     assert_eq!(dvel.gate_count, 1192);
     assert_eq!(dvel.word_size, 8);
     assert!((dvel.scale - 2.0).abs() < 1e-6);
@@ -199,21 +199,21 @@ fn start_of_elevation_dvel_gate_geometry() {
 }
 
 // ---------------------------------------------------------------------------
-// End of Volume (tilt 16 — all 7 moments)
+// End of Volume (tilt 16 — all 7 products)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn end_of_volume_status_and_all_moments() {
+fn end_of_volume_status_and_all_products() {
     let data = fixture!("kdox_vcp35_end_of_volume.bin");
     let r = &parse_radial_stream(data).unwrap()[0];
 
     assert_eq!(r.radial_status, RadialStatus::EndOfVolume);
 
     for kind in [
-        MomentKind::Ref, MomentKind::Vel, MomentKind::Sw,
-        MomentKind::Zdr, MomentKind::Phi, MomentKind::Rho, MomentKind::Cfp,
+        ProductKind::Ref, ProductKind::Vel, ProductKind::SpectrumWidth,
+        ProductKind::Zdr, ProductKind::Phi, ProductKind::Rho, ProductKind::Cfp,
     ] {
-        assert!(r.moments.contains_key(&kind), "missing moment {kind:?}");
+        assert!(r.products.contains_key(&kind), "missing product {kind:?}");
     }
 }
 
@@ -222,7 +222,7 @@ fn end_of_volume_dphi_is_16bit() {
     let data = fixture!("kdox_vcp35_end_of_volume.bin");
     let r = &parse_radial_stream(data).unwrap()[0];
 
-    let dphi = r.moments.get(&MomentKind::Phi).expect("no DPHI");
+    let dphi = r.products.get(&ProductKind::Phi).expect("no DPHI");
     assert_eq!(dphi.word_size, 16);
 }
 
@@ -232,10 +232,10 @@ fn end_of_volume_dphi_is_16bit() {
 
 #[test]
 fn reserved_raw_values_return_none() {
-    // Synthesise a minimal MomentData to test the physical_value logic in isolation.
-    use nexrad_decoder::MomentData;
+    // Synthesise a minimal ProductData to test the physical_value logic in isolation.
+    use nexrad_decoder::ProductData;
 
-    let md = MomentData {
+    let pd = ProductData {
         gate_count: 4,
         first_gate_m: 2125,
         gate_width_m: 250,
@@ -245,19 +245,19 @@ fn reserved_raw_values_return_none() {
         data: vec![0, 1, 2, 133], // below-SNR, range-folded, min valid, valid
     };
 
-    assert!(md.physical_value(0).is_none(), "raw=0 should be None");
-    assert!(md.physical_value(1).is_none(), "raw=1 should be None");
-    assert!(md.physical_value(2).is_some(), "raw=2 should be Some");
+    assert!(pd.physical_value(0).is_none(), "raw=0 should be None");
+    assert!(pd.physical_value(1).is_none(), "raw=1 should be None");
+    assert!(pd.physical_value(2).is_some(), "raw=2 should be Some");
     // raw=133 → (133 - 66) / 2 = 33.5 dBZ
-    let v = md.physical_value(3).unwrap();
+    let v = pd.physical_value(3).unwrap();
     assert!((v - 33.5).abs() < 1e-5, "expected 33.5 dBZ, got {v}");
 }
 
 #[test]
 fn raw_gate_out_of_range_returns_none() {
-    use nexrad_decoder::MomentData;
+    use nexrad_decoder::ProductData;
 
-    let md = MomentData {
+    let pd = ProductData {
         gate_count: 2,
         first_gate_m: 2125,
         gate_width_m: 250,
@@ -267,9 +267,9 @@ fn raw_gate_out_of_range_returns_none() {
         data: vec![100, 200],
     };
 
-    assert!(md.raw_gate(0).is_some());
-    assert!(md.raw_gate(1).is_some());
-    assert!(md.raw_gate(2).is_none(), "out-of-range index should return None");
+    assert!(pd.raw_gate(0).is_some());
+    assert!(pd.raw_gate(1).is_some());
+    assert!(pd.raw_gate(2).is_none(), "out-of-range index should return None");
 }
 
 // ---------------------------------------------------------------------------
@@ -281,7 +281,7 @@ fn start_of_volume_dzdr_scale_and_offset() {
     let data = fixture!("kdox_vcp35_start_of_volume.bin");
     let r = &parse_radial_stream(data).unwrap()[0];
 
-    let dzdr = r.moments.get(&MomentKind::Zdr).expect("no DZDR");
+    let dzdr = r.products.get(&ProductKind::Zdr).expect("no DZDR");
     // Confirmed from binary: scale=32.0, offset=418.0 (CLAUDE.md §Confirmed Test File Values)
     assert!((dzdr.scale - 32.0).abs() < 1e-4, "scale={}", dzdr.scale);
     assert!((dzdr.offset - 418.0).abs() < 1e-4, "offset={}", dzdr.offset);
@@ -292,7 +292,7 @@ fn start_of_volume_dphi_scale_and_offset() {
     let data = fixture!("kdox_vcp35_start_of_volume.bin");
     let r = &parse_radial_stream(data).unwrap()[0];
 
-    let dphi = r.moments.get(&MomentKind::Phi).expect("no DPHI");
+    let dphi = r.products.get(&ProductKind::Phi).expect("no DPHI");
     // Confirmed from binary: scale=2.8361, offset=2.0 (CLAUDE.md §Confirmed Test File Values)
     assert!((dphi.scale - 2.8361).abs() < 1e-4, "scale={}", dphi.scale);
     assert!((dphi.offset - 2.0).abs() < 1e-4, "offset={}", dphi.offset);
@@ -304,7 +304,7 @@ fn start_of_volume_dcfp_gate_geometry() {
     let r = &parse_radial_stream(data).unwrap()[0];
 
     // DCFP on tilt 1 covers the same range as DREF: 1832 gates at 8 bits each.
-    let dcfp = r.moments.get(&MomentKind::Cfp).expect("no DCFP");
+    let dcfp = r.products.get(&ProductKind::Cfp).expect("no DCFP");
     assert_eq!(dcfp.gate_count, 1832);
     assert_eq!(dcfp.word_size, 8);
 }
@@ -315,11 +315,11 @@ fn start_of_volume_dcfp_gate_geometry() {
 
 #[test]
 fn physical_value_16bit_conversion() {
-    use nexrad_decoder::MomentData;
+    use nexrad_decoder::ProductData;
 
     // DZDR calibration constants from the KDOX fixture.
     // raw=0 → None (below SNR); raw=450 → (450 - 418.0) / 32.0 = 1.0 dB ZDR
-    let md = MomentData {
+    let pd = ProductData {
         gate_count: 2,
         first_gate_m: 0,
         gate_width_m: 0,
@@ -332,8 +332,8 @@ fn physical_value_16bit_conversion() {
         ],
     };
 
-    assert!(md.physical_value(0).is_none(), "raw=0 (16-bit) should be None");
-    let v = md.physical_value(1).unwrap();
+    assert!(pd.physical_value(0).is_none(), "raw=0 (16-bit) should be None");
+    let v = pd.physical_value(1).unwrap();
     assert!((v - 1.0).abs() < 1e-5, "expected 1.0 dB ZDR, got {v}");
 }
 

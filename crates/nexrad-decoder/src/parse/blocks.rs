@@ -1,4 +1,4 @@
-use crate::types::volume_constants::VolumeConstants;
+use crate::types::site_parameters::SiteParameters;
 use super::cursor::Cursor;
 
 // All block parsers receive the full body slice and the pointer value from the
@@ -8,7 +8,7 @@ use super::cursor::Cursor;
 
 /// Parse the RVOL (Volume Constants) block. Returns None if the pointer is 0
 /// or if the block cannot be read.
-pub fn parse_rvol(body: &[u8], ptr: u32) -> Option<VolumeConstants> {
+pub fn parse_rvol(body: &[u8], ptr: u32) -> Option<SiteParameters> {
     if ptr == 0 {
         return None;
     }
@@ -37,7 +37,7 @@ pub fn parse_rvol(body: &[u8], ptr: u32) -> Option<VolumeConstants> {
     let vcp_number = c.read_u16_be().ok()?;
     let processing_status = c.read_u16_be().ok()?;
 
-    Some(VolumeConstants {
+    Some(SiteParameters {
         latitude,
         longitude,
         site_amsl_m,
@@ -54,8 +54,8 @@ pub fn parse_rvol(body: &[u8], ptr: u32) -> Option<VolumeConstants> {
 
 /// Radial constants extracted from the RRAD block.
 pub struct RradConstants {
-    pub unamb_range_km: f32,
-    pub nyquist_vel_ms: f32,
+    pub unambiguous_range_km: f32,
+    pub nyquist_velocity_mps: f32,
 }
 
 /// Parse the RRAD (Radial Constants) block. Returns None if the pointer is 0
@@ -81,13 +81,13 @@ pub fn parse_rrad(body: &[u8], ptr: u32) -> Option<RradConstants> {
     let nyquist_raw = c.read_u16_be().ok()?;
 
     // Unit conversion (ICD)
-    let unamb_range_km = unamb_range_raw as f32 / 8.0;
-    let nyquist_vel_ms = nyquist_raw as f32 / 100.0;
+    let unambiguous_range_km = unamb_range_raw as f32 / 8.0;
+    let nyquist_velocity_mps = nyquist_raw as f32 / 100.0;
 
     // v2 detection: block_size >= 32 means radial_flags + spare2 are present
     // between spare and calib_const_h. We don't use calib constants in Phase 2,
     // so we don't need to parse further.
     let _ = block_size;
 
-    Some(RradConstants { unamb_range_km, nyquist_vel_ms })
+    Some(RradConstants { unambiguous_range_km, nyquist_velocity_mps })
 }

@@ -1,4 +1,4 @@
-use radar_workstation::{download_sample, AcquisitionError};
+use nexrad_sample::{download_sample, AcquisitionError};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;

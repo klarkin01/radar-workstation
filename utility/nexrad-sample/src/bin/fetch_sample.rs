@@ -1,4 +1,4 @@
-use radar_workstation::{download_sample, resolve_sample_url};
+use nexrad_sample::{download_sample, resolve_sample_url};
 use reqwest::Url;
 use std::{env, process};
 
