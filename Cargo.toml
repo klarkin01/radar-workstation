@@ -2,6 +2,7 @@
 members = [
     "crates/radar-workstation",
     "crates/nexrad-decoder",
+    "utility/nexrad-sample",
     "utility/radar-viz",
 ]
 resolver = "2"

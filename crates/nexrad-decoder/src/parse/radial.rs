@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::{DecodeError, Radial, RadialStatus};
 use super::blocks::{parse_rvol, parse_rrad};
 use super::cursor::Cursor;
-use super::moment::parse_moment;
+use super::product::parse_product;
 
 // Record layout (offsets from byte 0 of the raw record passed to this function):
 //   [0..12]   CTM header (opaque, skipped)
@@ -40,29 +40,29 @@ pub fn parse_message31(record: &[u8]) -> Result<Radial, DecodeError> {
     let radial_status = RadialStatus::from_code(radial_status_code)
         .ok_or(DecodeError::UnsupportedMessageType { got: radial_status_code })?;
 
-    // Block pointer table (body offset 32): vol_ptr, el_ptr, rad_ptr, then moment ptrs
+    // Block pointer table (body offset 32): vol_ptr, el_ptr, rad_ptr, then product ptrs
     let vol_ptr = c.read_u32_be()?;
     let _el_ptr = c.read_u32_be()?;
     let rad_ptr = c.read_u32_be()?;
 
-    let num_moment_ptrs = (num_data_blks as usize).saturating_sub(3);
-    let mut moment_ptrs = Vec::with_capacity(num_moment_ptrs);
-    for _ in 0..num_moment_ptrs {
-        moment_ptrs.push(c.read_u32_be()?);
+    let num_product_ptrs = (num_data_blks as usize).saturating_sub(3);
+    let mut product_ptrs = Vec::with_capacity(num_product_ptrs);
+    for _ in 0..num_product_ptrs {
+        product_ptrs.push(c.read_u32_be()?);
     }
 
     // Block parsing — soft failures return None and the field defaults or is absent
-    let volume_constants = parse_rvol(body, vol_ptr);
+    let site_parameters = parse_rvol(body, vol_ptr);
 
-    let (unamb_range_km, nyquist_vel_ms) = match parse_rrad(body, rad_ptr) {
-        Some(r) => (r.unamb_range_km, r.nyquist_vel_ms),
+    let (unambiguous_range_km, nyquist_velocity_mps) = match parse_rrad(body, rad_ptr) {
+        Some(r) => (r.unambiguous_range_km, r.nyquist_velocity_mps),
         None => (0.0, 0.0),
     };
 
-    let mut moments = HashMap::with_capacity(num_moment_ptrs);
-    for ptr in moment_ptrs {
-        if let Some((kind, data)) = parse_moment(body, ptr) {
-            moments.insert(kind, data);
+    let mut products = HashMap::with_capacity(num_product_ptrs);
+    for ptr in product_ptrs {
+        if let Some((kind, data)) = parse_product(body, ptr) {
+            products.insert(kind, data);
         }
     }
 
@@ -75,9 +75,9 @@ pub fn parse_message31(record: &[u8]) -> Result<Radial, DecodeError> {
         azimuth_number: az_num,
         radial_status,
         elevation_number: el_num,
-        unamb_range_km,
-        nyquist_vel_ms,
-        volume_constants,
-        moments,
+        unambiguous_range_km,
+        nyquist_velocity_mps,
+        site_parameters,
+        products,
     })
 }

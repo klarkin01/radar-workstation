@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use crate::types::moment::{MomentData, MomentKind};
-use crate::types::volume_constants::VolumeConstants;
+use crate::types::product::{ProductData, ProductKind};
+use crate::types::site_parameters::SiteParameters;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RadialStatus {
@@ -11,7 +11,7 @@ pub enum RadialStatus {
     StartOfVolume,
     EndOfVolume,
     /// SAILS supplemental low-level cut.
-    StartOfElevationSails,
+    SailsCut,
 }
 
 impl RadialStatus {
@@ -22,7 +22,7 @@ impl RadialStatus {
             2 => Some(Self::EndOfElevation),
             3 => Some(Self::StartOfVolume),
             4 => Some(Self::EndOfVolume),
-            5 => Some(Self::StartOfElevationSails),
+            5 => Some(Self::SailsCut),
             _ => None,
         }
     }
@@ -42,12 +42,12 @@ pub struct Radial {
     pub radial_status: RadialStatus,
     pub elevation_number: u8,
     /// Unambiguous range in km. 0.0 if the RRAD block was absent or unreadable.
-    pub unamb_range_km: f32,
+    pub unambiguous_range_km: f32,
     /// Nyquist velocity in m/s. 0.0 if the RRAD block was absent or unreadable.
-    pub nyquist_vel_ms: f32,
+    pub nyquist_velocity_mps: f32,
     /// Site and volume metadata from the RVOL block. Present when the RVOL
     /// block pointer is non-zero. In observed KDOX data the RVOL block is
     /// populated on every radial, not only on `StartOfVolume`.
-    pub volume_constants: Option<VolumeConstants>,
-    pub moments: HashMap<MomentKind, MomentData>,
+    pub site_parameters: Option<SiteParameters>,
+    pub products: HashMap<ProductKind, ProductData>,
 }

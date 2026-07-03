@@ -1,0 +1,23 @@
+[package]
+name = "nexrad-sample"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Developer utility — fetch and inspect NEXRAD chunk files from S3"
+
+[[bin]]
+name = "fetch-sample"
+path = "src/bin/fetch_sample.rs"
+
+[[bin]]
+name = "decode-sample"
+path = "src/bin/decode_sample.rs"
+
+[dependencies]
+nexrad-decoder = { path = "../../crates/nexrad-decoder" }
+radar-workstation = { path = "../../crates/radar-workstation" }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "time"] }
+
+[dev-dependencies]
+tempfile = "3"

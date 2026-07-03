@@ -1,4 +1,4 @@
-use radar_workstation::resolve_sample_url;
+use nexrad_sample::resolve_sample_url;
 use std::env;
 use std::sync::{Mutex, OnceLock};
 

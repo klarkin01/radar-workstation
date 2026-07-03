@@ -1,6 +1,6 @@
 mod blocks;
 mod cursor;
-mod moment;
+mod product;
 mod radial;
 
 use crate::{DecodeError, Radial};

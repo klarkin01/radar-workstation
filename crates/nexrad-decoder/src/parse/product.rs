@@ -1,9 +1,9 @@
-use crate::types::moment::{MomentData, MomentKind};
+use crate::types::product::{ProductData, ProductKind};
 use super::cursor::Cursor;
 
-/// Parse a single moment data block. Returns None if the block cannot be read
-/// or if the block_id is not a known moment type.
-pub fn parse_moment(body: &[u8], ptr: u32) -> Option<(MomentKind, MomentData)> {
+/// Parse a single product data block. Returns None if the block cannot be read
+/// or if the block_id is not a known product type.
+pub fn parse_product(body: &[u8], ptr: u32) -> Option<(ProductKind, ProductData)> {
     if ptr == 0 {
         return None;
     }
@@ -12,11 +12,11 @@ pub fn parse_moment(body: &[u8], ptr: u32) -> Option<(MomentKind, MomentData)> {
 
     // Preamble: block_id(4) + block_size(2) + version(2) = 8 bytes
     let block_id = c.read_array4().ok()?;
-    let kind = MomentKind::from_block_id(&block_id)?;
+    let kind = ProductKind::from_block_id(&block_id)?;
     let _block_size = c.read_u16_be().ok()?;
     let _version = c.read_u16_be().ok()?;
 
-    // Moment data header (20 bytes, at block offset 8)
+    // Product data header (20 bytes, at block offset 8)
     let gate_count = c.read_u16_be().ok()?;
     let first_gate_m = c.read_u16_be().ok()?;
     let gate_width_m = c.read_u16_be().ok()?;
@@ -36,7 +36,7 @@ pub fn parse_moment(body: &[u8], ptr: u32) -> Option<(MomentKind, MomentData)> {
 
     Some((
         kind,
-        MomentData {
+        ProductData {
             gate_count,
             first_gate_m,
             gate_width_m,

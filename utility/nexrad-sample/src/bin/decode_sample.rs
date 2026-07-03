@@ -1,8 +1,8 @@
-/// decode_sample — decode a directory of NEXRAD chunk files and print a summary.
+/// decode-sample — decode a directory of NEXRAD chunk files and print a summary.
 ///
 /// Usage:
-///   decode_sample [DIR]      decode all chunks in DIR
-///   decode_sample            scans downloads/ for chunk directories, decodes each
+///   decode-sample [DIR]      decode all chunks in DIR
+///   decode-sample            scans downloads/ for chunk directories, decodes each
 ///
 /// Prints per-chunk statistics: chunk kind, site, VCP, radial count, tilt inventory,
 /// and moment/gate geometry. Intended for end-to-end pipeline validation during
