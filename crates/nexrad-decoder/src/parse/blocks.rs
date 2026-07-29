@@ -9,17 +9,11 @@ use super::cursor::Cursor;
 /// Parse the RVOL (Volume Constants) block. Returns None if the pointer is 0
 /// or if the block cannot be read.
 pub fn parse_rvol(body: &[u8], ptr: u32) -> Option<SiteParameters> {
-    if ptr == 0 {
-        return None;
-    }
-    let offset = ptr as usize;
-    let mut c = Cursor::at(body, offset).ok()?;
-
-    // Preamble: block_id(4) + block_size(2) = 6 bytes
-    let block_id = c.read_array4().ok()?;
+    let (mut c, block_id) = Cursor::for_block(body, ptr)?;
     if &block_id != b"RVOL" {
         return None;
     }
+    // Preamble: block_id(4) + block_size(2) = 6 bytes
     let _block_size = c.read_u16_be().ok()?;
 
     // Data fields (confirmed offsets — see docs/architecture/nexrad-binary-format.md §8)
@@ -61,17 +55,11 @@ pub struct RradConstants {
 /// Parse the RRAD (Radial Constants) block. Returns None if the pointer is 0
 /// or if the block cannot be read.
 pub fn parse_rrad(body: &[u8], ptr: u32) -> Option<RradConstants> {
-    if ptr == 0 {
-        return None;
-    }
-    let offset = ptr as usize;
-    let mut c = Cursor::at(body, offset).ok()?;
-
-    // Preamble: block_id(4) + block_size(2) = 6 bytes
-    let block_id = c.read_array4().ok()?;
+    let (mut c, block_id) = Cursor::for_block(body, ptr)?;
     if &block_id != b"RRAD" {
         return None;
     }
+    // Preamble: block_id(4) + block_size(2) = 6 bytes
     let block_size = c.read_u16_be().ok()?;
 
     // Data fields common to v1 and v2

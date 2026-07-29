@@ -6,6 +6,12 @@ const VOLUME_HEADER_LEN: usize = 24;
 const BLOCK_LEN_PREFIX: usize = 4;
 const START_SENTINEL: u32 = 0xFFFF_FFFF;
 
+/// Read the 4 big-endian bytes at `pos`. Callers are responsible for ensuring
+/// `pos + 4 <= data.len()`.
+fn read_be4(data: &[u8], pos: usize) -> [u8; 4] {
+    [data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]
+}
+
 /// Which type of NEXRAD real-time chunk this is.
 ///
 /// Detection is based on the first 8 raw bytes before decompression
@@ -27,6 +33,10 @@ pub enum ChunkKind {
 pub enum ChunkError {
     TooShort,
     UnrecognizedFormat,
+    /// The byte-sniffed kind disagrees with the kind the caller expected
+    /// (e.g. derived from the S3 key suffix). Byte-sniffing is authoritative
+    /// for parsing, but a mismatch signals a corrupt or mislabeled chunk.
+    KindMismatch { expected: ChunkKind, detected: ChunkKind },
     Decompression(std::io::Error),
 }
 
@@ -35,6 +45,10 @@ impl std::fmt::Display for ChunkError {
         match self {
             Self::TooShort => write!(f, "chunk data too short to identify"),
             Self::UnrecognizedFormat => write!(f, "unrecognized chunk format"),
+            Self::KindMismatch { expected, detected } => write!(
+                f,
+                "chunk kind mismatch: expected {expected:?}, byte contents indicate {detected:?}"
+            ),
             Self::Decompression(e) => write!(f, "BZ2 decompression error: {e}"),
         }
     }
@@ -64,7 +78,7 @@ pub fn detect_chunk_kind(data: &[u8]) -> Result<ChunkKind, ChunkError> {
     }
     // End before Intermediate: both have BZh9 at offset 4
     if &data[4..8] == b"BZh9" {
-        let prefix = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+        let prefix = i32::from_be_bytes(read_be4(data, 0));
         return Ok(if prefix < 0 { ChunkKind::End } else { ChunkKind::Intermediate });
     }
     // Alternate start detection: BZh9 at volume_header(24) + length_prefix(4) = offset 28
@@ -76,11 +90,21 @@ pub fn detect_chunk_kind(data: &[u8]) -> Result<ChunkKind, ChunkError> {
 
 /// Decompress a raw chunk into a flat NEXRAD message stream.
 ///
+/// `expected` is the kind the caller believes this chunk to be (e.g. derived
+/// from the S3 key suffix). It is cross-checked against the byte-sniffed kind
+/// from [`detect_chunk_kind`], which remains authoritative for how the chunk
+/// is actually parsed; a disagreement returns [`ChunkError::KindMismatch`]
+/// rather than silently trusting either source.
+///
 /// The returned bytes begin at the first CTM header and are ready for
 /// [`nexrad_decoder::parse_radial_stream`]. The 24-byte volume header in
 /// start chunks is stripped; the caller receives only the message stream.
-pub fn decompress_chunk(data: &[u8]) -> Result<Vec<u8>, ChunkError> {
-    match detect_chunk_kind(data)? {
+pub fn decompress_chunk(data: &[u8], expected: ChunkKind) -> Result<Vec<u8>, ChunkError> {
+    let detected = detect_chunk_kind(data)?;
+    if detected != expected {
+        return Err(ChunkError::KindMismatch { expected, detected });
+    }
+    match detected {
         ChunkKind::Start => {
             if data.len() < VOLUME_HEADER_LEN + BLOCK_LEN_PREFIX {
                 return Err(ChunkError::TooShort);
@@ -92,7 +116,7 @@ pub fn decompress_chunk(data: &[u8]) -> Result<Vec<u8>, ChunkError> {
             if data.len() < BLOCK_LEN_PREFIX {
                 return Err(ChunkError::TooShort);
             }
-            let prefix = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+            let prefix = i32::from_be_bytes(read_be4(data, 0));
             let block_len = prefix.unsigned_abs() as usize;
             let compressed = data
                 .get(BLOCK_LEN_PREFIX..BLOCK_LEN_PREFIX + block_len)
@@ -115,12 +139,7 @@ fn decompress_blocks(data: &[u8], has_sentinel: bool) -> Result<Vec<u8>, ChunkEr
     let mut offset = 0;
 
     while offset + BLOCK_LEN_PREFIX <= data.len() {
-        let len_word = u32::from_be_bytes([
-            data[offset],
-            data[offset + 1],
-            data[offset + 2],
-            data[offset + 3],
-        ]);
+        let len_word = u32::from_be_bytes(read_be4(data, offset));
         offset += BLOCK_LEN_PREFIX;
 
         if has_sentinel && len_word == START_SENTINEL {

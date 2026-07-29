@@ -123,18 +123,7 @@ impl S3Poller {
                 params.push(("continuation-token", token.clone()));
             }
 
-            let body = self
-                .client
-                .get(format!("{BUCKET_BASE}/"))
-                .query(&params)
-                .send()
-                .await
-                .map_err(PollError::Http)?
-                .error_for_status()
-                .map_err(PollError::Http)?
-                .bytes()
-                .await
-                .map_err(PollError::Http)?;
+            let body = self.get_bytes(format!("{BUCKET_BASE}/"), &params).await?;
 
             let (page_keys, is_truncated, next_token) = parse_list_xml(&body)?;
             all_keys.extend(page_keys);
@@ -150,9 +139,16 @@ impl S3Poller {
     }
 
     async fn fetch_object(&self, key: &str) -> Result<Vec<u8>, PollError> {
+        self.get_bytes(format!("{BUCKET_BASE}/{key}"), &[]).await
+    }
+
+    /// GETs `url` with optional query `params`, mapping any transport or
+    /// non-2xx-status failure to `PollError::Http`.
+    async fn get_bytes(&self, url: String, params: &[(&str, String)]) -> Result<Vec<u8>, PollError> {
         let bytes = self
             .client
-            .get(format!("{BUCKET_BASE}/{key}"))
+            .get(url)
+            .query(params)
             .send()
             .await
             .map_err(PollError::Http)?
@@ -200,10 +196,10 @@ fn parse_list_xml(body: &[u8]) -> Result<(Vec<String>, bool, Option<String>), Po
 }
 
 fn chunk_kind_from_key(key: &str) -> Option<ChunkKind> {
-    match key.chars().last()? {
-        'S' => Some(ChunkKind::Start),
-        'I' => Some(ChunkKind::Intermediate),
-        'E' => Some(ChunkKind::End),
+    match key.as_bytes().last()? {
+        b'S' => Some(ChunkKind::Start),
+        b'I' => Some(ChunkKind::Intermediate),
+        b'E' => Some(ChunkKind::End),
         _ => None,
     }
 }

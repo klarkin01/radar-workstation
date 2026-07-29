@@ -4,15 +4,9 @@ use super::cursor::Cursor;
 /// Parse a single product data block. Returns None if the block cannot be read
 /// or if the block_id is not a known product type.
 pub fn parse_product(body: &[u8], ptr: u32) -> Option<(ProductKind, ProductData)> {
-    if ptr == 0 {
-        return None;
-    }
-    let offset = ptr as usize;
-    let mut c = Cursor::at(body, offset).ok()?;
-
-    // Preamble: block_id(4) + block_size(2) + version(2) = 8 bytes
-    let block_id = c.read_array4().ok()?;
+    let (mut c, block_id) = Cursor::for_block(body, ptr)?;
     let kind = ProductKind::from_block_id(&block_id)?;
+    // Preamble: block_id(4) + block_size(2) + version(2) = 8 bytes
     let _block_size = c.read_u16_be().ok()?;
     let _version = c.read_u16_be().ok()?;
 

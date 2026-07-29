@@ -1,4 +1,4 @@
-use nexrad_decoder::{parse_radial_stream, ProductKind, RadialStatus};
+use nexrad_decoder::{parse_radial_stream, ProductKind, Radial, RadialStatus};
 
 // Each fixture is a complete Message 31 record (CTM header + message header +
 // body), extracted from real KDOX VCP 35 chunks by gen_fixtures.py. Passing
@@ -9,6 +9,16 @@ macro_rules! fixture {
     ($name:expr) => {
         include_bytes!(concat!("fixtures/", $name))
     };
+}
+
+/// Parses `data` and returns its first radial, for tests that only care
+/// about one record's fields.
+fn first_radial(data: &[u8]) -> Radial {
+    parse_radial_stream(data)
+        .expect("parse failed")
+        .into_iter()
+        .next()
+        .expect("no radials")
 }
 
 // ---------------------------------------------------------------------------
@@ -32,16 +42,18 @@ fn start_of_volume_status_and_geometry() {
 #[test]
 fn start_of_volume_rrad_values() {
     let data = fixture!("kdox_vcp35_start_of_volume.bin");
-    let r = &parse_radial_stream(data).unwrap()[0];
+    let r = first_radial(data);
 
-    assert!((r.unambiguous_range_km - 583.75).abs() < 0.01, "unamb={}", r.unambiguous_range_km);
-    assert!((r.nyquist_velocity_mps - 8.37).abs() < 0.01, "nyquist={}", r.nyquist_velocity_mps);
+    let unamb = r.unambiguous_range_km.expect("RRAD block absent");
+    let nyquist = r.nyquist_velocity_mps.expect("RRAD block absent");
+    assert!((unamb - 583.75).abs() < 0.01, "unamb={unamb}");
+    assert!((nyquist - 8.37).abs() < 0.01, "nyquist={nyquist}");
 }
 
 #[test]
 fn start_of_volume_has_site_parameters() {
     let data = fixture!("kdox_vcp35_start_of_volume.bin");
-    let r = &parse_radial_stream(data).unwrap()[0];
+    let r = first_radial(data);
 
     let sp = r.site_parameters.as_ref().expect("site_parameters absent on StartOfVolume");
     assert_eq!(sp.vcp_number, 35);
@@ -53,7 +65,7 @@ fn start_of_volume_has_site_parameters() {
 #[test]
 fn start_of_volume_products_present() {
     let data = fixture!("kdox_vcp35_start_of_volume.bin");
-    let r = &parse_radial_stream(data).unwrap()[0];
+    let r = first_radial(data);
 
     // Sweep 1 in VCP 35 has dual-pol products but no velocity/spectrum width
     for kind in [ProductKind::Ref, ProductKind::Zdr, ProductKind::Phi, ProductKind::Rho, ProductKind::Cfp] {
@@ -66,7 +78,7 @@ fn start_of_volume_products_present() {
 #[test]
 fn start_of_volume_dref_gate_geometry() {
     let data = fixture!("kdox_vcp35_start_of_volume.bin");
-    let r = &parse_radial_stream(data).unwrap()[0];
+    let r = first_radial(data);
 
     let dref = r.products.get(&ProductKind::Ref).expect("no DREF");
     assert_eq!(dref.gate_count, 1832);
@@ -80,7 +92,7 @@ fn start_of_volume_dref_gate_geometry() {
 #[test]
 fn start_of_volume_drho_gate_geometry() {
     let data = fixture!("kdox_vcp35_start_of_volume.bin");
-    let r = &parse_radial_stream(data).unwrap()[0];
+    let r = first_radial(data);
 
     let drho = r.products.get(&ProductKind::Rho).expect("no DRHO");
     assert_eq!(drho.gate_count, 1192);
@@ -92,7 +104,7 @@ fn start_of_volume_drho_gate_geometry() {
 #[test]
 fn start_of_volume_dzdr_is_16bit() {
     let data = fixture!("kdox_vcp35_start_of_volume.bin");
-    let r = &parse_radial_stream(data).unwrap()[0];
+    let r = first_radial(data);
 
     let dzdr = r.products.get(&ProductKind::Zdr).expect("no DZDR");
     assert_eq!(dzdr.word_size, 16);
@@ -102,7 +114,7 @@ fn start_of_volume_dzdr_is_16bit() {
 #[test]
 fn start_of_volume_physical_value_conversion() {
     let data = fixture!("kdox_vcp35_start_of_volume.bin");
-    let r = &parse_radial_stream(data).unwrap()[0];
+    let r = first_radial(data);
     let dref = r.products.get(&ProductKind::Ref).expect("no DREF");
 
     // At least one gate across 1832 must be non-reserved (even in clear air).
@@ -135,7 +147,7 @@ fn start_of_volume_physical_value_conversion() {
 #[test]
 fn intermediate_status_and_geometry() {
     let data = fixture!("kdox_vcp35_intermediate.bin");
-    let r = &parse_radial_stream(data).unwrap()[0];
+    let r = first_radial(data);
 
     assert_eq!(r.radial_status, RadialStatus::Intermediate);
     assert_eq!(r.elevation_number, 1);
@@ -147,9 +159,11 @@ fn intermediate_status_and_geometry() {
 #[test]
 fn intermediate_rrad_values() {
     let data = fixture!("kdox_vcp35_intermediate.bin");
-    let r = &parse_radial_stream(data).unwrap()[0];
-    assert!((r.unambiguous_range_km - 583.75).abs() < 0.01);
-    assert!((r.nyquist_velocity_mps - 8.37).abs() < 0.01);
+    let r = first_radial(data);
+    let unamb = r.unambiguous_range_km.expect("RRAD block absent");
+    let nyquist = r.nyquist_velocity_mps.expect("RRAD block absent");
+    assert!((unamb - 583.75).abs() < 0.01);
+    assert!((nyquist - 8.37).abs() < 0.01);
 }
 
 // ---------------------------------------------------------------------------
@@ -159,7 +173,7 @@ fn intermediate_rrad_values() {
 #[test]
 fn end_of_elevation_status() {
     let data = fixture!("kdox_vcp35_end_of_elevation.bin");
-    let r = &parse_radial_stream(data).unwrap()[0];
+    let r = first_radial(data);
     assert_eq!(r.radial_status, RadialStatus::EndOfElevation);
     assert_eq!(r.elevation_number, 1);
 }
@@ -171,7 +185,7 @@ fn end_of_elevation_status() {
 #[test]
 fn start_of_elevation_status_and_products() {
     let data = fixture!("kdox_vcp35_start_of_elevation.bin");
-    let r = &parse_radial_stream(data).unwrap()[0];
+    let r = first_radial(data);
 
     assert_eq!(r.radial_status, RadialStatus::StartOfElevation);
     assert_eq!(r.elevation_number, 2);
@@ -188,7 +202,7 @@ fn start_of_elevation_status_and_products() {
 #[test]
 fn start_of_elevation_dvel_gate_geometry() {
     let data = fixture!("kdox_vcp35_start_of_elevation.bin");
-    let r = &parse_radial_stream(data).unwrap()[0];
+    let r = first_radial(data);
 
     // Sweep 2: all products have 1192 gates (confirmed from binary inspection)
     let dvel = r.products.get(&ProductKind::Vel).expect("no DVEL");
@@ -205,7 +219,7 @@ fn start_of_elevation_dvel_gate_geometry() {
 #[test]
 fn end_of_volume_status_and_all_products() {
     let data = fixture!("kdox_vcp35_end_of_volume.bin");
-    let r = &parse_radial_stream(data).unwrap()[0];
+    let r = first_radial(data);
 
     assert_eq!(r.radial_status, RadialStatus::EndOfVolume);
 
@@ -220,7 +234,7 @@ fn end_of_volume_status_and_all_products() {
 #[test]
 fn end_of_volume_dphi_is_16bit() {
     let data = fixture!("kdox_vcp35_end_of_volume.bin");
-    let r = &parse_radial_stream(data).unwrap()[0];
+    let r = first_radial(data);
 
     let dphi = r.products.get(&ProductKind::Phi).expect("no DPHI");
     assert_eq!(dphi.word_size, 16);
@@ -279,7 +293,7 @@ fn raw_gate_out_of_range_returns_none() {
 #[test]
 fn start_of_volume_dzdr_scale_and_offset() {
     let data = fixture!("kdox_vcp35_start_of_volume.bin");
-    let r = &parse_radial_stream(data).unwrap()[0];
+    let r = first_radial(data);
 
     let dzdr = r.products.get(&ProductKind::Zdr).expect("no DZDR");
     // Confirmed from binary: scale=32.0, offset=418.0 (CLAUDE.md §Confirmed Test File Values)
@@ -290,7 +304,7 @@ fn start_of_volume_dzdr_scale_and_offset() {
 #[test]
 fn start_of_volume_dphi_scale_and_offset() {
     let data = fixture!("kdox_vcp35_start_of_volume.bin");
-    let r = &parse_radial_stream(data).unwrap()[0];
+    let r = first_radial(data);
 
     let dphi = r.products.get(&ProductKind::Phi).expect("no DPHI");
     // Confirmed from binary: scale=2.8361, offset=2.0 (CLAUDE.md §Confirmed Test File Values)
@@ -301,7 +315,7 @@ fn start_of_volume_dphi_scale_and_offset() {
 #[test]
 fn start_of_volume_dcfp_gate_geometry() {
     let data = fixture!("kdox_vcp35_start_of_volume.bin");
-    let r = &parse_radial_stream(data).unwrap()[0];
+    let r = first_radial(data);
 
     // DCFP on sweep 1 covers the same range as DREF: 1832 gates at 8 bits each.
     let dcfp = r.products.get(&ProductKind::Cfp).expect("no DCFP");
