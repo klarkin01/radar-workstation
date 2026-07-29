@@ -182,11 +182,7 @@ fn parse_list_xml(body: &[u8]) -> Result<(Vec<String>, bool, Option<String>), Po
                 in_tag = Some(String::from_utf8_lossy(e.name().as_ref()).into_owned());
             }
             Event::Text(e) => {
-                let text = e
-                    .unescape()
-                    .map_err(quick_xml::Error::from)
-                    .map_err(PollError::Xml)?
-                    .into_owned();
+                let text = e.unescape().map_err(PollError::Xml)?.into_owned();
                 match in_tag.as_deref() {
                     Some("Key") => keys.push(text),
                     Some("IsTruncated") => is_truncated = text == "true",

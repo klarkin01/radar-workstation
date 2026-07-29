@@ -15,7 +15,7 @@ before it can be downloaded and decoded.
 
 **Real-time chunk stream** (`unidata-nexrad-level2-chunks`)
 Individual data chunks delivered to S3 as the radar antenna rotates. Each chunk
-represents approximately 120 radials (~100° of azimuthal coverage at one tilt). Chunks
+represents approximately 120 radials (~100° of azimuthal coverage at one sweep). Chunks
 are available within seconds of the antenna completing that portion of the scan. Chunks
 persist for a maximum of 24 hours before being purged.
 
@@ -37,7 +37,7 @@ The chunk stream format was empirically validated using the inspection utilities
 ## Decision
 The real-time chunk stream (`unidata-nexrad-level2-chunks`) is the primary data source
 for the application. The data pipeline consumes chunks as they arrive and begins
-rendering as soon as the first complete tilt is available.
+rendering as soon as the first complete sweep is available.
 
 Assembled volume files (`unidata-nexrad-level2`) are retained as a secondary source
 for non-real-time use cases: loading historical events, testing, and fallback if the
@@ -45,14 +45,14 @@ chunk stream is unavailable.
 
 ## Rationale
 
-**Latency.** The lowest elevation tilt (0.5°) completes approximately 30-60 seconds
-into a volume scan. Chunk-based ingestion allows this tilt to be displayed while the
+**Latency.** The lowest elevation sweep (0.5°) completes approximately 30-60 seconds
+into a volume scan. Chunk-based ingestion allows this sweep to be displayed while the
 antenna is still scanning higher elevations. Volume-based ingestion requires waiting
 for the entire scan to complete — up to 5 minutes later. During rapidly evolving
 severe weather events this latency difference is operationally significant.
 
 **Alignment with operational practice.** NWS meteorologists working on AWIPS workstations
-consume the LDM stream directly and see each tilt as it completes. GR2Analyst's
+consume the LDM stream directly and see each sweep as it completes. GR2Analyst's
 volume-based approach is an implementation simplification that trades latency for
 development convenience. This application targets the same operational context as AWIPS
 and should match its data currency.
@@ -88,8 +88,8 @@ sequence numbers (embedded in the S3 object key) provide ordering. The pipeline 
 handle missing chunks gracefully without stalling.
 
 **Partial scan rendering.** The render loop must be capable of displaying an in-progress
-volume — a `VolumeScan` that has some tilts fully populated and others absent. This is
-a feature, not a limitation: users see the lowest tilt within ~60 seconds of scan start
+volume — a `VolumeScan` that has some sweeps fully populated and others absent. This is
+a feature, not a limitation: users see the lowest sweep within ~60 seconds of scan start
 rather than waiting for the full volume.
 
 **24-hour chunk retention.** Chunks are purged after 24 hours. Historical analysis

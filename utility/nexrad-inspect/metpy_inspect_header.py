@@ -74,12 +74,12 @@ def decode_rad_status(code: int) -> str:
 def decode_vcp(vcp: int) -> str:
     """Translate VCP number to common operational description."""
     mapping = {
-        11: "VCP 11 — Severe Weather (14 tilts, ~5 min)",
-        12: "VCP 12 — Severe Weather (14 tilts, SAILS capable)",
+        11: "VCP 11 — Severe Weather (14 sweeps, ~5 min)",
+        12: "VCP 12 — Severe Weather (14 sweeps, SAILS capable)",
         21: "VCP 21 — Precipitation/Clear Air (~6 min)",
         31: "VCP 31 — Clear Air (long PRI, ~10 min)",
         32: "VCP 32 — Clear Air (short PRI)",
-        35: "VCP 35 — SAILS (6 tilts, ~3.5 min)",
+        35: "VCP 35 — SAILS (6 sweeps, ~3.5 min)",
         80: "VCP 80 — Maintenance/Test",
         112: "VCP 112 — AVSET Severe Weather",
         212: "VCP 212 — AVSET Precipitation",

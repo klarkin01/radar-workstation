@@ -36,13 +36,13 @@ AWAITING_DATA
   │  ← -I chunk arrives
   ▼
 ACCUMULATING
-  │  ← -I chunks continue arriving; radials accumulated per tilt
+  │  ← -I chunks continue arriving; radials accumulated per sweep
   │
-  │  Tilt closure signals (any one is sufficient):
+  │  Sweep closure signals (any one is sufficient):
   ├─ (a) radial with status End of Elevation arrives
-  │       → close current tilt, signal compute layer
+  │       → close current sweep, signal compute layer
   ├─ (b) radial with new elevation number arrives (no End of Elevation seen)
-  │       → close previous tilt as incomplete, signal compute layer, begin new tilt
+  │       → close previous sweep as incomplete, signal compute layer, begin new sweep
   │
   │  Volume exit conditions:
   │
@@ -51,17 +51,17 @@ ACCUMULATING
   │       → IDLE
   │
   ├─ (2) new -S chunk arrives before -E
-  │       close current tilt and VolumeScan as Superseded
+  │       close current sweep and VolumeScan as Superseded
   │       → AWAITING_DATA (begin new volume immediately)
   │
   └─ (3) watchdog timeout (no chunk for ~10-15 minutes)
-          close current tilt and VolumeScan as TimedOut
+          close current sweep and VolumeScan as TimedOut
           → IDLE
 ```
 
 **Late data discard rule:** any radial whose elevation number matches an already-closed
-tilt is discarded. Tilt closure is permanent. Once a tilt has been handed to the compute
-layer it is immutable — retroactively modifying a rendered tilt would require re-running
+sweep is discarded. Sweep closure is permanent. Once a sweep has been handed to the compute
+layer it is immutable — retroactively modifying a rendered sweep would require re-running
 the compute pass, introduce texture synchronization hazards, and silently change data
 already displayed to the user. A visible gap is preferable to invisible data modification.
 
@@ -82,7 +82,7 @@ visual indicator that a volume is incomplete. No data is withheld or suppressed 
 
 **Missing `-I` chunk**
 
-Impact: a gap in azimuthal coverage for that tilt — typically ~100° of missing radials.
+Impact: a gap in azimuthal coverage for that sweep — typically ~100° of missing radials.
 
 Handling: the `VolumeScan` represents absent azimuths explicitly as missing data, not
 as zeroes or interpolated values. The pipeline continues accumulating subsequent chunks
@@ -104,7 +104,7 @@ A warning is logged. Decoding proceeds.
 
 **Missing `-E` chunk**
 
-Impact: the final ~100° of the last tilt is absent, and the explicit end-of-volume
+Impact: the final ~100° of the last sweep is absent, and the explicit end-of-volume
 signal is never received.
 
 Handling: volume completion is detected by two additional signals that do not depend
@@ -128,7 +128,7 @@ attempting to infer completion from radial status alone.
 **Waiting window for end-of-elevation signal**
 
 A waiting window was considered: when a new elevation number is detected without a
-prior End of Elevation radial, hold the previous tilt open for a short period (e.g.
+prior End of Elevation radial, hold the previous sweep open for a short period (e.g.
 2-3 seconds) before closing it, in case the end-of-elevation chunk arrives late.
 
 This was rejected for three reasons:
@@ -140,13 +140,13 @@ This was rejected for three reasons:
    signal is a dropped chunk, meaning the data genuinely never arrived. No waiting
    window recovers from that.
 
-2. **It degrades latency unconditionally.** Every tilt would render slightly later,
+2. **It degrades latency unconditionally.** Every sweep would render slightly later,
    even when nothing is missing, in order to defend against a failure mode that almost
    never occurs. This undermines the primary advantage of the chunk stream over
    assembled volume files.
 
 3. **It adds implementation complexity for no observed benefit.** A waiting window
-   requires a per-tilt timer, a tentatively-closed tilt state, and a late-data
+   requires a per-sweep timer, a tentatively-closed sweep state, and a late-data
    reconciliation path. This complexity must be maintained and tested. If operational
    experience reveals that out-of-order delivery is causing visible gaps in practice,
    a waiting window can be added then. It is not warranted upfront.
@@ -163,14 +163,14 @@ This was rejected for three reasons:
 - The compute layer and render loop receive `VolumeScan` structs that may be incomplete.
   Both must be written to handle partial volumes without assuming full coverage.
 
-- Partial-scan rendering — displaying completed tilts before the volume is closed — is
-  an explicit design goal, not a side effect. Each tilt closure triggers an incremental
+- Partial-scan rendering — displaying completed sweeps before the volume is closed — is
+  an explicit design goal, not a side effect. Each sweep closure triggers an incremental
   render signal regardless of overall volume completion status.
 
-- Tilt closure is permanent. The compute layer and render loop must never assume a
-  closed tilt will be modified after it has been handed off.
+- Sweep closure is permanent. The compute layer and render loop must never assume a
+  closed sweep will be modified after it has been handed off.
 
-- Late-arriving radials for closed tilts are discarded and logged. This is the correct
+- Late-arriving radials for closed sweeps are discarded and logged. This is the correct
   behavior: a visible gap is more honest than silent retroactive data modification.
 
 - The pipeline never blocks waiting for a missing chunk or a missing end-of-elevation

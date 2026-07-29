@@ -55,12 +55,12 @@ fn start_of_volume_products_present() {
     let data = fixture!("kdox_vcp35_start_of_volume.bin");
     let r = &parse_radial_stream(data).unwrap()[0];
 
-    // Tilt 1 in VCP 35 has dual-pol products but no velocity/spectrum width
+    // Sweep 1 in VCP 35 has dual-pol products but no velocity/spectrum width
     for kind in [ProductKind::Ref, ProductKind::Zdr, ProductKind::Phi, ProductKind::Rho, ProductKind::Cfp] {
         assert!(r.products.contains_key(&kind), "missing product {kind:?}");
     }
-    assert!(!r.products.contains_key(&ProductKind::Vel), "unexpected VEL on tilt 1");
-    assert!(!r.products.contains_key(&ProductKind::SpectrumWidth), "unexpected SW on tilt 1");
+    assert!(!r.products.contains_key(&ProductKind::Vel), "unexpected VEL on sweep 1");
+    assert!(!r.products.contains_key(&ProductKind::SpectrumWidth), "unexpected SW on sweep 1");
 }
 
 #[test]
@@ -165,7 +165,7 @@ fn end_of_elevation_status() {
 }
 
 // ---------------------------------------------------------------------------
-// Start of Elevation (tilt 2 — Doppler-only, 3 products)
+// Start of Elevation (sweep 2 — Doppler-only, 3 products)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -176,7 +176,7 @@ fn start_of_elevation_status_and_products() {
     assert_eq!(r.radial_status, RadialStatus::StartOfElevation);
     assert_eq!(r.elevation_number, 2);
 
-    // Tilt 2 in VCP 35 is a Doppler-only tilt: REF + VEL + SW, no dual-pol
+    // Sweep 2 in VCP 35 is a Doppler-only sweep: REF + VEL + SW, no dual-pol
     assert!(r.products.contains_key(&ProductKind::Ref));
     assert!(r.products.contains_key(&ProductKind::Vel));
     assert!(r.products.contains_key(&ProductKind::SpectrumWidth));
@@ -190,7 +190,7 @@ fn start_of_elevation_dvel_gate_geometry() {
     let data = fixture!("kdox_vcp35_start_of_elevation.bin");
     let r = &parse_radial_stream(data).unwrap()[0];
 
-    // Tilt 2: all products have 1192 gates (confirmed from binary inspection)
+    // Sweep 2: all products have 1192 gates (confirmed from binary inspection)
     let dvel = r.products.get(&ProductKind::Vel).expect("no DVEL");
     assert_eq!(dvel.gate_count, 1192);
     assert_eq!(dvel.word_size, 8);
@@ -199,7 +199,7 @@ fn start_of_elevation_dvel_gate_geometry() {
 }
 
 // ---------------------------------------------------------------------------
-// End of Volume (tilt 16 — all 7 products)
+// End of Volume (sweep 16 — all 7 products)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -273,7 +273,7 @@ fn raw_gate_out_of_range_returns_none() {
 }
 
 // ---------------------------------------------------------------------------
-// Dual-pol calibration constants (scale/offset) — tilt 1 fixture
+// Dual-pol calibration constants (scale/offset) — sweep 1 fixture
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -303,7 +303,7 @@ fn start_of_volume_dcfp_gate_geometry() {
     let data = fixture!("kdox_vcp35_start_of_volume.bin");
     let r = &parse_radial_stream(data).unwrap()[0];
 
-    // DCFP on tilt 1 covers the same range as DREF: 1832 gates at 8 bits each.
+    // DCFP on sweep 1 covers the same range as DREF: 1832 gates at 8 bits each.
     let dcfp = r.products.get(&ProductKind::Cfp).expect("no DCFP");
     assert_eq!(dcfp.gate_count, 1832);
     assert_eq!(dcfp.word_size, 8);

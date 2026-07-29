@@ -283,7 +283,7 @@ def print_msg31_radial(m: dict, index: int) -> None:
         f"  {index:<5} "
         f"Az {h['az_angle']:>7.3f}°  "
         f"El {h['el_angle']:>6.3f}°  "
-        f"Tilt {h['el_num']:>2}  "
+        f"Sweep {h['el_num']:>2}  "
         f"Rad {h['az_num']:>4}  "
         f"Status: {status:<26}  "
         f"VCP {vcp:<5}  "

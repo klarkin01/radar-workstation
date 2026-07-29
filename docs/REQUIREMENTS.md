@@ -27,16 +27,20 @@ the standard against which professional usability is measured.
 
 ### 2.1 Data Acquisition
 
-**FR-DA-1.** The application must fetch NEXRAD Level II data from the NOAA AWS S3
-public bucket (`s3://noaa-nexrad-level2`) via HTTPS. No authentication, API key, or
-AWS SDK is required — access uses plain HTTP GET.
+**FR-DA-1.** The application must fetch NEXRAD Level II data from the real-time chunk
+stream (`s3://unidata-nexrad-level2-chunks`) via HTTPS, per ADR-0011. No authentication,
+API key, or AWS SDK is required — access uses the `ListObjectsV2` REST API and plain
+HTTP GET. Assembled volume files (`s3://unidata-nexrad-level2`) are retained as a
+secondary source for historical playback, testing, and chunk-stream fallback.
 
-**FR-DA-2.** The application must poll for new volume scans on a configurable interval.
-The default polling interval is 30 seconds. Polling must not block the render loop or
-UI.
+**FR-DA-2.** The application must poll the chunk bucket listing for new chunk keys on
+a configurable interval (implementation default: 5 seconds). Polling must not block the
+render loop or UI.
 
-**FR-DA-3.** On launch, the application must fetch and display the most recent available
-scan for the selected site before accepting the next polling cycle.
+**FR-DA-3.** On launch, the application must begin consuming the live chunk stream for
+the selected site and display each sweep as it completes — per the partial-scan
+rendering goal in ADR-0012 — rather than waiting for a complete volume before first
+render.
 
 **FR-DA-4.** On site change, the application must immediately cancel the current polling
 task, clear site-specific state, and begin fetching the most recent scan for the new
@@ -53,10 +57,17 @@ as transparent until delivered.
 **FR-DA-7.** The application must fetch placefile data via HTTP or HTTPS from
 user-configured URLs, on a per-placefile polling interval.
 
-**FR-DA-8.** **[OPEN — Q3]** Fallback data source behavior: if AWS S3 is unavailable,
-define whether the application falls back to an alternate source (e.g., Iowa State
-Mesonet) or displays a degraded-mode error. Primary source (AWS S3) is confirmed.
-Fallback behavior is unresolved.
+**FR-DA-8.** **[OPEN — Q14]** Fallback data source behavior: ADR-0011 establishes
+assembled volume files (`unidata-nexrad-level2`) as a secondary source if the chunk
+stream is unavailable, but the failover logic itself — detecting chunk-stream
+unavailability, switching over, and recovering back to the chunk stream — is
+unresolved. Whether a further fallback beyond Unidata's AWS infrastructure (e.g., Iowa
+State Mesonet) is warranted is also unresolved.
+
+**FR-DA-9.** The application must assemble the incoming chunk stream into `VolumeScan`s
+using the volume assembly state machine defined in ADR-0012, including explicit
+handling of missing `-S`, `-I`, and `-E` chunks, permanent discard of late-arriving
+radials for already-closed sweeps, and a watchdog timeout for stalled volumes.
 
 ---
 
@@ -65,8 +76,10 @@ Fallback behavior is unresolved.
 **FR-ND-1.** The decoder must parse NEXRAD Level II archive format files (WSR-88D),
 bzip2 compressed, into an internal `VolumeScan` representation.
 
-**FR-ND-2.** The decoder must support both per-radial (legacy) and Message 31 format
-variants.
+**FR-ND-2.** The decoder must support the Message 31 format, which is the only format
+produced by the real-time chunk stream (ADR-0011) and by modern assembled volume files.
+Legacy per-radial (Message 1, pre-2008 archives) support is explicitly out of scope —
+see Section 6.
 
 **FR-ND-3.** The decoder must support both standard-resolution and super-resolution
 scan variants.
@@ -95,14 +108,14 @@ non-dual-pol variants, and both resolution variants.
 ### 2.3 Radar Products
 
 **FR-RP-1.** The application must display the following base products for all available
-elevation tilts:
+elevation sweeps:
 - Base reflectivity
 - Base velocity
 - Spectrum width
 
 **FR-RP-2.** The application must derive and display the following products from the
 decoded volume scan:
-- Echo Tops (derived from multi-tilt reflectivity)
+- Echo Tops (derived from multi-sweep reflectivity)
 - VIL — Vertically Integrated Liquid (derived from reflectivity)
 
 **FR-RP-3.** **[OPEN — Q8]** Dual-pol products (ZDR, CC, KDP): whether these are
@@ -121,8 +134,8 @@ or a range-folding indicator only is unresolved.
 compute layer before reaching the render loop. The render loop must not perform color
 mapping or product derivation.
 
-**FR-RP-7.** Switching between products or elevation tilts must not require re-fetching
-or re-computing data. Product and tilt switches are GPU state changes only.
+**FR-RP-7.** Switching between products or elevation sweeps must not require re-fetching
+or re-computing data. Product and sweep switches are GPU state changes only.
 
 ---
 
@@ -159,7 +172,7 @@ not cause a perceptible frame rate drop.
 first scan after launch or site change.
 
 **FR-DR-7.** The status bar must display: active site identifier, active product and
-tilt, scan timestamp, polling status, and any active error conditions.
+sweep, scan timestamp, polling status, and any active error conditions.
 
 ---
 
@@ -235,10 +248,10 @@ input.
 **FR-NI-2.** The user must be able to zoom using mouse wheel and keyboard input.
 
 **FR-NI-3.** The user must be able to switch the active product and active elevation
-tilt via keyboard input without requiring mouse interaction.
+sweep via keyboard input without requiring mouse interaction.
 
 **FR-NI-4.** Pan and zoom state must be preserved across: new scan arrival, product
-and tilt changes, placefile updates, and window resize. The view must never reset or
+and sweep changes, placefile updates, and window resize. The view must never reset or
 jump due to a data event. The user's spatial context is inviolable.
 
 ---
@@ -386,7 +399,7 @@ that approval.
 ### 4.4 Usability
 
 **NFR-UX-1.** The application must be operable entirely by keyboard for all primary
-workflows: site selection, product switching, tilt switching, and navigation. Mouse
+workflows: site selection, product switching, sweep switching, and navigation. Mouse
 is supplementary, not required.
 
 **NFR-UX-2.** The interface must be spatially stable. The user's view position must
@@ -432,15 +445,15 @@ the authoritative definition of "done" for v1.0.
 ### In Scope
 
 - Single-site NEXRAD Level II analysis for all operational WSR-88D sites
-- Base products: reflectivity, velocity, spectrum width (all tilts)
+- Base products: reflectivity, velocity, spectrum width (all sweeps)
 - Derived products: Echo Tops, VIL
-- Full tilt set access and tilt switching
+- Full sweep set access and sweep switching
 - Bundled vector map overlays: counties, states, country boundaries, major highways
 - Pluggable XYZ map imagery tile provider (USGS default)
 - On-disk tile cache
 - GRLevelX placefile support (minimum viable subset — FR-PF-3)
 - User-configurable placefile URLs with polling
-- Keyboard-driven product, tilt, and navigation controls
+- Keyboard-driven product, sweep, and navigation controls
 - Bundled default color tables for all in-scope products
 - User-supplied color table support **[OPEN — Q11]**
 - Configuration persistence across restarts
@@ -467,6 +480,8 @@ the authoritative definition of "done" for v1.0.
 - Cloud sync or account system (contradicts the security and privacy principles)
 - Telemetry or usage analytics (prohibited by BC-2)
 - Any network connection not enumerated in BC-1
+- Legacy per-radial (Message 1) format support for pre-2008 archives — the real-time
+  chunk stream and all modern archived volumes use Message 31 exclusively (FR-ND-2)
 
 ---
 
@@ -479,7 +494,7 @@ of the relevant subsystem begins.
 
 | ID | Requirement | Blocked On |
 |---|---|---|
-| FR-DA-8 | Fallback NEXRAD data source behavior | Q3 |
+| FR-DA-8 | Fallback NEXRAD data source behavior | Q14 |
 | FR-MU-5 | Tile cache maximum size and configurability | Q7 |
 | FR-MU-6 | Cross-instance tile cache sharing | Q5 |
 | FR-RP-3 | Dual-pol products in v1.0 | Q8 |

@@ -4,7 +4,7 @@
 ///   decode-sample [DIR]      decode all chunks in DIR
 ///   decode-sample            scans downloads/ for chunk directories, decodes each
 ///
-/// Prints per-chunk statistics: chunk kind, site, VCP, radial count, tilt inventory,
+/// Prints per-chunk statistics: chunk kind, site, VCP, radial count, sweep inventory,
 /// and moment/gate geometry. Intended for end-to-end pipeline validation during
 /// development; not a production binary.
 use std::{
@@ -14,7 +14,7 @@ use std::{
     process,
 };
 
-use nexrad_decoder::{parse_radial_stream, MomentKind, RadialStatus};
+use nexrad_decoder::{parse_radial_stream, ProductKind, RadialStatus};
 use radar_workstation::{decompress_chunk, detect_chunk_kind, ChunkKind};
 
 fn main() {
@@ -80,8 +80,8 @@ fn decode_dir(dir: &Path) -> Result<(), String> {
 
     println!("=== {} ({} chunks) ===", dir.display(), files.len());
 
-    // Tilt inventory across the whole volume: elevation_number → (mean_angle, radials, moments)
-    let mut volume_tilts: HashMap<u8, TiltStats> = HashMap::new();
+    // Sweep inventory across the whole volume: elevation_number → (mean_angle, radials, moments)
+    let mut volume_sweeps: HashMap<u8, SweepStats> = HashMap::new();
     let mut volume_radials = 0usize;
 
     for path in &files {
@@ -112,13 +112,13 @@ fn decode_dir(dir: &Path) -> Result<(), String> {
         let status_str = format_status_counts(&status_counts);
         println!("  {} radials  {status_str}", radials.len());
 
-        // Accumulate per-tilt stats for the volume summary
+        // Accumulate per-sweep stats for the volume summary
         for r in &radials {
-            let tilt = volume_tilts.entry(r.elevation_number).or_default();
-            tilt.elevation_angles.push(r.elevation_deg);
-            tilt.radial_count += 1;
-            for (kind, md) in &r.moments {
-                tilt.moments.entry(*kind).or_insert(md.gate_count);
+            let sweep = volume_sweeps.entry(r.elevation_number).or_default();
+            sweep.elevation_angles.push(r.elevation_deg);
+            sweep.radial_count += 1;
+            for (kind, md) in &r.products {
+                sweep.moments.entry(*kind).or_insert(md.gate_count);
             }
         }
     }
@@ -126,29 +126,29 @@ fn decode_dir(dir: &Path) -> Result<(), String> {
     // Volume summary
     if volume_radials > 0 {
         let moment_labels = [
-            (MomentKind::Ref, "DREF"),
-            (MomentKind::Vel, "DVEL"),
-            (MomentKind::Sw,  "DSW "),
-            (MomentKind::Zdr, "DZDR"),
-            (MomentKind::Phi, "DPHI"),
-            (MomentKind::Rho, "DRHO"),
-            (MomentKind::Cfp, "DCFP"),
+            (ProductKind::Ref, "DREF"),
+            (ProductKind::Vel, "DVEL"),
+            (ProductKind::SpectrumWidth, "DSW "),
+            (ProductKind::Zdr, "DZDR"),
+            (ProductKind::Phi, "DPHI"),
+            (ProductKind::Rho, "DRHO"),
+            (ProductKind::Cfp, "DCFP"),
         ];
 
         println!();
-        println!("  Volume: {volume_radials} total radials across {} tilts", volume_tilts.len());
-        println!("  {:>4}  {:>6}  {:>7}  moments", "Tilt", "ElAngle", "Radials");
-        let mut tilt_order: Vec<u8> = volume_tilts.keys().copied().collect();
-        tilt_order.sort_unstable();
-        for el_num in &tilt_order {
-            let tilt = &volume_tilts[el_num];
-            let mean = tilt.elevation_angles.iter().sum::<f32>() / tilt.elevation_angles.len() as f32;
+        println!("  Volume: {volume_radials} total radials across {} sweeps", volume_sweeps.len());
+        println!("  {:>4}  {:>6}  {:>7}  moments", "Sweep", "ElAngle", "Radials");
+        let mut sweep_order: Vec<u8> = volume_sweeps.keys().copied().collect();
+        sweep_order.sort_unstable();
+        for el_num in &sweep_order {
+            let sweep = &volume_sweeps[el_num];
+            let mean = sweep.elevation_angles.iter().sum::<f32>() / sweep.elevation_angles.len() as f32;
             let moments: Vec<String> = moment_labels
                 .iter()
-                .filter(|(k, _)| tilt.moments.contains_key(k))
-                .map(|(k, name)| format!("{}({}g)", name, tilt.moments[k]))
+                .filter(|(k, _)| sweep.moments.contains_key(k))
+                .map(|(k, name)| format!("{}({}g)", name, sweep.moments[k]))
                 .collect();
-            println!("  {:>4}  {:>6.2}°  {:>7}  {}", el_num, mean, tilt.radial_count, moments.join("  "));
+            println!("  {:>4}  {:>6.2}°  {:>7}  {}", el_num, mean, sweep.radial_count, moments.join("  "));
         }
     }
     println!();
@@ -157,10 +157,10 @@ fn decode_dir(dir: &Path) -> Result<(), String> {
 }
 
 #[derive(Default)]
-struct TiltStats {
+struct SweepStats {
     elevation_angles: Vec<f32>,
     radial_count: u32,
-    moments: HashMap<MomentKind, u16>,
+    moments: HashMap<ProductKind, u16>,
 }
 
 fn count_statuses(radials: &[nexrad_decoder::Radial]) -> [u32; 6] {
@@ -172,7 +172,7 @@ fn count_statuses(radials: &[nexrad_decoder::Radial]) -> [u32; 6] {
             RadialStatus::EndOfElevation       => 2,
             RadialStatus::StartOfVolume        => 3,
             RadialStatus::EndOfVolume          => 4,
-            RadialStatus::StartOfElevationSails => 5,
+            RadialStatus::SailsCut              => 5,
         };
         counts[i] += 1;
     }

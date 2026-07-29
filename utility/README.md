@@ -14,9 +14,18 @@ session's purpose.
 
 ## Contents
 
-| Script | Purpose |
+| Path | Purpose |
 |---|---|
-| `nexrad-inspect/inspect_header.py` | Dump and summarize Level II file headers |
+| `nexrad-inspect/metpy_inspect_header.py` | Dump and summarize Level II file headers (site constants, sweep summary, radial detail) |
+| `nexrad-inspect/metpy_inspect_metadata.py` | Inspect NEXRAD Level II metadata fields via MetPy |
+| `nexrad-inspect/metpy_inspect_compression.py` | Check the internal compression format of a Level II file |
+| `nexrad-inspect/inspect_chunk_start.py` | Decompress and inspect a real-time LDM start (`-S`) chunk |
+| `nexrad-inspect/inspect_geometry.py` | Inspect NEXRAD scan geometry (gate spacing, sweep structure) |
+| `nexrad-inspect/inspect_messages.py` | Dump raw NEXRAD Level II messages |
+| `nexrad-inspect/nexrad_msg31.py` | Reference Python decoder for Message 31 radials (ICD 2620002), used as a cross-check oracle |
+| `nexrad-inspect/gen_fixtures.py` | Generate binary test fixtures for `nexrad-decoder`'s unit tests |
+| `nexrad-sample/` (Rust) | Fetch (`fetch-sample`) and decode (`decode-sample`) NEXRAD chunk files from S3 for manual inspection |
+| `radar-viz/` (Rust) | Render a decoded volume scan to a PNG PPI image for visual verification — see its own README |
 
 ---
 
@@ -25,7 +34,7 @@ session's purpose.
 Python utilities for inspecting NEXRAD Level II archive files using
 [MetPy](https://unidata.github.io/MetPy/latest/index.html) as a well-tested
 independent decoder. The primary use case is cross-validating the Rust decoder
-in `crates/radar-decoder` against MetPy's output, field by field.
+in `crates/nexrad-decoder` against MetPy's output, field by field.
 
 ### Dependencies
 
@@ -36,7 +45,7 @@ pip install metpy numpy
 No virtual environment is required for simple use, though one is recommended
 if you're working across multiple projects.
 
-### inspect_header.py
+### metpy_inspect_header.py
 
 Reads a Level II archive and prints a structured summary of:
 
@@ -52,22 +61,22 @@ Reads a Level II archive and prints a structured summary of:
 
 ```bash
 # Print volume header, site constants, and sweep summary
-python inspect_header.py /path/to/KXXX20240501_120000_V06
+python metpy_inspect_header.py /path/to/KXXX20240501_120000_V06
 
 # Detailed radial headers for sweep 0 (first 10 radials)
-python inspect_header.py /path/to/file --sweep 0
+python metpy_inspect_header.py /path/to/file --sweep 0
 
 # More radials
-python inspect_header.py /path/to/file --sweep 0 --radials 50
+python metpy_inspect_header.py /path/to/file --sweep 0 --radials 50
 
 # Moment statistics for sweep 2
-python inspect_header.py /path/to/file --sweep 2 --moments
+python metpy_inspect_header.py /path/to/file --sweep 2 --moments
 
 # Raw namedtuple dump (useful for finding field names during decoder development)
-python inspect_header.py /path/to/file --raw
+python metpy_inspect_header.py /path/to/file --raw
 
 # All of the above at once
-python inspect_header.py /path/to/file --sweep 0 --radials 20 --moments --raw
+python metpy_inspect_header.py /path/to/file --sweep 0 --radials 20 --moments --raw
 ```
 
 Accepts `.ar2v`, `.gz`, and `.bz2` files. MetPy handles decompression
@@ -86,8 +95,11 @@ See `.gitignore` for the exclusion patterns.
 
 Sample files can be obtained from:
 
-- **NOAA NEXRAD S3 archive (free, no auth):**
-  `s3://noaa-nexrad-level2/<YYYY>/<MM>/<DD>/<SITE>/`
+- **Unidata NEXRAD S3 archive (free, no auth, current):**
+  `s3://unidata-nexrad-level2/<YYYY>/<MM>/<DD>/<SITE>/` for assembled volume files, or
+  `s3://unidata-nexrad-level2-chunks/<SITE>/<YYYY>/<MM>/<DD>/<HH>/` for real-time
+  chunks (chunks persist 24 hours). The legacy `noaa-nexrad-level2` bucket stopped
+  receiving updates September 1, 2025 but retains historical data through that date.
   Browse at [https://registry.opendata.aws/noaa-nexrad/](https://registry.opendata.aws/noaa-nexrad/)
 
 - **Iowa State IEM archive:**
