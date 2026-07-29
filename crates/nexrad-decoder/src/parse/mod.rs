@@ -11,6 +11,9 @@ const CTM_HEADER_SIZE: usize = 12;
 const MSG_HEADER_SIZE: usize = 16;
 const LEGACY_MSG_SIZE: usize = 2432;
 const SIZE_HW_OFFSET: usize = CTM_HEADER_SIZE;
+/// Chunks carry 120 Message 31 radials in observed data; used only as a
+/// `with_capacity` hint to avoid reallocation growth, not a hard limit.
+const TYPICAL_RADIALS_PER_CHUNK: usize = 120;
 
 /// Parse all Message 31 radials from a decompressed NEXRAD chunk byte stream.
 ///
@@ -22,7 +25,7 @@ const SIZE_HW_OFFSET: usize = CTM_HEADER_SIZE;
 /// Non-Message-31 records are silently skipped. Returns an error only if the
 /// stream framing is irrecoverably corrupt.
 pub fn parse_radial_stream(data: &[u8]) -> Result<Vec<Radial>, DecodeError> {
-    let mut radials = Vec::new();
+    let mut radials = Vec::with_capacity(TYPICAL_RADIALS_PER_CHUNK);
     let mut offset = 0;
 
     while offset + CTM_HEADER_SIZE + MSG_HEADER_SIZE <= data.len() {

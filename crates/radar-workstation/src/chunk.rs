@@ -5,6 +5,11 @@ use bzip2::read::BzDecoder;
 const VOLUME_HEADER_LEN: usize = 24;
 const BLOCK_LEN_PREFIX: usize = 4;
 const START_SENTINEL: u32 = 0xFFFF_FFFF;
+/// Rough BZ2 expansion factor for NEXRAD moment data, used only as a
+/// `with_capacity` hint to avoid repeated reallocation during decompression.
+/// Overestimating wastes a bit of memory; underestimating costs a realloc —
+/// this favors the cheaper mistake.
+const DECOMPRESSION_RATIO_HINT: usize = 4;
 
 /// Read the 4 big-endian bytes at `pos`. Callers are responsible for ensuring
 /// `pos + 4 <= data.len()`.
@@ -121,7 +126,7 @@ pub fn decompress_chunk(data: &[u8], expected: ChunkKind) -> Result<Vec<u8>, Chu
             let compressed = data
                 .get(BLOCK_LEN_PREFIX..BLOCK_LEN_PREFIX + block_len)
                 .ok_or(ChunkError::TooShort)?;
-            let mut out = Vec::new();
+            let mut out = Vec::with_capacity(compressed.len() * DECOMPRESSION_RATIO_HINT);
             BzDecoder::new(compressed)
                 .read_to_end(&mut out)
                 .map_err(ChunkError::Decompression)?;
@@ -135,7 +140,7 @@ pub fn decompress_chunk(data: &[u8], expected: ChunkKind) -> Result<Vec<u8>, Chu
 /// `has_sentinel`: start chunks terminate with a `0xFFFFFFFF` length word;
 /// intermediate chunks read until data is exhausted.
 fn decompress_blocks(data: &[u8], has_sentinel: bool) -> Result<Vec<u8>, ChunkError> {
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(data.len() * DECOMPRESSION_RATIO_HINT);
     let mut offset = 0;
 
     while offset + BLOCK_LEN_PREFIX <= data.len() {

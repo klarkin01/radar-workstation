@@ -1,6 +1,4 @@
-use std::collections::HashMap;
-
-use crate::types::product::{ProductData, ProductKind};
+use crate::types::product::ProductMap;
 use crate::types::site_parameters::SiteParameters;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,5 +47,5 @@ pub struct Radial {
     /// block pointer is non-zero. In observed KDOX data the RVOL block is
     /// populated on every radial, not only on `StartOfVolume`.
     pub site_parameters: Option<SiteParameters>,
-    pub products: HashMap<ProductKind, ProductData>,
+    pub products: ProductMap,
 }
