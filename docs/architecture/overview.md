@@ -9,19 +9,29 @@ made here, see [PHILOSOPHY.md](../PHILOSOPHY.md).*
 ## Project Structure
 
 ```
-~/dev/radar_project/
-├── docs/
-│   ├── PHILOSOPHY.md
-│   ├── architecture/
-│   │   ├── overview.md          ← this document
-│   │   ├── data-flow.md
-│   │   └── rendering.md
-│   ├── adr/
-│   │   ├── 0001-use-rust.md
-│   │   ├── 0002-use-egui.md
-│   │   └── ...
-│   └── open-questions.md
-└── src/
+radar-workstation/
+├── Cargo.toml                     ← workspace manifest (virtual, see ADR-0010)
+├── crates/
+│   ├── radar-workstation/         ← application crate (binary)
+│   └── nexrad-decoder/            ← decoder library crate
+├── utility/                       ← dev-only tooling, not part of the product
+│   ├── nexrad-inspect/            ← Python cross-validation scripts (MetPy-based)
+│   ├── nexrad-sample/             ← fetch/decode sample chunks from S3
+│   └── radar-viz/                 ← render a decoded scan to PNG for visual checks
+└── docs/
+    ├── PHILOSOPHY.md
+    ├── REQUIREMENTS.md
+    ├── architecture/
+    │   ├── overview.md            ← this document
+    │   ├── data-flow.md
+    │   ├── rendering.md
+    │   ├── nexrad-binary-format.md
+    │   └── nexrad-data-types.md
+    ├── adr/
+    │   ├── 0001-use-rust.md
+    │   ├── 0002-use-egui.md
+    │   └── ...
+    └── open-questions.md
 ```
 
 ---
@@ -65,10 +75,10 @@ shared application state every frame. Never blocks on I/O or computation. See
 [rendering.md](rendering.md) for detail.
 
 ### Data Pipeline (tokio)
-Polls the NOAA/AWS NEXRAD data feed for new volume scans. Downloads and queues incoming
-scan files asynchronously. Also responsible for map tile fetching and placefile retrieval.
-All network I/O is non-blocking. The render loop is never waiting on the data pipeline.
-See [data-flow.md](data-flow.md) for detail.
+Polls the Unidata AWS NEXRAD real-time chunk stream (ADR-0011) for new chunks and
+assembles them into volume scans (ADR-0012). Also responsible for map tile fetching and
+placefile retrieval. All network I/O is non-blocking. The render loop is never waiting
+on the data pipeline. See [data-flow.md](data-flow.md) for detail.
 
 ### Compute Layer (rayon)
 Receives decoded volume scans and derives products: Echo Tops, VIL, VILD, dual-pol

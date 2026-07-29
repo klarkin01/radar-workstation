@@ -21,7 +21,7 @@ utilities in `utility/nexrad-inspect/`.*
 ## Volume Files
 
 Volume files are assembled, complete representations of a full volume scan — every
-tilt, every radial, from start of scan to end. They are produced by assembling the
+sweep, every radial, from start of scan to end. They are produced by assembling the
 real-time chunk stream and stored permanently in the `unidata-nexrad-level2` archive.
 
 **What they contain:** All Message 31 radials for the full volume, plus embedded
@@ -78,19 +78,19 @@ chunks arrive throughout the scan as the antenna rotates.
 - Azimuth and elevation angles
 - All available dual-polarization moments (REF, VEL, ZDR, PHI, RHO, CFP) with gate
   geometry and scaling parameters
-- Tilt number and radial status (start of elevation, intermediate, end of elevation)
+- Sweep number and radial status (start of elevation, intermediate, end of elevation)
 
-A full 360° sweep at one tilt is covered by approximately 3 intermediate chunks (360°
-÷ 100° per chunk). A complete VCP with 14 tilts produces roughly 42 intermediate chunks,
+A full 360° sweep at one sweep is covered by approximately 3 intermediate chunks (360°
+÷ 100° per chunk). A complete VCP with 14 sweeps produces roughly 42 intermediate chunks,
 plus variation for SAILS cuts and adaptive scanning.
 
 **Latency:** Each chunk appears seconds after the antenna completes that 100° arc.
-The first intermediate chunk of the lowest tilt arrives roughly 30-60 seconds after
+The first intermediate chunk of the lowest sweep arrives roughly 30-60 seconds after
 scan start — long before the volume is complete.
 
 **Role in this application:** Primary operational data. The data pipeline accumulates
 intermediate chunks into the in-progress `VolumeScan` and signals the compute layer
-as each tilt completes. This is what enables partial-scan rendering and sub-minute
+as each sweep completes. This is what enables partial-scan rendering and sub-minute
 update latency.
 
 ---
@@ -102,10 +102,10 @@ chunks in content, but distinguished by a signed negative length prefix — a de
 protocol-level signal that this is the last chunk of the volume.
 
 **What they contain:** The final 120 radials of the volume scan — the last ~100° arc
-of the highest tilt, or whichever tilt the scan ends on. Same Message 31 format as
+of the highest sweep, or whichever sweep the scan ends on. Same Message 31 format as
 intermediate chunks.
 
-**Latency:** Arrives within seconds of the antenna completing its final tilt. At this
+**Latency:** Arrives within seconds of the antenna completing its final sweep. At this
 point the full volume scan is available in the chunk stream.
 
 **Role in this application:** Volume completion signal. When the data pipeline receives
@@ -128,8 +128,8 @@ AWAITING_DATA (VolumeContext initialized)
   │  ← -I chunks arrive continuously
   ▼
 ACCUMULATING (radials added to VolumeScan per chunk)
-  │  ← tilt completes (radial status = End of Elevation)
-  ├─► signal compute layer: render this tilt
+  │  ← sweep completes (radial status = End of Elevation)
+  ├─► signal compute layer: render this sweep
   │  ← -E chunk arrives
   ▼
 COMPLETE (VolumeScan finalized, full render triggered)
@@ -139,5 +139,5 @@ IDLE (await next -S chunk)
 ```
 
 The pipeline must handle missing chunks gracefully — a dropped `-I` chunk should result
-in a gap in azimuthal coverage for that tilt, not a stalled or crashed pipeline. The
+in a gap in azimuthal coverage for that sweep, not a stalled or crashed pipeline. The
 `VolumeScan` struct should represent absent data explicitly rather than blocking on it.

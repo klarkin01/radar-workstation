@@ -1,4 +1,4 @@
-use crate::types::tilt::Tilt;
+use crate::types::sweep::Sweep;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VolumeStatus {
@@ -19,7 +19,7 @@ pub struct VolumeScan {
     pub latitude: f32,
     pub longitude: f32,
     pub site_amsl_m: i16,
-    pub tilts: Vec<Tilt>,
+    pub sweeps: Vec<Sweep>,
     pub status: VolumeStatus,
 }
 
@@ -28,7 +28,7 @@ impl VolumeScan {
         std::str::from_utf8(&self.site_id).unwrap_or("????")
     }
 
-    pub fn tilt(&self, elevation_number: u8) -> Option<&Tilt> {
-        self.tilts.iter().find(|t| t.elevation_number == elevation_number)
+    pub fn sweep(&self, elevation_number: u8) -> Option<&Sweep> {
+        self.sweeps.iter().find(|s| s.elevation_number == elevation_number)
     }
 }

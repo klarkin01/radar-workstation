@@ -132,10 +132,10 @@ Radar data below the minimum displayable threshold (typically 0 dBZ for reflecti
 is rendered as fully transparent, allowing the map layers below to show through. This
 is encoded in the alpha channel of the pre-computed texture.
 
-### Multi-Tilt Display
+### Multi-Sweep Display
 
-Each elevation tilt is a separate texture. The active tilt is selected by the user.
-Switching tilts is a GPU state change (swap the active texture) — it does not require
+Each elevation sweep is a separate texture. The active sweep is selected by the user.
+Switching sweeps is a GPU state change (swap the active texture) — it does not require
 re-fetching or re-computing data.
 
 ---
@@ -178,7 +178,7 @@ no textures are re-generated, no data is re-fetched when the user pans or zooms.
 
 **Spatial stability** means the display does not jump, reflow, or reset when:
 - A new scan arrives and replaces the previous one
-- The active product or tilt is changed
+- The active product or sweep is changed
 - A placefile updates
 - The window is resized
 

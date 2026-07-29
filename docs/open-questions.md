@@ -45,7 +45,7 @@ cache is shared across instances or per-instance.
 **Q8: Which derived products are in scope for v1.0?**
 GR2Analyst derives Echo Tops, VIL, VILD, POSH, and MEHS from Level II reflectivity.
 Define the v1.0 product set. A conservative starting point: base reflectivity, base
-velocity, storm-relative velocity, spectrum width (all tilts), plus Echo Tops and VIL
+velocity, storm-relative velocity, spectrum width (all sweeps), plus Echo Tops and VIL
 as derived products. Dual-pol products (ZDR, CC, KDP) are high value but add decoder
 and rendering complexity.
 
@@ -55,22 +55,16 @@ usability of the velocity product. GR2Analyst implements dealiasing. This is
 algorithmically non-trivial. Decide whether v1.0 ships with dealiasing, ships with
 a known limitation notice, or ships with a simple range-folding indicator only.
 
-**Q13: Backup data source?**
-We will default to NOAA S3 for our primary data source. However, we may want to implement
-a backup/secondary source, or the ability to configure multiple sources. The ability to 
-configure sources would be most flexible, but likely more involved. It is also likely that 
-the NOAA S3 source would be most authoritative and reliable.  
+**Q14: Backup data source?**
+ADR-0011 partially resolves this: assembled volume files (`unidata-nexrad-level2`) are
+the designated secondary source if the real-time chunk stream is unavailable. What
+remains open is the failover mechanics — detecting chunk-stream unavailability,
+switching over, and recovering back to the chunk stream — and whether a further
+fallback beyond Unidata's AWS infrastructure (e.g., Iowa State Mesonet) is warranted.
 
 ---
 
 ## Rendering — Resolve During Rendering Subsystem Design
-
-**Q10: What projection is used for the display?**
-NEXRAD data is in polar coordinates centered on the radar site. The map underlay uses
-geographic coordinates (WGS84). A projection is needed to render both in a common space.
-Azimuthal equidistant projection centered on the radar site is the conventional choice
-for single-site radar display and matches GR2Analyst's behavior. Confirm this is correct
-and document the coordinate transform pipeline.
 
 **Q11: How is color table / palette support handled?**
 GR2Analyst supports user-supplied color tables in a documented format, and a large

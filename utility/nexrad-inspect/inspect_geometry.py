@@ -4,7 +4,7 @@ inspect_geometry.py — NEXRAD Level II scan geometry inspector
 Radar Workstation, Meteorological — development utility
 
 Reconstructs the scan geometry from one or more -I (intermediate) chunk
-files: tilt summary, radial coverage, moment availability, gate geometry,
+files: sweep summary, radial coverage, moment availability, gate geometry,
 waveform type, PRF, super-resolution flag, and Nyquist/unambiguous range.
 
 No MetPy dependency — parses ICD binary structure directly.
@@ -94,8 +94,8 @@ def iter_msg31(data: bytes):
 # Geometry accumulator
 # ---------------------------------------------------------------------------
 
-class TiltGeometry:
-    """Accumulates geometry data across all radials of a tilt."""
+class SweepGeometry:
+    """Accumulates geometry data across all radials of a sweep."""
 
     def __init__(self, el_num: int):
         self.el_num        = el_num
@@ -147,7 +147,7 @@ class TiltGeometry:
         return (min(self.az_angles), max(self.az_angles))
 
     def is_super_res(self) -> bool:
-        """Super-resolution tilts have ~0.5° azimuthal spacing."""
+        """Super-resolution sweeps have ~0.5° azimuthal spacing."""
         return self.az_spacing() < 0.75
 
     def nyquist(self) -> str:
@@ -185,23 +185,23 @@ SEP = "=" * 90
 SUB = "-" * 90
 
 
-def print_geometry(tilts: dict, source_files: list[str], vcp: int | None) -> None:
+def print_geometry(sweeps: dict, source_files: list[str], vcp: int | None) -> None:
     print(f"\n{SEP}")
     print(f"  SCAN GEOMETRY SUMMARY")
     if source_files:
         print(f"  Source: {', '.join(source_files)}")
     if vcp:
         print(f"  VCP: {vcp}")
-    print(f"  Tilts found: {len(tilts)}")
+    print(f"  Sweeps found: {len(sweeps)}")
     print(SEP)
 
-    for el_num in sorted(tilts.keys()):
-        t = tilts[el_num]
+    for el_num in sorted(sweeps.keys()):
+        t = sweeps[el_num]
         az_start, az_end = t.az_range()
         super_res = "Yes (0.5°)" if t.is_super_res() else "No  (1.0°)"
         moments_present = ' '.join(sorted(t.moments.keys()))
 
-        print(f"\n  Tilt {el_num:>2}  —  El {t.el_angle_mean():>7.4f}°  |  "
+        print(f"\n  Sweep {el_num:>2}  —  El {t.el_angle_mean():>7.4f}°  |  "
               f"{t.radial_count:>4} radials  |  "
               f"Az {az_start:.2f}° → {az_end:.2f}°  |  "
               f"Spacing ~{t.az_spacing():.3f}°  |  "
@@ -239,7 +239,7 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    tilts: dict[int, TiltGeometry] = {}
+    sweeps: dict[int, SweepGeometry] = {}
     vcp = None
     source_files = []
 
@@ -267,18 +267,18 @@ def main() -> None:
                 continue
 
             el_num = r['hdr']['el_num']
-            if el_num not in tilts:
-                tilts[el_num] = TiltGeometry(el_num)
-            tilts[el_num].add_radial(r)
+            if el_num not in sweeps:
+                sweeps[el_num] = SweepGeometry(el_num)
+            sweeps[el_num].add_radial(r)
 
             if vcp is None and r['vol_consts']:
                 vcp = r['vol_consts'].get('vcp')
 
-    if not tilts:
+    if not sweeps:
         print("No Message 31 radials found.")
         sys.exit(1)
 
-    print_geometry(tilts, source_files, vcp)
+    print_geometry(sweeps, source_files, vcp)
 
 
 if __name__ == "__main__":

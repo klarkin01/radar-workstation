@@ -8,7 +8,7 @@
 ///           DRHO (correlation coefficient)
 use std::{env, fs, path::{Path, PathBuf}, process};
 
-use nexrad_decoder::{MomentKind, Radial, parse_radial_stream};
+use nexrad_decoder::{ProductKind, Radial, parse_radial_stream};
 use radar_workstation::decompress_chunk;
 
 mod color_table;
@@ -34,36 +34,36 @@ fn run() -> Result<(), String> {
         return Err("no radials decoded from input files".into());
     }
 
-    let mut available_tilts: Vec<u8> =
+    let mut available_sweeps: Vec<u8> =
         all_radials.iter().map(|r| r.elevation_number).collect();
-    available_tilts.sort_unstable();
-    available_tilts.dedup();
+    available_sweeps.sort_unstable();
+    available_sweeps.dedup();
 
-    let tilt_radials: Vec<Radial> = all_radials
+    let sweep_radials: Vec<Radial> = all_radials
         .into_iter()
-        .filter(|r| r.elevation_number == args.tilt)
+        .filter(|r| r.elevation_number == args.sweep)
         .collect();
 
-    if tilt_radials.is_empty() {
+    if sweep_radials.is_empty() {
         return Err(format!(
-            "tilt {} not found; available: {:?}",
-            args.tilt, available_tilts
+            "sweep {} not found; available: {:?}",
+            args.sweep, available_sweeps
         ));
     }
 
-    let has_product = tilt_radials.iter().any(|r| r.moments.contains_key(&args.product));
+    let has_product = sweep_radials.iter().any(|r| r.products.contains_key(&args.product));
     if !has_product {
-        let mut available: Vec<&str> = tilt_radials
+        let mut available: Vec<&str> = sweep_radials
             .iter()
-            .flat_map(|r| r.moments.keys())
+            .flat_map(|r| r.products.keys())
             .map(|k| moment_kind_name(*k))
             .collect();
         available.sort_unstable();
         available.dedup();
         return Err(format!(
-            "product {} not present in tilt {}; available: {:?}",
+            "product {} not present in sweep {}; available: {:?}",
             moment_kind_name(args.product),
-            args.tilt,
+            args.sweep,
             available
         ));
     }
@@ -72,19 +72,19 @@ fn run() -> Result<(), String> {
     let range_km = args.range.unwrap_or_else(|| default_range_km(args.product));
 
     // Extract site coordinates from the RVOL block present on any radial.
-    let site_lat = tilt_radials
+    let site_lat = sweep_radials
         .iter()
-        .find_map(|r| r.volume_constants.as_ref().map(|vc| vc.latitude as f64))
+        .find_map(|r| r.site_parameters.as_ref().map(|vc| vc.latitude as f64))
         .unwrap_or(0.0);
-    let site_lon = tilt_radials
+    let site_lon = sweep_radials
         .iter()
-        .find_map(|r| r.volume_constants.as_ref().map(|vc| vc.longitude as f64))
+        .find_map(|r| r.site_parameters.as_ref().map(|vc| vc.longitude as f64))
         .unwrap_or(0.0);
 
     eprintln!(
-        "Rendering {} radials, tilt {}, product {}, range {} km, {}×{} px → {}",
-        tilt_radials.len(),
-        args.tilt,
+        "Rendering {} radials, sweep {}, product {}, range {} km, {}×{} px → {}",
+        sweep_radials.len(),
+        args.sweep,
         moment_kind_name(args.product),
         range_km,
         args.size,
@@ -92,7 +92,7 @@ fn run() -> Result<(), String> {
         args.output.display()
     );
 
-    let mut img = render_ppi(&tilt_radials, args.product, &color_table, range_km, args.size);
+    let mut img = render_ppi(&sweep_radials, args.product, &color_table, range_km, args.size);
 
     // Overlays drawn back-to-front: counties (subtlest) → states → coastlines (most prominent).
     if let Some(ref data_dir) = args.data_dir {
@@ -163,31 +163,31 @@ fn chunk_files_in(dir: &Path) -> Result<Vec<PathBuf>, String> {
 
 // ── Color tables and product metadata ────────────────────────────────────────
 
-fn color_table_for(product: MomentKind) -> ColorTable {
+fn color_table_for(product: ProductKind) -> ColorTable {
     match product {
-        MomentKind::Ref => ColorTable::nws_reflectivity(),
-        MomentKind::Vel => ColorTable::nws_velocity(),
-        MomentKind::Sw  => ColorTable::spectrum_width(),
+        ProductKind::Ref => ColorTable::nws_reflectivity(),
+        ProductKind::Vel => ColorTable::nws_velocity(),
+        ProductKind::SpectrumWidth  => ColorTable::spectrum_width(),
         _               => ColorTable::nws_reflectivity(),
     }
 }
 
-fn default_range_km(product: MomentKind) -> f32 {
+fn default_range_km(product: ProductKind) -> f32 {
     match product {
-        MomentKind::Vel | MomentKind::Sw => 115.0,
+        ProductKind::Vel | ProductKind::SpectrumWidth => 115.0,
         _ => 230.0,
     }
 }
 
-fn moment_kind_name(k: MomentKind) -> &'static str {
+fn moment_kind_name(k: ProductKind) -> &'static str {
     match k {
-        MomentKind::Ref => "DREF",
-        MomentKind::Vel => "DVEL",
-        MomentKind::Sw  => "DSW",
-        MomentKind::Zdr => "DZDR",
-        MomentKind::Phi => "DPHI",
-        MomentKind::Rho => "DRHO",
-        MomentKind::Cfp => "DCFP",
+        ProductKind::Ref => "DREF",
+        ProductKind::Vel => "DVEL",
+        ProductKind::SpectrumWidth  => "DSW",
+        ProductKind::Zdr => "DZDR",
+        ProductKind::Phi => "DPHI",
+        ProductKind::Rho => "DRHO",
+        ProductKind::Cfp => "DCFP",
     }
 }
 
@@ -195,8 +195,8 @@ fn moment_kind_name(k: MomentKind) -> &'static str {
 
 struct Args {
     input: PathBuf,
-    product: MomentKind,
-    tilt: u8,
+    product: ProductKind,
+    sweep: u8,
     range: Option<f32>,
     size: u32,
     output: PathBuf,
@@ -208,7 +208,7 @@ Usage: radar-viz [OPTIONS] <input-dir>
 
 Options:
   --product DREF|DVEL|DSW|DZDR|DPHI|DRHO   default: DREF
-  --tilt <n>                                 default: 1
+  --sweep <n>                                 default: 1
   --range <km>                               default: 230 (DREF), 115 (DVEL/DSW)
   --size <pixels>                            default: 800
   --output <path>                            default: out.png
@@ -216,8 +216,8 @@ Options:
 
 fn parse_args() -> Result<Args, String> {
     let mut input: Option<PathBuf> = None;
-    let mut product = MomentKind::Ref;
-    let mut tilt: u8 = 1;
+    let mut product = ProductKind::Ref;
+    let mut sweep: u8 = 1;
     let mut range: Option<f32> = None;
     let mut size: u32 = 800;
     let mut output: Option<PathBuf> = None;
@@ -230,9 +230,9 @@ fn parse_args() -> Result<Args, String> {
                 let val = iter.next().ok_or("--product requires a value")?;
                 product = parse_product(&val)?;
             }
-            "--tilt" => {
-                let val = iter.next().ok_or("--tilt requires a value")?;
-                tilt = val.parse::<u8>().map_err(|_| format!("invalid tilt: {val}"))?;
+            "--sweep" => {
+                let val = iter.next().ok_or("--sweep requires a value")?;
+                sweep = val.parse::<u8>().map_err(|_| format!("invalid sweep: {val}"))?;
             }
             "--range" => {
                 let val = iter.next().ok_or("--range requires a value")?;
@@ -269,17 +269,17 @@ fn parse_args() -> Result<Args, String> {
     let input = input.ok_or_else(|| USAGE.to_string())?;
     let output = output.unwrap_or_else(|| PathBuf::from("out.png"));
 
-    Ok(Args { input, product, tilt, range, size, output, data_dir })
+    Ok(Args { input, product, sweep, range, size, output, data_dir })
 }
 
-fn parse_product(s: &str) -> Result<MomentKind, String> {
+fn parse_product(s: &str) -> Result<ProductKind, String> {
     match s.to_uppercase().as_str() {
-        "DREF" | "REF" | "Z" | "DBZ" => Ok(MomentKind::Ref),
-        "DVEL" | "VEL" | "V"         => Ok(MomentKind::Vel),
-        "DSW"  | "SW"  | "W"         => Ok(MomentKind::Sw),
-        "DZDR" | "ZDR"               => Ok(MomentKind::Zdr),
-        "DPHI" | "PHI" | "KDP"       => Ok(MomentKind::Phi),
-        "DRHO" | "RHO" | "CC"        => Ok(MomentKind::Rho),
+        "DREF" | "REF" | "Z" | "DBZ" => Ok(ProductKind::Ref),
+        "DVEL" | "VEL" | "V"         => Ok(ProductKind::Vel),
+        "DSW"  | "SW"  | "W"         => Ok(ProductKind::SpectrumWidth),
+        "DZDR" | "ZDR"               => Ok(ProductKind::Zdr),
+        "DPHI" | "PHI" | "KDP"       => Ok(ProductKind::Phi),
+        "DRHO" | "RHO" | "CC"        => Ok(ProductKind::Rho),
         _ => Err(format!("unknown product '{s}'; expected DREF/DVEL/DSW/DZDR/DPHI/DRHO")),
     }
 }

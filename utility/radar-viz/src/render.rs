@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 
 use image::{ImageBuffer, Rgba};
-use nexrad_decoder::{MomentKind, Radial};
+use nexrad_decoder::{ProductKind, Radial};
 
 use crate::color_table::ColorTable;
 
@@ -11,14 +11,14 @@ pub type PpiImage = ImageBuffer<Rgba<u8>, Vec<u8>>;
 /// Guards against incorrectly coloring pixels in incomplete scans.
 const MAX_AZ_GAP_DEG: f32 = 1.0;
 
-/// Render a plan-position-indicator (PPI) image for one tilt.
+/// Render a plan-position-indicator (PPI) image for one sweep.
 ///
 /// Uses inverse mapping: for each output pixel, compute the corresponding
 /// (range, azimuth) in radar coordinates, look up the nearest radial, then
 /// look up the gate value. North is up; azimuth increases clockwise.
 pub fn render_ppi(
     radials: &[Radial],
-    product: MomentKind,
+    product: ProductKind,
     color_table: &ColorTable,
     range_km: f32,
     size: u32,
@@ -62,7 +62,7 @@ pub fn render_ppi(
                 continue;
             }
 
-            let color = match radial.moments.get(&product) {
+            let color = match radial.products.get(&product) {
                 None => color_table.no_data,
                 Some(moment) => {
                     let first_km = moment.first_gate_m as f32 / 1000.0;

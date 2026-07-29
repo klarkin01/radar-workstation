@@ -184,10 +184,10 @@ body** (i.e., relative to record offset 28).
 
 | Code | Meaning                             | Notes                                          |
 |------|-------------------------------------|------------------------------------------------|
-| 0    | Start of Elevation                  | First radial of a new tilt                     |
+| 0    | Start of Elevation                  | First radial of a new sweep                     |
 | 1    | Intermediate                        | Mid-elevation radial                           |
-| 2    | End of Elevation                    | Last radial of the tilt; `complete = true`     |
-| 3    | Start of Volume                     | First radial of the volume (implies tilt 1)    |
+| 2    | End of Elevation                    | Last radial of the sweep; `complete = true`     |
+| 3    | Start of Volume                     | First radial of the volume (implies sweep 1)    |
 | 4    | End of Volume                       | Last radial; signals volume completion         |
 | 5    | Start of Elevation (SAILS)          | SAILS supplemental low-level cut               |
 
@@ -406,8 +406,8 @@ physical = (raw_u8_or_u16 as f32 - offset) / scale
 | DVEL   | 8 bit     | 2.0       | 129.0    | 688        | 2125 m     | 250 m      |
 | DSW    | 8 bit     | 2.0       | 129.0    | 688        | 2125 m     | 250 m      |
 
-DVEL and DSW appear only on higher tilts in VCP 35 (Doppler-only tilt strategy).
-DZDR, DPHI, DRHO appear only on tilts where dual-pol data is collected.
+DVEL and DSW appear only on higher sweeps in VCP 35 (Doppler-only sweep strategy).
+DZDR, DPHI, DRHO appear only on sweeps where dual-pol data is collected.
 
 ---
 

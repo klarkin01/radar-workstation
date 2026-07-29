@@ -2,7 +2,7 @@ use nexrad_sample::{download_sample, AcquisitionError};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread;
 use tempfile::tempdir;
 
@@ -37,7 +37,7 @@ fn create_output_path(name: &str) -> (PathBuf, tempfile::TempDir) {
     (output_path, temp_dir)
 }
 
-fn assert_output_file_does_not_exist(output_path: &PathBuf) {
+fn assert_output_file_does_not_exist(output_path: &Path) {
     assert!(!output_path.exists(), "output file should not be created on failure");
 }
 

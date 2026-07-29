@@ -37,18 +37,33 @@ External Sources
                Display
 ```
 
+> **Implementation status:** The chunk ingest layer (fetch + BZ2 decompression) and the
+> NEXRAD decoder are implemented and tested (`crates/radar-workstation`,
+> `crates/nexrad-decoder`). The volume assembly state machine (ADR-0012), compute layer,
+> shared application state, and render loop described below are architecture, not yet
+> code — `main.rs` is currently a stub.
+
 ---
 
 ## External Data Sources
 
 ### NEXRAD Level II — Primary Radar Data
-- **Source:** AWS S3 public bucket (`s3://noaa-nexrad-level2`)
+- **Source:** Real-time chunk stream, `s3://unidata-nexrad-level2-chunks` — the primary
+  source per ADR-0011. Assembled volume files, `s3://unidata-nexrad-level2`, are a
+  secondary source for historical playback, testing, and chunk-stream fallback. The
+  legacy `noaa-nexrad-level2` bucket stopped receiving updates September 1, 2025 and is
+  not used.
 - **Access:** Public, no authentication required, no API key
-- **Latency:** Files typically available within 30–60 seconds of scan completion
-- **Update cadence:** Every 4–6 minutes in clear air mode, every 1–2 minutes in
-  precipitation mode
-- **Protocol:** HTTPS (S3 REST API, no AWS SDK required — plain HTTP GET)
-- **Format:** NEXRAD Level II archive format (WSR-88D), bzip2 compressed
+- **Latency:** Individual chunks (~100° of azimuthal coverage each) are available within
+  seconds of the antenna completing that portion of the scan — the lowest sweep is
+  typically displayable 30–60 seconds into a volume, well before the volume completes.
+- **Update cadence:** A full volume completes every 4–6 minutes in clear air mode, every
+  1–2 minutes in precipitation mode; individual chunks arrive continuously throughout.
+- **Protocol:** HTTPS (S3 REST API — `ListObjectsV2` for chunk discovery, plain HTTP GET
+  for chunk bodies; no AWS SDK required)
+- **Format:** NEXRAD Level II real-time chunk format — `-S` (start), `-I`
+  (intermediate), `-E` (end), each BZ2-compressed after a short envelope header. See
+  [nexrad-binary-format.md](nexrad-binary-format.md) and ADR-0011/ADR-0012.
 
 ### Map Imagery Tiles — Background Terrain/Satellite
 - **Source:** Pluggable XYZ tile provider (USGS National Map by default)
@@ -74,19 +89,34 @@ aware of or blocked by pipeline activity.
 ### NEXRAD Polling Task
 
 ```
-1. On startup, resolve the selected radar site identifier (e.g. KTLX)
-2. Query the S3 bucket listing for the current UTC date prefix
-3. Identify the most recent volume scan file not yet downloaded
-4. Download the file to a local buffer
-5. Pass the buffer to the NEXRAD decoder (see below)
-6. On completion, signal the compute layer via channel
-7. Sleep for the configured polling interval (default: 30 seconds)
+1. On startup, resolve the selected radar site identifier (e.g. KTLX) and anchor the
+   chunk listing to the current UTC hour, so startup does not replay earlier chunks
+2. Query the chunk bucket's ListObjectsV2 listing for keys newer than the last seen key
+3. For each new key, classify chunk kind (-S / -I / -E) and fetch the object body
+4. Decompress the chunk (strip the volume header for -S; BZ2-decompress the block(s))
+5. Hand the decompressed message stream to the NEXRAD decoder (see below)
+6. Feed the decoded radials to the volume assembly state machine (ADR-0012), which
+   accumulates them into the in-progress VolumeScan and signals the compute layer as
+   each sweep closes
+7. Sleep for the configured polling interval (implementation default: 5 seconds)
 8. Repeat from step 2
 ```
 
 On site change, the current polling task is cancelled and a new one is spawned for
 the new site. The shared state is cleared and the display resets to the new site's
-most recent available scan.
+most recent available data.
+
+### Volume Assembly (ADR-0012)
+
+The chunk stream offers no atomic "volume complete" guarantee, so an explicit state
+machine tracks assembly: `IDLE → AWAITING_DATA → ACCUMULATING`. Each sweep closes
+independently as its end-of-elevation signal arrives (or is inferred from the next
+elevation number), and the volume itself closes on `-E` receipt, on the next `-S`
+arriving early (`Superseded`), or on a watchdog timeout (`TimedOut`). `VolumeScan`
+carries this completion status explicitly so downstream layers can indicate incomplete
+data without withholding it — a visible gap is preferable to silently modifying data
+already rendered. See ADR-0012 for the full state machine, per-chunk-type missing-data
+handling, and the rationale against a late-data waiting window.
 
 ### Tile Fetching Task
 
@@ -117,18 +147,20 @@ render as transparent until delivered. The display never waits on a tile fetch.
 ## NEXRAD Decoder
 
 The decoder is an internal library, cleanly separated from the rest of the application,
-with its own test suite. It accepts a raw byte buffer and returns a structured volume
-scan representation or a typed error.
+with its own test suite. It accepts a decompressed message stream and returns a
+structured volume scan representation or a typed error.
 
 ### Input
-Raw NEXRAD Level II archive file bytes (bzip2 compressed, per-radial or
-message-31 format).
+A decompressed NEXRAD message stream, Message 31 format only (ADR-0011 — the chunk
+stream carries no other format). Chunk classification and BZ2 decompression happen in
+the ingest layer before the decoder sees any bytes; the decoder itself performs no
+decompression.
 
 ### Output
 A `VolumeScan` struct containing:
 - Site identifier and metadata (lat/lon, elevation, scan time)
-- A collection of `Tilt` structs, one per elevation angle
-- Each `Tilt` contains moment data arrays: reflectivity, velocity, spectrum width,
+- A collection of `Sweep` structs, one per elevation angle
+- Each `Sweep` contains moment data arrays: reflectivity, velocity, spectrum width,
   and dual-pol moments (ZDR, CC, KDP) where present
 - All values in calibrated physical units (dBZ, m/s, dB, etc.)
 
@@ -152,14 +184,21 @@ The decoder has a dedicated test suite exercising:
 When a new `VolumeScan` is decoded, it is handed to the compute layer. Product
 derivation runs in parallel across rayon's thread pool.
 
-### Products Derived (v1.0 scope — see open-questions.md Q8)
-- **Base reflectivity** — all tilts (color-mapped directly from decoded moment data)
-- **Base velocity** — all tilts
-- **Storm-relative velocity** — all tilts (requires storm motion vector input)
-- **Spectrum width** — all tilts
-- **Echo Tops** — derived from multi-tilt reflectivity volume
+### Products Derived
+
+Confirmed v1.0 scope (REQUIREMENTS.md FR-RP-1/FR-RP-2):
+- **Base reflectivity** — all sweeps (color-mapped directly from decoded moment data)
+- **Base velocity** — all sweeps
+- **Spectrum width** — all sweeps
+- **Echo Tops** — derived from multi-sweep reflectivity volume
 - **VIL** — vertically integrated liquid, derived from reflectivity volume
-- **Dual-pol moments** — ZDR, CC, KDP (where present in scan)
+
+Open pending Q8/Q9, conservative default is deferred post-v1.0 (REQUIREMENTS.md
+FR-RP-3/4/5):
+- **Storm-relative velocity** — requires a storm motion vector input mechanism
+- **Dual-pol moments** — ZDR, CC, KDP (decoded regardless per FR-ND-4; the compute/
+  display pipeline for them is what's unresolved)
+- **Velocity dealiasing**
 
 ### Output
 Derived products are written as pre-computed, color-mapped RGBA textures ready for
@@ -175,7 +214,7 @@ layer, and render loop.
 
 ### Contents
 - Current `VolumeScan` (most recently decoded)
-- Derived product textures (indexed by product type and tilt)
+- Derived product textures (indexed by product type and sweep)
 - Active site configuration (identifier, lat/lon, elevation)
 - Loaded placefile data
 - Tile cache index (in-memory portion)

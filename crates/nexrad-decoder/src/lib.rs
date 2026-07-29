@@ -5,5 +5,5 @@ pub mod types;
 pub use error::DecodeError;
 pub use parse::parse_radial_stream;
 pub use types::{
-    ProductData, ProductKind, Radial, RadialStatus, SiteParameters, Tilt, VolumeScan, VolumeStatus,
+    ProductData, ProductKind, Radial, RadialStatus, SiteParameters, Sweep, VolumeScan, VolumeStatus,
 };
