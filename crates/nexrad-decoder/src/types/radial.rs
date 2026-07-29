@@ -41,10 +41,10 @@ pub struct Radial {
     pub azimuth_number: u16,
     pub radial_status: RadialStatus,
     pub elevation_number: u8,
-    /// Unambiguous range in km. 0.0 if the RRAD block was absent or unreadable.
-    pub unambiguous_range_km: f32,
-    /// Nyquist velocity in m/s. 0.0 if the RRAD block was absent or unreadable.
-    pub nyquist_velocity_mps: f32,
+    /// Unambiguous range in km. `None` if the RRAD block was absent or unreadable.
+    pub unambiguous_range_km: Option<f32>,
+    /// Nyquist velocity in m/s. `None` if the RRAD block was absent or unreadable.
+    pub nyquist_velocity_mps: Option<f32>,
     /// Site and volume metadata from the RVOL block. Present when the RVOL
     /// block pointer is non-zero. In observed KDOX data the RVOL block is
     /// populated on every radial, not only on `StartOfVolume`.

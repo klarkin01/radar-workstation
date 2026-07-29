@@ -38,7 +38,7 @@ pub fn parse_message31(record: &[u8]) -> Result<Radial, DecodeError> {
     let num_data_blks = c.read_u16_be()?;
 
     let radial_status = RadialStatus::from_code(radial_status_code)
-        .ok_or(DecodeError::UnsupportedMessageType { got: radial_status_code })?;
+        .ok_or(DecodeError::UnknownRadialStatus { got: radial_status_code })?;
 
     // Block pointer table (body offset 32): vol_ptr, el_ptr, rad_ptr, then product ptrs
     let vol_ptr = c.read_u32_be()?;
@@ -46,18 +46,16 @@ pub fn parse_message31(record: &[u8]) -> Result<Radial, DecodeError> {
     let rad_ptr = c.read_u32_be()?;
 
     let num_product_ptrs = (num_data_blks as usize).saturating_sub(3);
-    let mut product_ptrs = Vec::with_capacity(num_product_ptrs);
-    for _ in 0..num_product_ptrs {
-        product_ptrs.push(c.read_u32_be()?);
-    }
+    let product_ptrs: Vec<u32> = (0..num_product_ptrs)
+        .map(|_| c.read_u32_be())
+        .collect::<Result<_, _>>()?;
 
     // Block parsing — soft failures return None and the field defaults or is absent
     let site_parameters = parse_rvol(body, vol_ptr);
 
-    let (unambiguous_range_km, nyquist_velocity_mps) = match parse_rrad(body, rad_ptr) {
-        Some(r) => (r.unambiguous_range_km, r.nyquist_velocity_mps),
-        None => (0.0, 0.0),
-    };
+    let rrad = parse_rrad(body, rad_ptr);
+    let unambiguous_range_km = rrad.as_ref().map(|r| r.unambiguous_range_km);
+    let nyquist_velocity_mps = rrad.as_ref().map(|r| r.nyquist_velocity_mps);
 
     let mut products = HashMap::with_capacity(num_product_ptrs);
     for ptr in product_ptrs {

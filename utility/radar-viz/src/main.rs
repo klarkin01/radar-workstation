@@ -9,7 +9,7 @@
 use std::{env, fs, path::{Path, PathBuf}, process};
 
 use nexrad_decoder::{ProductKind, Radial, parse_radial_stream};
-use radar_workstation::decompress_chunk;
+use radar_workstation::{decompress_chunk, detect_chunk_kind};
 
 mod color_table;
 mod overlay;
@@ -137,8 +137,9 @@ fn load_volume(dir: &Path) -> Result<Vec<Radial>, String> {
     for path in &files {
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
         let data = fs::read(path).map_err(|e| format!("read {name}: {e}"))?;
+        let kind = detect_chunk_kind(&data).map_err(|e| format!("detect {name}: {e}"))?;
         let decompressed =
-            decompress_chunk(&data).map_err(|e| format!("decompress {name}: {e}"))?;
+            decompress_chunk(&data, kind).map_err(|e| format!("decompress {name}: {e}"))?;
         let mut radials = parse_radial_stream(&decompressed)
             .map_err(|e| format!("parse {name}: {e}"))?;
         all_radials.append(&mut radials);

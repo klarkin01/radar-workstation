@@ -89,7 +89,7 @@ fn decode_dir(dir: &Path) -> Result<(), String> {
         let data = fs::read(path).map_err(|e| format!("read {name}: {e}"))?;
         let kind = detect_chunk_kind(&data).map_err(|e| format!("detect {name}: {e}"))?;
         let decompressed =
-            decompress_chunk(&data).map_err(|e| format!("decompress {name}: {e}"))?;
+            decompress_chunk(&data, kind).map_err(|e| format!("decompress {name}: {e}"))?;
         let radials =
             parse_radial_stream(&decompressed).map_err(|e| format!("parse {name}: {e}"))?;
 
