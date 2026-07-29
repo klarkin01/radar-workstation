@@ -1,8 +1,11 @@
+use std::borrow::Cow;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use bytes::Bytes;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 
 use crate::chunk::ChunkKind;
 
@@ -15,6 +18,9 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 pub enum PollError {
     Http(reqwest::Error),
     Xml(quick_xml::Error),
+    /// A concurrent chunk-fetch task panicked. Only possible via a bug in
+    /// `fetch_bytes` itself, since all its own failure modes return `Err`.
+    Task(tokio::task::JoinError),
 }
 
 impl std::fmt::Display for PollError {
@@ -22,6 +28,7 @@ impl std::fmt::Display for PollError {
         match self {
             Self::Http(e) => write!(f, "HTTP error: {e}"),
             Self::Xml(e) => write!(f, "XML parse error: {e}"),
+            Self::Task(e) => write!(f, "chunk fetch task failed: {e}"),
         }
     }
 }
@@ -31,6 +38,7 @@ impl std::error::Error for PollError {
         match self {
             Self::Http(e) => Some(e),
             Self::Xml(e) => Some(e),
+            Self::Task(e) => Some(e),
         }
     }
 }
@@ -76,27 +84,47 @@ impl S3Poller {
 
     async fn poll_once(&mut self) -> Result<Vec<ChunkEnvelope>, PollError> {
         let prefix = format!("{}/", self.site_id);
-        let start_after = self.last_seen_key.clone();
-        let keys = self.list_keys_after(&prefix, &start_after).await?;
+        let keys = self.list_keys_after(&prefix, &self.last_seen_key).await?;
 
         if keys.is_empty() {
             return Ok(vec![]);
         }
 
-        // Fetch all chunks before advancing last_seen_key so that a transient fetch
-        // failure causes the whole batch to be retried on the next poll rather than
-        // silently skipping chunks whose keys were already passed.
-        let mut envelopes = Vec::with_capacity(keys.len());
+        let mut to_fetch: Vec<(String, ChunkKind)> = Vec::with_capacity(keys.len());
         for key in &keys {
-            let Some(kind) = chunk_kind_from_key(key) else {
-                eprintln!("[s3_poll] unrecognized key suffix, skipping: {key}");
-                continue;
-            };
-            let raw_bytes = self.fetch_object(key).await?;
-            envelopes.push(ChunkEnvelope { kind, raw_bytes });
+            match chunk_kind_from_key(key) {
+                Some(kind) => to_fetch.push((key.clone(), kind)),
+                None => eprintln!("[s3_poll] unrecognized key suffix, skipping: {key}"),
+            }
         }
 
-        self.last_seen_key = keys.last().unwrap().clone();
+        // Fetch chunks concurrently but reassemble them in listing order, and only
+        // advance last_seen_key once every fetch has succeeded, so that a transient
+        // fetch failure causes the whole batch to be retried on the next poll rather
+        // than silently skipping chunks whose keys were already passed.
+        let mut tasks = JoinSet::new();
+        for (idx, (key, _kind)) in to_fetch.iter().enumerate() {
+            let client = self.client.clone();
+            let url = format!("{BUCKET_BASE}/{key}");
+            tasks.spawn(async move { (idx, fetch_bytes(client, url).await) });
+        }
+
+        let mut fetched: Vec<Option<Bytes>> = (0..to_fetch.len()).map(|_| None).collect();
+        while let Some(joined) = tasks.join_next().await {
+            let (idx, bytes) = joined.map_err(PollError::Task)?;
+            fetched[idx] = Some(bytes?);
+        }
+
+        let envelopes = to_fetch
+            .into_iter()
+            .zip(fetched)
+            .map(|((_, kind), bytes)| ChunkEnvelope {
+                kind,
+                raw_bytes: bytes.expect("every slot filled or an error returned above"),
+            })
+            .collect();
+
+        self.last_seen_key = keys.into_iter().next_back().expect("checked non-empty above");
         Ok(envelopes)
     }
 
@@ -110,20 +138,31 @@ impl S3Poller {
         let mut first_page = true;
 
         loop {
-            let mut params: Vec<(&str, String)> = vec![
-                ("list-type", "2".to_owned()),
-                ("prefix", prefix.to_owned()),
+            let mut params: Vec<(&str, Cow<str>)> = vec![
+                ("list-type", Cow::Borrowed("2")),
+                ("prefix", Cow::Borrowed(prefix)),
             ];
             // start-after is only valid on the first page; continuation-token encodes
             // position implicitly on subsequent pages and must not be combined with it.
             if first_page {
-                params.push(("start-after", start_after.to_owned()));
+                params.push(("start-after", Cow::Borrowed(start_after)));
             }
             if let Some(ref token) = continuation_token {
-                params.push(("continuation-token", token.clone()));
+                params.push(("continuation-token", Cow::Borrowed(token.as_str())));
             }
 
-            let body = self.get_bytes(format!("{BUCKET_BASE}/"), &params).await?;
+            let body = self
+                .client
+                .get(format!("{BUCKET_BASE}/"))
+                .query(&params)
+                .send()
+                .await
+                .map_err(PollError::Http)?
+                .error_for_status()
+                .map_err(PollError::Http)?
+                .bytes()
+                .await
+                .map_err(PollError::Http)?;
 
             let (page_keys, is_truncated, next_token) = parse_list_xml(&body)?;
             all_keys.extend(page_keys);
@@ -137,28 +176,35 @@ impl S3Poller {
 
         Ok(all_keys)
     }
+}
 
-    async fn fetch_object(&self, key: &str) -> Result<Vec<u8>, PollError> {
-        self.get_bytes(format!("{BUCKET_BASE}/{key}"), &[]).await
-    }
+/// Fetches `url`'s body as-is, without copying it into a fresh `Vec<u8>` — the
+/// `Bytes` returned by reqwest is already a cheaply-clonable, reference-counted
+/// buffer. A free function (rather than an `S3Poller` method) because it is
+/// spawned as an independent task per chunk in [`S3Poller::poll_once`], which
+/// requires owned, `'static` inputs instead of a borrow of `&self`.
+async fn fetch_bytes(client: reqwest::Client, url: String) -> Result<Bytes, PollError> {
+    client
+        .get(url)
+        .send()
+        .await
+        .map_err(PollError::Http)?
+        .error_for_status()
+        .map_err(PollError::Http)?
+        .bytes()
+        .await
+        .map_err(PollError::Http)
+}
 
-    /// GETs `url` with optional query `params`, mapping any transport or
-    /// non-2xx-status failure to `PollError::Http`.
-    async fn get_bytes(&self, url: String, params: &[(&str, String)]) -> Result<Vec<u8>, PollError> {
-        let bytes = self
-            .client
-            .get(url)
-            .query(params)
-            .send()
-            .await
-            .map_err(PollError::Http)?
-            .error_for_status()
-            .map_err(PollError::Http)?
-            .bytes()
-            .await
-            .map_err(PollError::Http)?;
-        Ok(bytes.to_vec())
-    }
+/// Which of the tags we care about the reader is currently inside. Tracked as
+/// an enum rather than an owned tag-name `String` so that ignored tags (the
+/// vast majority in a listing response) cost neither an allocation nor a copy.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ListTag {
+    Key,
+    IsTruncated,
+    NextContinuationToken,
+    Other,
 }
 
 fn parse_list_xml(body: &[u8]) -> Result<(Vec<String>, bool, Option<String>), PollError> {
@@ -169,24 +215,33 @@ fn parse_list_xml(body: &[u8]) -> Result<(Vec<String>, bool, Option<String>), Po
     let mut keys: Vec<String> = Vec::new();
     let mut is_truncated = false;
     let mut next_token: Option<String> = None;
-    let mut in_tag: Option<String> = None;
+    let mut in_tag = ListTag::Other;
 
     loop {
         buf.clear();
         match reader.read_event_into(&mut buf).map_err(PollError::Xml)? {
             Event::Start(e) => {
-                in_tag = Some(String::from_utf8_lossy(e.name().as_ref()).into_owned());
+                in_tag = match e.name().as_ref() {
+                    b"Key" => ListTag::Key,
+                    b"IsTruncated" => ListTag::IsTruncated,
+                    b"NextContinuationToken" => ListTag::NextContinuationToken,
+                    _ => ListTag::Other,
+                };
             }
-            Event::Text(e) => {
-                let text = e.unescape().map_err(PollError::Xml)?.into_owned();
-                match in_tag.as_deref() {
-                    Some("Key") => keys.push(text),
-                    Some("IsTruncated") => is_truncated = text == "true",
-                    Some("NextContinuationToken") => next_token = Some(text),
-                    _ => {}
+            // Only the three tags above ever need the text node materialized;
+            // every other tag's text (Name, Size, LastModified, ...) is skipped
+            // without allocating.
+            Event::Text(e) => match in_tag {
+                ListTag::Key => keys.push(e.unescape().map_err(PollError::Xml)?.into_owned()),
+                ListTag::IsTruncated => {
+                    is_truncated = e.unescape().map_err(PollError::Xml)?.as_ref() == "true";
                 }
-            }
-            Event::End(_) => in_tag = None,
+                ListTag::NextContinuationToken => {
+                    next_token = Some(e.unescape().map_err(PollError::Xml)?.into_owned());
+                }
+                ListTag::Other => {}
+            },
+            Event::End(_) => in_tag = ListTag::Other,
             Event::Eof => break,
             _ => {}
         }

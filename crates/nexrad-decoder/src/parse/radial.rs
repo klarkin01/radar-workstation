@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-
+use crate::types::product::ProductMap;
 use crate::{DecodeError, Radial, RadialStatus};
 use super::blocks::{parse_rvol, parse_rrad};
 use super::cursor::Cursor;
@@ -46,9 +45,13 @@ pub fn parse_message31(record: &[u8]) -> Result<Radial, DecodeError> {
     let rad_ptr = c.read_u32_be()?;
 
     let num_product_ptrs = (num_data_blks as usize).saturating_sub(3);
-    let product_ptrs: Vec<u32> = (0..num_product_ptrs)
-        .map(|_| c.read_u32_be())
-        .collect::<Result<_, _>>()?;
+    let mut products = ProductMap::new();
+    for _ in 0..num_product_ptrs {
+        let ptr = c.read_u32_be()?;
+        if let Some((kind, data)) = parse_product(body, ptr) {
+            products.insert(kind, data);
+        }
+    }
 
     // Block parsing — soft failures return None and the field defaults or is absent
     let site_parameters = parse_rvol(body, vol_ptr);
@@ -56,13 +59,6 @@ pub fn parse_message31(record: &[u8]) -> Result<Radial, DecodeError> {
     let rrad = parse_rrad(body, rad_ptr);
     let unambiguous_range_km = rrad.as_ref().map(|r| r.unambiguous_range_km);
     let nyquist_velocity_mps = rrad.as_ref().map(|r| r.nyquist_velocity_mps);
-
-    let mut products = HashMap::with_capacity(num_product_ptrs);
-    for ptr in product_ptrs {
-        if let Some((kind, data)) = parse_product(body, ptr) {
-            products.insert(kind, data);
-        }
-    }
 
     Ok(Radial {
         site_id,

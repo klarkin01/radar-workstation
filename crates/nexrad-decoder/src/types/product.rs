@@ -9,6 +9,9 @@ pub enum ProductKind {
     Cfp,
 }
 
+/// Number of [`ProductKind`] variants. Backs [`ProductMap`]'s fixed storage.
+const PRODUCT_KIND_COUNT: usize = 7;
+
 impl ProductKind {
     /// Map an ICD block_id (e.g. `b"DREF"`) to the corresponding variant.
     pub fn from_block_id(id: &[u8; 4]) -> Option<Self> {
@@ -22,6 +25,95 @@ impl ProductKind {
             b"DCFP" => Some(Self::Cfp),
             _ => None,
         }
+    }
+
+    fn index(self) -> usize {
+        match self {
+            Self::Ref => 0,
+            Self::Vel => 1,
+            Self::SpectrumWidth => 2,
+            Self::Zdr => 3,
+            Self::Phi => 4,
+            Self::Rho => 5,
+            Self::Cfp => 6,
+        }
+    }
+}
+
+const ALL_PRODUCT_KINDS: [ProductKind; PRODUCT_KIND_COUNT] = [
+    ProductKind::Ref,
+    ProductKind::Vel,
+    ProductKind::SpectrumWidth,
+    ProductKind::Zdr,
+    ProductKind::Phi,
+    ProductKind::Rho,
+    ProductKind::Cfp,
+];
+
+/// Per-radial product storage, keyed by [`ProductKind`].
+///
+/// Backed by a fixed array instead of a `HashMap` — the key space is a small
+/// closed enum, so array indexing removes a per-radial heap allocation and
+/// SipHash lookup from the hottest path in the decoder (thousands of radials
+/// per volume).
+#[derive(Debug, Clone, Default)]
+pub struct ProductMap {
+    slots: [Option<ProductData>; PRODUCT_KIND_COUNT],
+}
+
+impl ProductMap {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&mut self, kind: ProductKind, data: ProductData) {
+        self.slots[kind.index()] = Some(data);
+    }
+
+    pub fn get(&self, kind: &ProductKind) -> Option<&ProductData> {
+        self.slots[kind.index()].as_ref()
+    }
+
+    pub fn contains_key(&self, kind: &ProductKind) -> bool {
+        self.slots[kind.index()].is_some()
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &ProductKind> + '_ {
+        self.iter().map(|(k, _)| k)
+    }
+
+    pub fn iter(&self) -> ProductMapIter<'_> {
+        ProductMapIter { map: self, idx: 0 }
+    }
+}
+
+pub struct ProductMapIter<'a> {
+    map: &'a ProductMap,
+    idx: usize,
+}
+
+impl<'a> Iterator for ProductMapIter<'a> {
+    type Item = (&'a ProductKind, &'a ProductData);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.idx < PRODUCT_KIND_COUNT {
+            let kind = &ALL_PRODUCT_KINDS[self.idx];
+            let slot = &self.map.slots[self.idx];
+            self.idx += 1;
+            if let Some(data) = slot {
+                return Some((kind, data));
+            }
+        }
+        None
+    }
+}
+
+impl<'a> IntoIterator for &'a ProductMap {
+    type Item = (&'a ProductKind, &'a ProductData);
+    type IntoIter = ProductMapIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
     }
 }
 
