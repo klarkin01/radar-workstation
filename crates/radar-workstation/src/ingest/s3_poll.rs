@@ -1,26 +1,23 @@
-use std::borrow::Cow;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use bytes::Bytes;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use tokio::sync::mpsc;
-use tokio::task::JoinSet;
 
 use crate::chunk::ChunkKind;
 
 use super::ChunkEnvelope;
 
-const BUCKET_BASE: &str = "https://unidata-nexrad-level2-chunks.s3.amazonaws.com";
+/// Hostname `Client::new` should be given to construct the `http_ingest::Client`
+/// passed into `S3Poller::new`. Not used internally — `Client` already knows
+/// its own host once constructed.
+pub const BUCKET_HOST: &str = "unidata-nexrad-level2-chunks.s3.amazonaws.com";
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub enum PollError {
-    Http(reqwest::Error),
+    Http(http_ingest::Error),
     Xml(quick_xml::Error),
-    /// A concurrent chunk-fetch task panicked. Only possible via a bug in
-    /// `fetch_bytes` itself, since all its own failure modes return `Err`.
-    Task(tokio::task::JoinError),
 }
 
 impl std::fmt::Display for PollError {
@@ -28,7 +25,6 @@ impl std::fmt::Display for PollError {
         match self {
             Self::Http(e) => write!(f, "HTTP error: {e}"),
             Self::Xml(e) => write!(f, "XML parse error: {e}"),
-            Self::Task(e) => write!(f, "chunk fetch task failed: {e}"),
         }
     }
 }
@@ -38,14 +34,13 @@ impl std::error::Error for PollError {
         match self {
             Self::Http(e) => Some(e),
             Self::Xml(e) => Some(e),
-            Self::Task(e) => Some(e),
         }
     }
 }
 
 pub struct S3Poller {
     site_id: String,
-    client: reqwest::Client,
+    client: http_ingest::Client,
     /// Synthetic or real S3 key used as `start-after` on the next list request.
     /// Initialized to the current-hour directory prefix so startup does not replay
     /// historical chunks from earlier in the hour.
@@ -53,7 +48,7 @@ pub struct S3Poller {
 }
 
 impl S3Poller {
-    pub fn new(site_id: impl Into<String>, client: reqwest::Client) -> Self {
+    pub fn new(site_id: impl Into<String>, client: http_ingest::Client) -> Self {
         let site_id = site_id.into();
         let last_seen_key = current_hour_anchor(&site_id);
         Self { site_id, client, last_seen_key }
@@ -84,7 +79,8 @@ impl S3Poller {
 
     async fn poll_once(&mut self) -> Result<Vec<ChunkEnvelope>, PollError> {
         let prefix = format!("{}/", self.site_id);
-        let keys = self.list_keys_after(&prefix, &self.last_seen_key).await?;
+        let last_seen_key = self.last_seen_key.clone();
+        let keys = self.list_keys_after(&prefix, &last_seen_key).await?;
 
         if keys.is_empty() {
             return Ok(vec![]);
@@ -98,38 +94,26 @@ impl S3Poller {
             }
         }
 
-        // Fetch chunks concurrently but reassemble them in listing order, and only
-        // advance last_seen_key once every fetch has succeeded, so that a transient
-        // fetch failure causes the whole batch to be retried on the next poll rather
-        // than silently skipping chunks whose keys were already passed.
-        let mut tasks = JoinSet::new();
-        for (idx, (key, _kind)) in to_fetch.iter().enumerate() {
-            let client = self.client.clone();
-            let url = format!("{BUCKET_BASE}/{key}");
-            tasks.spawn(async move { (idx, fetch_bytes(client, url).await) });
+        // Fetched sequentially (ADR-0014: the http-ingest client serializes
+        // requests on a single connection, no connection pool) and only
+        // last_seen_key advances once every fetch in the batch has
+        // succeeded, so that a transient fetch failure causes the whole
+        // batch to be retried on the next poll rather than silently
+        // skipping chunks whose keys were already passed. With sequential
+        // fetching this falls out naturally: the first `?` aborts before
+        // the assignment below.
+        let mut envelopes = Vec::with_capacity(to_fetch.len());
+        for (key, kind) in &to_fetch {
+            let raw_bytes = self.client.get_object(key).await.map_err(PollError::Http)?;
+            envelopes.push(ChunkEnvelope { kind: *kind, raw_bytes });
         }
-
-        let mut fetched: Vec<Option<Bytes>> = (0..to_fetch.len()).map(|_| None).collect();
-        while let Some(joined) = tasks.join_next().await {
-            let (idx, bytes) = joined.map_err(PollError::Task)?;
-            fetched[idx] = Some(bytes?);
-        }
-
-        let envelopes = to_fetch
-            .into_iter()
-            .zip(fetched)
-            .map(|((_, kind), bytes)| ChunkEnvelope {
-                kind,
-                raw_bytes: bytes.expect("every slot filled or an error returned above"),
-            })
-            .collect();
 
         self.last_seen_key = keys.into_iter().next_back().expect("checked non-empty above");
         Ok(envelopes)
     }
 
     async fn list_keys_after(
-        &self,
+        &mut self,
         prefix: &str,
         start_after: &str,
     ) -> Result<Vec<String>, PollError> {
@@ -138,29 +122,12 @@ impl S3Poller {
         let mut first_page = true;
 
         loop {
-            let mut params: Vec<(&str, Cow<str>)> = vec![
-                ("list-type", Cow::Borrowed("2")),
-                ("prefix", Cow::Borrowed(prefix)),
-            ];
-            // start-after is only valid on the first page; continuation-token encodes
-            // position implicitly on subsequent pages and must not be combined with it.
-            if first_page {
-                params.push(("start-after", Cow::Borrowed(start_after)));
-            }
-            if let Some(ref token) = continuation_token {
-                params.push(("continuation-token", Cow::Borrowed(token.as_str())));
-            }
-
+            // start-after is only valid on the first page; continuation-token
+            // encodes position implicitly on subsequent pages and must not
+            // be combined with it.
             let body = self
                 .client
-                .get(format!("{BUCKET_BASE}/"))
-                .query(&params)
-                .send()
-                .await
-                .map_err(PollError::Http)?
-                .error_for_status()
-                .map_err(PollError::Http)?
-                .bytes()
+                .list_prefix(prefix, first_page.then_some(start_after), continuation_token.as_deref())
                 .await
                 .map_err(PollError::Http)?;
 
@@ -176,24 +143,6 @@ impl S3Poller {
 
         Ok(all_keys)
     }
-}
-
-/// Fetches `url`'s body as-is, without copying it into a fresh `Vec<u8>` — the
-/// `Bytes` returned by reqwest is already a cheaply-clonable, reference-counted
-/// buffer. A free function (rather than an `S3Poller` method) because it is
-/// spawned as an independent task per chunk in [`S3Poller::poll_once`], which
-/// requires owned, `'static` inputs instead of a borrow of `&self`.
-async fn fetch_bytes(client: reqwest::Client, url: String) -> Result<Bytes, PollError> {
-    client
-        .get(url)
-        .send()
-        .await
-        .map_err(PollError::Http)?
-        .error_for_status()
-        .map_err(PollError::Http)?
-        .bytes()
-        .await
-        .map_err(PollError::Http)
 }
 
 /// Which of the tags we care about the reader is currently inside. Tracked as

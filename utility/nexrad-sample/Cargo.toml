@@ -16,7 +16,7 @@ path = "src/bin/decode_sample.rs"
 [dependencies]
 nexrad-decoder = { path = "../../crates/nexrad-decoder" }
 radar-workstation = { path = "../../crates/radar-workstation" }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+http-ingest = { path = "../../crates/http-ingest" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "time"] }
 
 [dev-dependencies]

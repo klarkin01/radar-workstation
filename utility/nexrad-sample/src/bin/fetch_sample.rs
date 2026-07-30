@@ -1,5 +1,4 @@
-use nexrad_sample::{download_sample, resolve_sample_url};
-use reqwest::Url;
+use nexrad_sample::{download_sample, resolve_sample_url, split_s3_url};
 use std::{env, process};
 
 #[tokio::main(flavor = "current_thread")]
@@ -15,12 +14,11 @@ async fn run() -> Result<(), String> {
         "No sample URL provided. Use --sample-url <URL> or set RADAR_SAMPLE_URL.".to_string()
     })?;
 
-    let parsed_url = Url::parse(&sample_url)
-        .map_err(|error| format!("invalid sample URL: {error}"))?;
+    let (_, key) = split_s3_url(&sample_url).map_err(|error| format!("invalid sample URL: {error}"))?;
 
-    let filename = parsed_url
-        .path_segments()
-        .and_then(|mut segments| segments.next_back())
+    let filename = key
+        .rsplit('/')
+        .next()
         .filter(|segment| !segment.is_empty())
         .ok_or_else(|| "sample URL must contain a filename".to_string())?;
 
