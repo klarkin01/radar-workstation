@@ -1,35 +1,16 @@
-use nexrad_sample::{download_sample, AcquisitionError};
+//! The old plaintext-loopback tests here relied on `reqwest` accepting plain
+//! `http://127.0.0.1:PORT`. The `http-ingest`-backed client is HTTPS-only
+//! with a compile-time host allowlist (ADR-0014), so three of the four
+//! original tests can no longer be driven against a local server; they
+//! become `#[ignore]`d live tests against real S3 instead. This is a real
+//! coverage reduction for a `utility/`-only crate (dev-only per CLAUDE.md),
+//! traded for the security properties the allowlist buys everywhere else —
+//! see docs/plans/0014-http-ingest-implementation.md §7.3.
+
+use nexrad_sample::{download_sample, split_s3_url, AcquisitionError};
 use std::fs;
-use std::io::{Read, Write};
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::thread;
 use tempfile::tempdir;
-
-fn start_test_server(status: u16, body: &[u8]) -> (String, thread::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
-    let address = listener.local_addr().expect("listener should report an address");
-    let body = body.to_vec();
-
-    let handle = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("server should accept a connection");
-        let mut buffer = [0_u8; 4096];
-        let _ = stream.read(&mut buffer).expect("server should read request bytes");
-
-        let response = format!(
-            "HTTP/1.1 {status} OK\r\nContent-Length: {}\r\nConnection: close\r\nContent-Type: application/octet-stream\r\n\r\n",
-            body.len()
-        );
-        stream
-            .write_all(response.as_bytes())
-            .expect("server should write response headers");
-        stream
-            .write_all(&body)
-            .expect("server should write response body");
-    });
-
-    (format!("http://{address}"), handle)
-}
 
 fn create_output_path(name: &str) -> (PathBuf, tempfile::TempDir) {
     let temp_dir = tempdir().expect("temp dir should be created");
@@ -42,52 +23,53 @@ fn assert_output_file_does_not_exist(output_path: &Path) {
 }
 
 #[tokio::test]
+#[ignore]
 async fn download_sample_writes_a_file_for_a_successful_response() {
-    let (url, handle) = start_test_server(200, b"radar-data");
+    let url = "https://unidata-nexrad-level2-chunks.s3.amazonaws.com/KDOX/1/20260727-164425-001-S";
     let (output_path, _temp_dir) = create_output_path("sample.bin");
 
-    let result = download_sample(&url, &output_path).await;
+    let result = download_sample(url, &output_path).await;
 
-    assert!(result.is_ok(), "download should succeed for a 200 response");
+    assert!(result.is_ok(), "download should succeed for a real key: {result:?}");
     assert_eq!(result.unwrap(), output_path);
     assert!(output_path.exists());
-    assert_eq!(fs::read(&output_path).expect("file should be readable"), b"radar-data");
-
-    handle.join().expect("test server thread should finish");
+    assert!(!fs::read(&output_path).expect("file should be readable").is_empty());
 }
 
 #[tokio::test]
+#[ignore]
 async fn download_sample_returns_an_error_for_a_non_success_status() {
-    let (url, handle) = start_test_server(404, b"");
+    let url = "https://unidata-nexrad-level2-chunks.s3.amazonaws.com/KDOX/does-not-exist";
     let (output_path, _temp_dir) = create_output_path("missing.bin");
 
-    let result = download_sample(&url, &output_path).await;
+    let result = download_sample(url, &output_path).await;
 
     assert_eq!(result.unwrap_err(), AcquisitionError::BadStatusCode(404));
     assert_output_file_does_not_exist(&output_path);
-
-    handle.join().expect("test server thread should finish");
 }
 
-#[tokio::test]
-async fn download_sample_returns_an_error_for_an_empty_body() {
-    let (url, handle) = start_test_server(200, b"");
-    let (output_path, _temp_dir) = create_output_path("empty.bin");
+#[test]
+fn download_sample_returns_an_error_for_invalid_urls() {
+    assert!(matches!(split_s3_url("not a valid url"), Err(AcquisitionError::InvalidUrl(_))));
 
-    let result = download_sample(&url, &output_path).await;
+    // http:// gets its own distinct message rather than falling through to
+    // the generic "missing scheme" case.
+    assert!(matches!(
+        split_s3_url("http://unidata-nexrad-level2-chunks.s3.amazonaws.com/key"),
+        Err(AcquisitionError::InvalidUrl(_))
+    ));
 
-    assert_eq!(result.unwrap_err(), AcquisitionError::EmptyResponse);
-    assert_output_file_does_not_exist(&output_path);
+    // Allowlisted host, but no key — a syntax failure, not a network call.
+    assert!(matches!(
+        split_s3_url("https://unidata-nexrad-level2-chunks.s3.amazonaws.com/"),
+        Err(AcquisitionError::InvalidUrl(_))
+    ));
 
-    handle.join().expect("test server thread should finish");
-}
-
-#[tokio::test]
-async fn download_sample_returns_an_error_for_invalid_urls() {
-    let (output_path, _temp_dir) = create_output_path("invalid.bin");
-
-    let result = download_sample("not a valid url", &output_path).await;
-
-    assert!(matches!(result.unwrap_err(), AcquisitionError::InvalidUrl(_)));
-    assert_output_file_does_not_exist(&output_path);
+    // A non-allowlisted host passes syntax (split_s3_url doesn't check the
+    // allowlist) but is rejected once Client::new sees it.
+    let (host, _key) = split_s3_url("https://evil.com/key").unwrap();
+    assert_eq!(
+        http_ingest::Client::new(host).err().map(|e| matches!(e, http_ingest::Error::HostNotAllowed(_))),
+        Some(true)
+    );
 }

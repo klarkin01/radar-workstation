@@ -1,0 +1,13 @@
+HTTP/1.1 200 OK
+x-amz-id-2: KUf9kwd48gVTt9AolFKWMaAd84xCyvOLYJp1H8hZu+TO3epjFYjuGRQ1C3sTlVxJjnm/yTyyDlA=
+x-amz-request-id: VET3ZTT0SD2X6RA7
+Date: Thu, 30 Jul 2026 00:39:02 GMT
+Last-Modified: Mon, 27 Jul 2026 16:44:27 GMT
+x-amz-expiration: expiry-date="Wed, 29 Jul 2026 00:00:00 GMT", rule-id="Delete old data"
+ETag: "85a6956bb210666ea8767bfb3c75b393"
+x-amz-server-side-encryption: AES256
+Accept-Ranges: bytes
+Content-Type: binary/octet-stream
+Content-Length: 2486
+Server: AmazonS3
+

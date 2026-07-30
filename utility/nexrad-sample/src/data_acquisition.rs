@@ -2,10 +2,13 @@ use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use crate::url::split_s3_url;
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum AcquisitionError {
     HttpFailure(String),
     BadStatusCode(u16),
+    NotAllowed(String),
     EmptyResponse,
     Io(String),
     InvalidUrl(String),
@@ -16,6 +19,7 @@ impl fmt::Display for AcquisitionError {
         match self {
             Self::HttpFailure(message) => write!(f, "HTTP failure: {message}"),
             Self::BadStatusCode(status) => write!(f, "unexpected HTTP status code: {status}"),
+            Self::NotAllowed(host) => write!(f, "host not allowed: {host}"),
             Self::EmptyResponse => write!(f, "downloaded response body was empty"),
             Self::Io(message) => write!(f, "I/O error: {message}"),
             Self::InvalidUrl(url) => write!(f, "invalid URL: {url}"),
@@ -25,29 +29,19 @@ impl fmt::Display for AcquisitionError {
 
 impl Error for AcquisitionError {}
 
-pub async fn download_sample(url: &str, output_path: &Path) -> Result<PathBuf, AcquisitionError> {
-    let parsed_url = reqwest::Url::parse(url).map_err(|error| AcquisitionError::InvalidUrl(error.to_string()))?;
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|error| AcquisitionError::HttpFailure(error.to_string()))?;
-
-    let response = client
-        .get(parsed_url)
-        .send()
-        .await
-        .map_err(|error| AcquisitionError::HttpFailure(error.to_string()))?;
-
-    let status = response.status();
-    if !status.is_success() {
-        return Err(AcquisitionError::BadStatusCode(status.as_u16()));
+fn map_client_error(error: http_ingest::Error) -> AcquisitionError {
+    match error {
+        http_ingest::Error::HostNotAllowed(host) => AcquisitionError::NotAllowed(host),
+        http_ingest::Error::Http { status } => AcquisitionError::BadStatusCode(status),
+        other => AcquisitionError::HttpFailure(other.to_string()),
     }
+}
 
-    let body = response
-        .bytes()
-        .await
-        .map_err(|error| AcquisitionError::HttpFailure(error.to_string()))?;
+pub async fn download_sample(url: &str, output_path: &Path) -> Result<PathBuf, AcquisitionError> {
+    let (host, key) = split_s3_url(url)?;
+
+    let mut client = http_ingest::Client::new(host).map_err(map_client_error)?;
+    let body = client.get_object(key).await.map_err(map_client_error)?;
 
     if body.is_empty() {
         return Err(AcquisitionError::EmptyResponse);

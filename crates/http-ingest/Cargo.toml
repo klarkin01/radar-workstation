@@ -1,0 +1,16 @@
+[package]
+name = "http-ingest"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Workspace-local HTTP/1.1 client for the NEXRAD S3 acquisition boundary (ADR-0014)"
+
+[dependencies]
+tokio        = { version = "1",    default-features = false, features = ["net", "time", "io-util", "rt"] }
+rustls       = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+webpki-roots = "1"
+bytes        = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

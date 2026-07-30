@@ -2,7 +2,9 @@
 members = [
     "crates/radar-workstation",
     "crates/nexrad-decoder",
+    "crates/http-ingest",
     "utility/nexrad-sample",
     "utility/radar-viz",
 ]
+exclude = ["crates/http-ingest/fuzz"]
 resolver = "2"

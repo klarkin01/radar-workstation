@@ -1,7 +1,7 @@
 # ADR-0013: HTTP Client Dependency for S3 Data Acquisition
 
 ## Status
-Accepted
+Superseded by ADR-0014
 
 ## Context
 The real-time data pipeline established in ADR-0011 pulls NEXRAD Level II chunks from
