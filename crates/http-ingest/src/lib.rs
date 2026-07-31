@@ -48,8 +48,9 @@ impl Client {
         prefix: &str,
         start_after: Option<&str>,
         continuation_token: Option<&str>,
+        delimiter: Option<&str>,
     ) -> Result<Bytes, Error> {
-        let path = request::list_query(prefix, start_after, continuation_token)?;
+        let path = request::list_query(prefix, start_after, continuation_token, delimiter)?;
         self.send(&path).await
     }
 

@@ -5,11 +5,17 @@ use crate::error::Error;
 ///
 /// `start_after` and `continuation_token` are mutually exclusive at the S3
 /// API level (the caller is responsible for that invariant — see
-/// `S3Poller::list_keys_after`'s `first_page` logic).
+/// `S3Poller::list_all_keys_after`'s `first_page` logic).
+///
+/// `delimiter` requests `<CommonPrefixes>` grouping instead of (or in
+/// addition to) flat `<Contents>` — used by `S3Poller::list_volume_folders`
+/// to enumerate the chunk bucket's volume-sequence subdirectories without
+/// paging through every key in them.
 pub fn list_query(
     prefix: &str,
     start_after: Option<&str>,
     continuation_token: Option<&str>,
+    delimiter: Option<&str>,
 ) -> Result<String, Error> {
     let mut out = String::from("/?list-type=2&prefix=");
     out.push_str(&encode_query_value(prefix)?);
@@ -20,6 +26,10 @@ pub fn list_query(
     if let Some(token) = continuation_token {
         out.push_str("&continuation-token=");
         out.push_str(&encode_query_value(token)?);
+    }
+    if let Some(delimiter) = delimiter {
+        out.push_str("&delimiter=");
+        out.push_str(&encode_query_value(delimiter)?);
     }
     Ok(out)
 }
@@ -64,7 +74,7 @@ mod tests {
 
     #[test]
     fn list_prefix_no_pagination_args() {
-        let pq = list_query("KDOX/", None, None).unwrap();
+        let pq = list_query("KDOX/", None, None, None).unwrap();
         assert_eq!(pq, "/?list-type=2&prefix=KDOX%2F");
         let bytes = format_request(HOST, &pq);
         assert_eq!(String::from_utf8(bytes).unwrap(), golden(&pq));
@@ -72,10 +82,10 @@ mod tests {
 
     #[test]
     fn list_prefix_with_start_after() {
-        let pq = list_query("KDOX/", Some("KDOX/2026/07/29/00/"), None).unwrap();
+        let pq = list_query("KDOX/", Some("KDOX/166/20260728-095259-005-I"), None, None).unwrap();
         assert_eq!(
             pq,
-            "/?list-type=2&prefix=KDOX%2F&start-after=KDOX%2F2026%2F07%2F29%2F00%2F"
+            "/?list-type=2&prefix=KDOX%2F&start-after=KDOX%2F166%2F20260728-095259-005-I"
         );
         let bytes = format_request(HOST, &pq);
         assert_eq!(String::from_utf8(bytes).unwrap(), golden(&pq));
@@ -83,15 +93,23 @@ mod tests {
 
     #[test]
     fn list_prefix_with_continuation_token() {
-        let pq = list_query("KDOX/", None, Some("abc+/=")).unwrap();
+        let pq = list_query("KDOX/", None, Some("abc+/="), None).unwrap();
         assert_eq!(pq, "/?list-type=2&prefix=KDOX%2F&continuation-token=abc%2B%2F%3D");
         let bytes = format_request(HOST, &pq);
         assert_eq!(String::from_utf8(bytes).unwrap(), golden(&pq));
     }
 
     #[test]
+    fn list_prefix_with_delimiter() {
+        let pq = list_query("KDOX/", None, None, Some("/")).unwrap();
+        assert_eq!(pq, "/?list-type=2&prefix=KDOX%2F&delimiter=%2F");
+        let bytes = format_request(HOST, &pq);
+        assert_eq!(String::from_utf8(bytes).unwrap(), golden(&pq));
+    }
+
+    #[test]
     fn list_prefix_empty_prefix() {
-        let pq = list_query("", None, None).unwrap();
+        let pq = list_query("", None, None, None).unwrap();
         assert_eq!(pq, "/?list-type=2&prefix=");
         let bytes = format_request(HOST, &pq);
         assert_eq!(String::from_utf8(bytes).unwrap(), golden(&pq));

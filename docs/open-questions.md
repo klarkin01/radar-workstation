@@ -38,6 +38,30 @@ Define: default cache location (XDG cache dir convention on Linux), maximum cach
 (configurable?), eviction policy (LRU by last access time is standard), and whether
 cache is shared across instances or per-instance.
 
+**Q15: How is shapefile geometry loaded for production overlays?**
+ADR-0006 designates `shapefile`, `geo`, and `lyon` for production overlay loading. That
+puts a 0.x single-maintainer binary parser (plus `dbase` 0.5 and `time` 0.3) on a startup
+path that must not panic, per Principle 2 (Stability as Ethics). The alternative: since
+ADR-0006 already pre-projects overlays at load time, pre-project them at **build** time
+into a flat bundled format the app `mmap`s — removing `shapefile`, `dbase`, `time`, and
+`geo` from the shipped binary, eliminating a class of startup panic, and helping the
+< 2 s first-render target. Resolving this means either accepting those dependencies under
+a recorded rationale or superseding ADR-0006's parser clause. **Blocks:** overlay loading
+implementation. Analysis: `docs/dependency-inventory.md` E-07.
+
+**Q16: What HTTP client serves ADR-0007's tile providers?**
+ADR-0007 requires a user-supplied URL template against an **arbitrary** host, which in
+practice means redirect following, `ETag` / `If-None-Match` for the disk cache, and
+possibly HTTP/2. ADR-0014 lists all of those as explicit non-goals of `http-ingest` and
+says a need like this is "a signal to reopen this ADR, not to grow the crate." Three
+options, assessed in `docs/dependency-inventory.md`: generalize `http-ingest`; add a
+second, separate client crate scoped as best-effort and structurally unable to affect the
+radar path; or reintroduce a third-party client for tiles only. The inventory recommends
+the second option and rates the third worst. The answer determines whether
+`http-ingest`'s compile-time host allowlist is a permanent asset or a temporary one, so it
+must be settled **before** any tile code is written, and recorded in its own ADR.
+**Blocks:** the entire tile subsystem. Analysis: `docs/dependency-inventory.md` E-09.
+
 ---
 
 ## Data and Products — Resolve During Decoder Implementation

@@ -1,11 +1,11 @@
 use std::cmp::Ordering;
 
-use image::{ImageBuffer, Rgba};
 use nexrad_decoder::{ProductKind, Radial};
 
 use crate::color_table::ColorTable;
+use crate::png_out::Raster;
 
-pub type PpiImage = ImageBuffer<Rgba<u8>, Vec<u8>>;
+pub type PpiImage = Raster;
 
 /// Maximum azimuthal gap (degrees) before a pixel is treated as no-data.
 /// Guards against incorrectly coloring pixels in incomplete scans.
@@ -23,8 +23,8 @@ pub fn render_ppi(
     range_km: f32,
     size: u32,
 ) -> PpiImage {
-    let bg = Rgba([15u8, 15, 15, 255]);
-    let mut img = ImageBuffer::from_pixel(size, size, bg);
+    let bg = [15u8, 15, 15, 255];
+    let mut img = Raster::filled(size, size, bg);
 
     if radials.is_empty() || range_km <= 0.0 || size == 0 {
         return img;
@@ -88,7 +88,7 @@ pub fn render_ppi(
 
             // Only write non-transparent colors; transparent entries fall through to background.
             if color[3] > 0 {
-                img.put_pixel(x, y, Rgba(color));
+                img.put_pixel(x, y, color);
             }
         }
     }

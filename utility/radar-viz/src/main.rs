@@ -13,6 +13,7 @@ use radar_workstation::{decompress_chunk, detect_chunk_kind};
 
 mod color_table;
 mod overlay;
+mod png_out;
 mod render;
 
 use color_table::ColorTable;
@@ -115,7 +116,7 @@ fn run() -> Result<(), String> {
         }
     }
 
-    img.save(&args.output)
+    png_out::write_png(&img, &args.output)
         .map_err(|e| format!("failed to write PNG: {e}"))?;
 
     eprintln!("Done.");

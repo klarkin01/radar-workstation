@@ -1,7 +1,8 @@
 use std::path::Path;
 
-use image::{ImageBuffer, Rgba};
 use shapefile::Shape;
+
+use crate::png_out::Raster;
 
 /// A collection of projected polyline parts ready to draw.
 pub struct OverlayLayer {
@@ -47,7 +48,7 @@ impl OverlayLayer {
 
 /// Draw a loaded overlay onto `img` using the same coordinate system as `render_ppi`.
 pub fn draw_overlay(
-    img: &mut ImageBuffer<Rgba<u8>, Vec<u8>>,
+    img: &mut Raster,
     layer: &OverlayLayer,
     site_lat: f64,
     site_lon: f64,
@@ -57,7 +58,7 @@ pub fn draw_overlay(
     let cx = size as f32 / 2.0;
     let cy = size as f32 / 2.0;
     let pixels_per_km = cx / range_km;
-    let color = Rgba(layer.color);
+    let color = layer.color;
 
     for part in &layer.parts {
         let pixels: Vec<(i32, i32)> = part
@@ -96,13 +97,13 @@ fn az_eq_project(site_lat: f64, site_lon: f64, lat: f64, lon: f64) -> (f32, f32)
 /// Bresenham line draw with per-pixel bounds clipping.
 /// Trivially rejects segments that lie entirely outside one edge of the image.
 fn draw_line(
-    img: &mut ImageBuffer<Rgba<u8>, Vec<u8>>,
+    img: &mut Raster,
     x0: i32,
     y0: i32,
     x1: i32,
     y1: i32,
     size: u32,
-    color: Rgba<u8>,
+    color: [u8; 4],
 ) {
     let (w, h) = (size as i32, size as i32);
     if x0 < 0 && x1 < 0 { return; }
