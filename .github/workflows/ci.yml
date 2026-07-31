@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test-lint:
+    runs-on: ubuntu-latest
+    steps:
+      # Only third-party action in this workflow, pinned by commit SHA (not
+      # a tag) — actions/checkout v7.0.1, 2026-07-31.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      # No other third-party actions, and no rustup/toolchain-install action:
+      # the toolchain installs itself from rust-toolchain.toml on the first
+      # `cargo` invocation below, and cargo-deny/cargo-audit install via
+      # `cargo install --locked`. This trades a couple of minutes of build
+      # time for not granting any third-party action write access to the
+      # build — the right side of that trade for a project whose stated
+      # posture is "approvable in government and defense environments."
+      # Do not "optimize" this into actions-rs or a caching action without
+      # revisiting that reasoning.
+
+      - name: cargo build --release --workspace
+        run: cargo build --release --workspace
+
+      # --workspace explicitly: default-members (Cargo.toml) scopes the bare
+      # `cargo build`/`cargo test` to the three production crates, so CI must
+      # opt back in to also cover the utility/ dev tools.
+      - name: cargo test --workspace
+        run: cargo test --release --workspace
+
+      - name: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: install cargo-deny
+        run: cargo install --locked cargo-deny --version 0.20.2
+
+      - name: cargo deny check
+        run: cargo deny check
+
+      - name: install cargo-audit
+        run: cargo install --locked cargo-audit --version 0.22.2
+
+      - name: cargo audit
+        run: cargo audit
+
+      # Live-network tests (`--ignored`) never run here, deliberately: they
+      # dial out to real S3 buckets, which would make CI non-deterministic
+      # and would conflict with the "no undisclosed network connections"
+      # principle for anything that isn't a step a human explicitly reads
+      # and approves. Run them manually: `cargo test -p http-ingest -p
+      # radar-workstation -- --ignored`.
