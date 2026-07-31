@@ -1,0 +1,8 @@
+[package]
+name = "fuzz-support"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Dev-only seeded mutator shared by parser hardening tests (not shipped in any binary)"
+
+[dependencies]

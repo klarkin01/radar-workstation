@@ -6,3 +6,6 @@ license = "Apache-2.0"
 description = "NEXRAD Level II radar data decoder"
 
 [dependencies]
+
+[dev-dependencies]
+fuzz-support = { path = "../fuzz-support" }

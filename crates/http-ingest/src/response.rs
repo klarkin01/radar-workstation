@@ -542,56 +542,15 @@ mod tests {
         }
     }
 
-    /// Minimal xorshift64 PRNG — no dependency, and a fixed seed makes any
-    /// failure reproducible rather than a flake.
-    struct XorShift64(u64);
-
-    impl XorShift64 {
-        fn next(&mut self) -> u64 {
-            let mut x = self.0;
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            self.0 = x;
-            x
-        }
-    }
-
     #[test]
     fn mutated_inputs_never_panic() {
         let limits = Limits::default();
         let seeds = read_corpus();
         assert!(!seeds.is_empty());
 
-        let mut rng = XorShift64(0x9E37_79B9_7F4A_7C15);
+        let mut rng = fuzz_support::XorShift64::new(0x9E37_79B9_7F4A_7C15);
         for _ in 0..5000 {
-            let seed = &seeds[(rng.next() as usize) % seeds.len()];
-            if seed.is_empty() {
-                continue;
-            }
-            let mut mutated = seed.clone();
-            match rng.next() % 3 {
-                0 => {
-                    // bit flip
-                    let idx = (rng.next() as usize) % mutated.len();
-                    let bit = (rng.next() % 8) as u8;
-                    mutated[idx] ^= 1 << bit;
-                }
-                1 => {
-                    // byte splice from another seed
-                    let other = &seeds[(rng.next() as usize) % seeds.len()];
-                    if !other.is_empty() {
-                        let src_idx = (rng.next() as usize) % other.len();
-                        let dst_idx = (rng.next() as usize) % mutated.len();
-                        mutated[dst_idx] = other[src_idx];
-                    }
-                }
-                _ => {
-                    // truncation
-                    let new_len = (rng.next() as usize) % (mutated.len() + 1);
-                    mutated.truncate(new_len);
-                }
-            }
+            let mutated = fuzz_support::mutate_one(&mut rng, &seeds);
             let _ = parse_head(&mutated, &limits); // must not panic
         }
     }

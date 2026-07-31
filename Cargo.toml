@@ -3,6 +3,7 @@ members = [
     "crates/radar-workstation",
     "crates/nexrad-decoder",
     "crates/http-ingest",
+    "crates/fuzz-support",
     "utility/nexrad-sample",
     "utility/radar-viz",
 ]
