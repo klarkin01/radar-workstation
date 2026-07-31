@@ -7,9 +7,10 @@
 //! clock access. `now` is a parameter on every call rather than read
 //! internally, which is what makes the watchdog timeout — the one
 //! ADR-0012 exit path that would otherwise need a real ten-minute wait to
-//! test — an ordinary unit test. The async wrapper that reads chunks off a
-//! channel and drives the watchdog on a timer lives elsewhere and stays a
-//! thin shell around this.
+//! test — an ordinary unit test. [`run`] is the async wrapper that reads
+//! chunks off a channel and drives the watchdog on a timer; it stays a thin
+//! shell around the core on purpose — if it grows logic, that logic belongs
+//! above instead.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -312,6 +313,61 @@ impl VolumeAssembler {
         self.state = AssemblyState::Idle;
         self.meta = VolumeMeta::default();
         self.closed_elevations = HashSet::new();
+    }
+}
+
+/// How often [`run`] drives [`VolumeAssembler::on_tick`] independently of
+/// chunk arrivals. Well under the watchdog timeout so a stalled volume is
+/// noticed promptly rather than only on the next chunk (which may never
+/// come — that is exactly the case the watchdog exists for).
+const TICK_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Decode and feed one raw chunk to `assembler`, using `now` for both the
+/// decode-failure path and the successful `on_chunk` call.
+///
+/// A decode failure here is silently dropped rather than surfaced — FR-ND-7
+/// requires that a decode failure not crash or freeze the application, and
+/// dropping one chunk (a bounded gap, exactly like a chunk that never
+/// arrived at all) satisfies that. Making the failure *observable* is
+/// S1-W3c's typed event/logging work, not duplicated here ahead of it.
+fn decode_and_ingest(
+    assembler: &mut VolumeAssembler,
+    envelope: crate::ingest::ChunkEnvelope,
+    now: Instant,
+) -> Vec<AssemblyEvent> {
+    let Ok(decompressed) = crate::chunk::decompress_chunk(&envelope.raw_bytes, envelope.kind) else {
+        return Vec::new();
+    };
+    let Ok(radials) = nexrad_decoder::parse_radial_stream(&decompressed) else {
+        return Vec::new();
+    };
+    assembler.on_chunk(envelope.kind, radials, now)
+}
+
+/// Drives a [`VolumeAssembler`] from a channel of raw chunks, decoding each
+/// one and forwarding assembly events to `tx`. Returns when `rx` closes or
+/// `tx`'s receiver is dropped.
+pub async fn run(
+    mut rx: tokio::sync::mpsc::Receiver<crate::ingest::ChunkEnvelope>,
+    tx: tokio::sync::mpsc::Sender<AssemblyEvent>,
+    config: AssemblyConfig,
+) {
+    let mut assembler = VolumeAssembler::new(config);
+    let mut ticker = tokio::time::interval(TICK_INTERVAL);
+
+    loop {
+        let events = tokio::select! {
+            chunk = rx.recv() => {
+                let Some(envelope) = chunk else { return };
+                decode_and_ingest(&mut assembler, envelope, Instant::now())
+            }
+            _ = ticker.tick() => assembler.on_tick(Instant::now()),
+        };
+        for event in events {
+            if tx.send(event).await.is_err() {
+                return;
+            }
+        }
     }
 }
 
