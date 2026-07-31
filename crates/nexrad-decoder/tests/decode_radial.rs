@@ -371,6 +371,23 @@ fn legacy_size_records_are_skipped() {
 }
 
 #[test]
+fn unknown_radial_status_code_does_not_discard_the_radial() {
+    // Newer RDA builds have added radial status codes this build does not
+    // recognize (e.g. MRLE variants). FR-ND-7 requires a decode failure to
+    // never discard a whole chunk's worth of otherwise-good radials, so an
+    // unrecognized status code must decode to RadialStatus::Unknown with
+    // its geometry and moment data intact, not propagate an error.
+    let mut data = fixture!("kdox_vcp35_end_of_volume.bin").to_vec();
+    // radial_status is at record offset 28 (body offset) + 21.
+    data[28 + 21] = 200;
+
+    let radials = parse_radial_stream(&data).expect("unknown status must not error");
+    assert_eq!(radials.len(), 1);
+    assert_eq!(radials[0].radial_status, RadialStatus::Unknown(200));
+    assert!(radials[0].products.contains_key(&ProductKind::Ref), "moment data must survive");
+}
+
+#[test]
 fn truncated_msg31_record_returns_error() {
     // Craft a header that claims msg_type=31 with size_hw=5000 (10000 byte record),
     // but the buffer is only 100 bytes — record slice will fail.

@@ -10,18 +10,27 @@ pub enum RadialStatus {
     EndOfVolume,
     /// SAILS supplemental low-level cut.
     SailsCut,
+    /// A radial status code this build does not recognize. Newer RDA builds
+    /// have added status codes (e.g. for MRLE variants); an unrecognized
+    /// code is not by itself a reason to discard 120 radials of real data
+    /// (FR-ND-7). The radial's geometry and moment data are decoded and kept
+    /// intact; only the closure-signal meaning of the code is unknown, and
+    /// callers must treat it as `Intermediate` for sweep-closure purposes —
+    /// an unrecognized code is by definition not a closure signal we can act
+    /// on.
+    Unknown(u8),
 }
 
 impl RadialStatus {
-    pub fn from_code(code: u8) -> Option<Self> {
+    pub fn from_code(code: u8) -> Self {
         match code {
-            0 => Some(Self::StartOfElevation),
-            1 => Some(Self::Intermediate),
-            2 => Some(Self::EndOfElevation),
-            3 => Some(Self::StartOfVolume),
-            4 => Some(Self::EndOfVolume),
-            5 => Some(Self::SailsCut),
-            _ => None,
+            0 => Self::StartOfElevation,
+            1 => Self::Intermediate,
+            2 => Self::EndOfElevation,
+            3 => Self::StartOfVolume,
+            4 => Self::EndOfVolume,
+            5 => Self::SailsCut,
+            other => Self::Unknown(other),
         }
     }
 }
