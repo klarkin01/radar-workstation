@@ -10,6 +10,14 @@ Finding IDs in this document use the `E-` namespace. The previous audit (against
 `f512ea8`, cited in ADR-0014) used `D-`; cross-references to those IDs are preserved
 so the ADR trail stays navigable.
 
+> **Superseded — point-in-time audit (2026-07-30).** This document assesses the tree at
+> `74a1065` (2026-07-29). Findings E-01…E-10 describe the **pre-remediation** tree and are
+> retained as the audit trail, not as current state. The remediation that closed most of
+> them is `docs/plans/dependency-inventory-remediation.md`; its §9 Results is the
+> authoritative account of the current dependency posture. Findings E-11 and E-12 were
+> appended 2026-07-31, after that remediation, and are the only content here written
+> against the post-remediation tree.
+
 ---
 
 ## 1. Executive summary
@@ -36,7 +44,7 @@ the code rather than the ADR's claim about it:
 | D-01 FIPS rationale unfounded | **Resolved** | `grep -c aws-lc Cargo.lock` → `0`. The claim is gone along with the dependency; ADR-0014 records the trade explicitly rather than restating it. |
 | D-02 system trust store consulted | **Resolved** | `tls.rs:16-22` builds a `RootCertStore` from `webpki_roots::TLS_SERVER_ROOTS` and nothing else. No platform verifier in the graph. |
 | D-03 two crypto stacks | **Resolved by construction** | One `http-ingest` crate; there is no second HTTP client to disagree with. |
-| D-06 unused `stream` / `async-tokio` features | **Resolved** | `quick-xml = "0.37"` with no features; no streaming API to leave dead. |
+| D-06 unused `stream` / `async-tokio` features | **Resolved** | `quick-xml = "0.37"` at audit time (now `0.41`, see E-12) with no features; no streaming API to leave dead. |
 | D-07 ICU4X for one ASCII hostname | **Resolved** | No `url`, `idna`, or `icu_*` anywhere in the lockfile. Hostnames are a compile-time allowlist (`host.rs:3-6`). |
 | D-08 reqwest 0.12/0.13 split | **Resolved** | Both gone. |
 | D-11 `query` feature kept deliberately | **Superseded, correctly** | I previously argued *keep* `serde_urlencoded` because base64 continuation tokens contain `=`, `+`, `/`. `encode.rs` encodes strictly the RFC 3986 unreserved set, and `request.rs` has a test asserting the exact encoding of a real 100-char token. The concern was addressed rather than inherited. |
@@ -88,7 +96,7 @@ transitive dependencies with five direct ones.
 | `bzip2` | 0.6 | 0015 | **yes** — `libbz2-rs-sys`, pure Rust |
 | `bytes` | 1 | 0017 | yes |
 | `tokio` | 1 | 0004 | yes |
-| `quick-xml` | 0.37 | 0016 | yes |
+| `quick-xml` | 0.41 <!-- corrected 2026-07-30, was 0.37 at audit time; see E-12 --> | 0016 | yes |
 
 ### `utility/` — explicitly non-production
 
@@ -190,6 +198,9 @@ ADR-0014, but it has to be assessed rather than assumed, so I read all of it.
 
 **E-02 — the ADR body and its erratum disagree about `httparse`.** `low`
 
+**Resolved** by W2 of the remediation plan. Verify against: ADR-0014's Decision table vs.
+`crates/http-ingest/Cargo.toml` — the erratum is now folded into the table body.
+
 ADR-0014's Decision table lists `httparse` as a direct dependency with the rationale
 *"Alternative to hand-rolling."* Erratum item 2 correctly states it was not taken. A
 reader who consults the table — the part of the document that looks authoritative for
@@ -199,6 +210,9 @@ correct it. Worth folding the erratum into the table body.
 *Effort: 10 minutes. No code impact.*
 
 **E-03 — chunk fetches are now serialized.** `medium — verify against the perf target`
+
+**Resolved — measured, not over budget.** Fan-out was not applied. Verify against: the
+remediation plan's §9.1 and §9.2.
 
 The prior implementation fetched a batch concurrently via `tokio::task::JoinSet`. ADR-0014
 chose a single keepalive connection with no pool, so `s3_poll.rs:104-108` now fetches
@@ -244,6 +258,9 @@ rather than a default. *Effort: one line either way, plus a sentence in ADR-0014
 
 ### E-04 — `default-members` is still unset `medium` *(was D-04)*
 
+**Resolved** by W3 of the remediation plan. Verify against: root `Cargo.toml`'s
+`default-members`, which now scopes the default build to the three production crates.
+
 `CLAUDE.md`: *"The utility/ directory contains tools that are strictly not intended for
 production."* The workspace root has `exclude` for the fuzz directory but no
 `default-members`, so a bare `cargo build` still compiles **62 units instead of 35** —
@@ -263,7 +280,11 @@ default-members = ["crates/radar-workstation", "crates/nexrad-decoder", "crates/
 
 ### E-05 — reproducibility scaffolding still absent `medium` *(was D-05)*
 
-Principle 7 names reproducible builds. Still missing:
+**Resolved** by W4 of the remediation plan — all four pieces. Verify against:
+`rust-toolchain.toml`, `deny.toml`, the `[profile.release]` block in the root
+`Cargo.toml`, and `.gitignore` (the `Cargo.lock` entry is gone).
+
+Principle 7 names reproducible builds. Still missing (at the time of this audit):
 
 - no `rust-toolchain.toml` — nothing pins the compiler
 - no `deny.toml` / `cargo-deny`, no `cargo-vet`
@@ -287,7 +308,10 @@ reproducible.
 
 ### E-06 — `image` still pulls two 0.x single-author crates `low` *(was D-10)*
 
-`radar-viz` declares `image 0.25` with `default-features = false, features = ["png"]` —
+**Resolved** by W6 of the remediation plan — hand-rolled encoder. Verify against:
+`utility/radar-viz/Cargo.toml` (no `image` dependency) and `src/png_out.rs`.
+
+`radar-viz` declares (at the time of this audit) `image 0.25` with `default-features = false, features = ["png"]` —
 correct hygiene — and still receives `moxcms` 0.8.1 (color management, single author) and
 `pxfm` 0.1.29 (float math, single author, **0.1.x**, no `repository` field in its
 manifest), plus `flate2`, `miniz_oxide`, `fdeflate`, `bytemuck`, `num-traits`,
@@ -301,6 +325,9 @@ would drop ~8 crates for roughly 40 lines.
 pattern that reaches `crates/` when the real render path needs a raster encoder.*
 
 ### E-07 — ADR-0006 still plans a single-maintainer parser for production `medium` *(was D-09)*
+
+**Still open.** Now also tracked as `docs/open-questions.md` Q15 — that is the live version
+of this finding.
 
 `shapefile` 0.6 and `dbase` 0.5 are both 0.x, both from a single maintainer, and `dbase`
 pulls `time` 0.3 for DBF date fields. Confined to `utility/radar-viz` today, which is fine.
@@ -377,6 +404,9 @@ account) — but is otherwise inert. Confirmed live against S3 both before and a
 
 ### E-09 — the client cannot serve ADR-0007 `medium — architectural, plan now`
 
+**Still open.** Now also tracked as `docs/open-questions.md` Q16 — that is the live version
+of this finding.
+
 This is the one genuinely *new* forward-looking gap, and it follows directly from
 ADR-0014's own scope boundaries, which explicitly exclude arbitrary URL parsing, redirect
 following, and *"serving as a general-purpose HTTP client for other crates in the
@@ -439,8 +469,8 @@ actual goal.
 | No undisclosed network connections | holds | **holds, strengthened** | Compile-time host allowlist (`host.rs`); no redirects; no proxy support; no telemetry crate; all 7 network tests `#[ignore]`d so `cargo test` never dials out. |
 | Custom decoder, no third-party (ADR-0008) | exemplary | **exemplary** | `nexrad-decoder` still has an empty `[dependencies]`. |
 | Memory-safe by construction | **at risk** | **acceptable** | Non-Rust surface cut 89%, from 1,345,961 to 151,501 LOC. The remainder is irreducible for TLS. Decompression — the untrusted-input path — is now pure Rust. |
-| Minimal dependencies, auditable | **at risk** | **holds** | 104 → 35 compiled units for the app. Every direct dependency has an ADR. Still no `cargo-deny` config (E-05). |
-| Reproducible builds | gaps | **gaps, but smaller** | `aws-lc-sys`'s host-probing C build is gone. Still no toolchain pin, no `[profile.release]`, lockfile still listed in `.gitignore` (E-05). |
+| Minimal dependencies, auditable | **at risk** | **holds** | 104 → 35 compiled units for the app. Every direct dependency has an ADR. At audit time: still no `cargo-deny` config (E-05) — **corrected 2026-07-30: `deny.toml` now exists and `cargo deny check` runs in CI; E-05 is resolved.** |
+| Reproducible builds | gaps | **gaps, but smaller** | `aws-lc-sys`'s host-probing C build is gone. At audit time: no toolchain pin, no `[profile.release]`, lockfile still listed in `.gitignore` (E-05) — **corrected 2026-07-30: all three are now false; `rust-toolchain.toml`, `[profile.release]`, and a tracked `Cargo.lock` all exist; E-05 is resolved.** |
 | Lightweight by design | unproven | **improving, still unproven** | `fetch-sample` 4.80 → 3.07 MB. `radar-workstation` is still 447 KB *only because `main.rs` is a 4-line stub* — the linker strips the network tree. Treat 3.07 MB as the floor before egui/wgpu. |
 | Stability is a trust relationship | — | **strong on the new code** | 111 tests green, clippy clean, fuzz corpus gated on stable `cargo test`, four independent timeout phases, every buffer explicitly bounded. Untested: the serialized-fetch latency budget (E-03). |
 | Dependencies chosen conservatively | gaps | **holds** | ADRs 0014–0017 close the three-dependency documentation gap. ADR-0013 correctly marked superseded, retained for continuity. |
@@ -449,6 +479,11 @@ actual goal.
 ---
 
 ## 8. Recommended order of work
+
+**Corrected 2026-07-30: items 1, 2, 3, 4, 7, and 8 below are complete** (E-02, E-04, E-05,
+E-03, E-06, E-01 — see the inline markers in §5). Only E-07 (item 6) and E-09 (item 5)
+remain, and both are now tracked live as `docs/open-questions.md` Q15 and Q16
+respectively. The list below is preserved as originally written, for the audit trail.
 
 Nothing here is urgent; the tree is in good shape. Ordered by value per unit of effort:
 

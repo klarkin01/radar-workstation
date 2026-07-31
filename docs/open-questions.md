@@ -1,14 +1,15 @@
 # Open Questions
 
 *Unresolved design questions that need answers before or during implementation of the
-relevant subsystem. Remove a question when it is resolved, and record the decision in
-an ADR if it is architecturally significant.*
+relevant subsystem. When a question is resolved, move it to the "Resolved" section at
+the end of this document — with the decision and where it landed — rather than deleting
+it. Record the decision in an ADR as well if it is architecturally significant.*
 
 ---
 
 ## Critical — Must Resolve Before Implementation
 
-
+None outstanding.
 
 ---
 
@@ -97,6 +98,18 @@ table format would give immediate access to this ecosystem. Define: which palett
 to support, where user palettes are stored, and how defaults are shipped with the
 application.
 
+**Q17: What are the radar texture's grid dimensions, for standard-res and super-res
+alike?** `docs/architecture/rendering.md`'s Polar Grid Representation section records
+measured super-resolution geometry (0.25 km gates, ~0.5° azimuthal spacing, maximum
+range varying by moment and tilt from 174 km to 460 km) from the KDOX VCP 35 fixtures in
+`crates/nexrad-decoder/tests/fixtures/` — but all five fixtures are super-resolution
+only, so standard-resolution cut geometry is not yet confirmed against sample data
+(overlaps DOC-09's fixture-coverage gap, see decoder `TESTING.md`). FR-ND-3 requires the
+decoder to support both variants. Open: whether standard-res and super-res sweeps share
+one texture format or two, and what the shared/differing dimensions are. **Blocks:** the
+compute layer's texture generation. Related: Q8 (v1.0 product set — dual-pol moments
+have their own, narrower range at some tilts, per the measured table).
+
 ---
 
 ## Distribution — Resolve Before First Public Release
@@ -111,3 +124,35 @@ has security sandbox implications worth evaluating given the government use case
 Define minimum: Linux kernel version, GPU requirements (OpenGL version for the wgpu
 GL backend fallback), RAM, and CPU. Users on older hardware or headless servers with
 software rendering are explicitly out of scope — document this clearly.
+
+---
+
+## Resolved
+
+Recovered from `git log -p docs/open-questions.md`, added 2026-07-30. Q1–Q3 and Q10
+were deleted outright rather than moved when they were originally closed — this section
+exists so that doesn't happen again (see the preamble). The numbering gaps this leaves
+(Q1–Q3, Q10) are expected; do not reassign them.
+
+**Q1: What is the project name?** — Resolved circa 2026-04-29. The project is named
+"Radar Workstation, Meteorological." No ADR: naming is not architecturally significant.
+Removed from this document 2026-06-26 (commit `f0f8bba`).
+
+**Q2: What license specifically?** — Resolved: Apache License, Version 2.0. Recorded in
+[ADR-0009](adr/0009-open-source.md). Removed from this document 2026-06-26 (commit
+`f0f8bba`).
+
+**Q3: What is the NEXRAD data source / polling endpoint?** — Resolved: the real-time
+chunk stream (`unidata-nexrad-level2-chunks`) is the primary source; assembled volume
+files (`unidata-nexrad-level2`) are the secondary source. Recorded in
+[ADR-0011](adr/0011-chunk-stream-data-source.md). Removed from this document 2026-06-26
+(commit `f0f8bba`) — three days *before* ADR-0011 itself was added (`eef06f8`,
+2026-06-29). The question was deleted on the strength of an answer that had not yet been
+recorded anywhere; ADR-0011 is retroactive documentation of a decision already made in
+this document's removal, which is exactly the failure mode the preamble's new "move, don't
+delete" instruction is meant to prevent.
+
+**Q10: What projection is used for the display?** — Resolved: azimuthal equidistant
+projection, centered on the active radar site. Documented in
+[rendering.md](architecture/rendering.md). Removed from this document 2026-07-28
+(commit `a3c323c`).
