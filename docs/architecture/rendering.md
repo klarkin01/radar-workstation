@@ -113,8 +113,10 @@ Radar data is the most performance-critical rendering path. The approach:
 
 Derived products are pre-computed as RGBA textures by the compute layer (rayon) and
 uploaded to the GPU once per new scan. The render loop draws the radar texture as a
-full-screen quad (clipped to the 230km radar range ring), alpha-composited over the
-map layers below.
+full-screen quad, alpha-composited over the map layers below. <!-- corrected 2026-07-30:
+this previously said "clipped to the 230km radar range ring" — 230 km does not match any
+measured moment/tilt combination (see Polar Grid Representation below); the clip range is
+now an open question (Q17) rather than a fixed figure. -->
 
 This means **no per-frame color mapping.** Color mapping happens once in the compute
 layer when a new scan arrives, not every frame. The GPU simply draws a pre-colored
@@ -122,9 +124,46 @@ texture. This is the primary reason the render loop is fast.
 
 ### Polar Grid Representation
 
-The radar texture is generated on a polar coordinate grid matching the native NEXRAD
-resolution: 1km range gates × 1° azimuth bins × 230km range. This grid is mapped to
-the azimuthal equidistant projection coordinate space by the vertex shader.
+<!-- corrected 2026-07-30: this section previously stated the grid as "1km range gates
+× 1° azimuth bins × 230km range," described as "matching the native NEXRAD resolution."
+That figure was off by a factor of four in range and two in azimuth against confirmed
+data, and it contradicted FR-ND-3 (both resolution variants must be supported) by
+discarding super-resolution at the render stage. Corrected below with figures measured
+directly from the decoder and its fixtures, per
+docs/plans/documentation-remediation.md W7. See also
+docs/architecture/nexrad-binary-format.md for the underlying byte-level layout. -->
+
+The radar texture is generated on a polar coordinate grid. Measured from the five KDOX
+VCP 35 (super-resolution) fixtures in `crates/nexrad-decoder/tests/fixtures/`, using
+`ProductData::{gate_count, first_gate_m, gate_width_m}` and `Radial::{azimuth_deg,
+azimuth_number}` (see `crates/nexrad-decoder/src/types/{product,radial}.rs`):
+
+- **Gate width:** 0.25 km, uniform across every moment and every tilt observed.
+- **First gate:** 2.125 km, uniform across every moment and every tilt observed.
+- **Azimuthal spacing:** ~0.5° (measured 0.508° between consecutive azimuth numbers in
+  the fixture set), consistent with super-resolution.
+- **Maximum range varies by moment and by tilt**, not by a single fixed figure:
+
+  | Tilt (elevation) | Reflectivity | Velocity / spectrum width | Dual-pol (ZDR/PHI/RHO/CFP) |
+  |---|---|---|---|
+  | 1 (~0.39°, surveillance split-cut) | 460.125 km (1832 gates) | absent on this cut | 300.125 km (1192 gates) |
+  | 2 (~0.26°, Doppler split-cut) | 300.125 km (1192 gates) | 300.125 km (1192 gates) | absent on this cut |
+  | 16 (~6.37°, highest measured tilt) | 174.125 km (688 gates) | 174.125 km (688 gates) | 174.125 km (688 gates) |
+
+  The 230 km figure in the document this replaced does not match any measured
+  moment/tilt combination.
+
+**Standard-resolution geometry is not yet confirmed against sample data.** All five
+fixtures in this repository are KDOX VCP 35, which is super-resolution only — there is
+no standard-resolution fixture to measure from (this overlaps DOC-09's fixture-coverage
+gap). FR-ND-3 requires the decoder to support both variants; how the render texture
+accommodates the standard-resolution case, and whether super-res and standard-res
+sweeps share one texture format or two, is recorded as **Q17** in
+`docs/open-questions.md` rather than assumed here.
+
+Whatever grid dimensions Q17 settles on, the polar grid is mapped to the azimuthal
+equidistant projection coordinate space by the vertex shader — that mechanism does not
+depend on the specific gate/azimuth resolution.
 
 ### Transparency
 

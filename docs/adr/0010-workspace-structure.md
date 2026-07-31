@@ -15,13 +15,27 @@ radar formats that succeed NEXRAD, making extensibility a structural considerati
 
 ## Decision
 The project uses a Cargo workspace with a virtual root manifest (the root Cargo.toml
-declares only the workspace, not a package). All crates live under `crates/`:
+declares only the workspace, not a package). Production crates live under `crates/`:
 
 - `crates/radar-workstation` — the application binary
 - `crates/nexrad-decoder` — the NEXRAD Level II decoder library
+- `crates/http-ingest` — the workspace-local HTTP/1.1 client (ADR-0014)
 
 Future decoder crates (e.g. for successor radar formats) are added as new library crates
 under `crates/` and listed in the workspace members.
+
+<!-- corrected 2026-07-30: the crates/ vs. utility/ split below was not recorded when
+this ADR was originally written; it has since become a real structural decision. -->
+
+**The `crates/` / `utility/` split.** The workspace also has development-only members
+under `utility/` (`utility/nexrad-sample`, `utility/radar-viz`) — see
+`utility/README.md`'s "not part of the product" boundary. They are Cargo workspace
+members (so they build and test with `cargo build --workspace` / `cargo test
+--workspace`) but are excluded from the default build via root `Cargo.toml`'s
+`default-members`, which lists only the three `crates/` above. Nothing in `utility/` is
+imported by anything in `crates/`. Separately, `crates/http-ingest/fuzz` is `exclude`d
+from the workspace entirely — it needs a nightly toolchain and does not appear in
+`Cargo.lock`.
 
 ## Consequences
 - The NEXRAD decoder is independently testable without a GPU or window context.

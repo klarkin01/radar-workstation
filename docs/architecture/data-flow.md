@@ -88,19 +88,40 @@ aware of or blocked by pipeline activity.
 
 ### NEXRAD Polling Task
 
+The chunk bucket keys objects as `SITE/<volume-sequence>/<timestamp>-<n>-<kind>`, where
+`<volume-sequence>` is an unpadded, monotonically increasing per-site integer that does
+not sort lexically in numeric order (`"78"` sorts after `"709"`). The poller therefore
+tracks position as a volume-sequence number rather than a flat key scan; see
+`crates/radar-workstation/src/ingest/s3_poll.rs` (`S3Poller::poll_once`) for the
+authoritative implementation.
+
 ```
-1. On startup, resolve the selected radar site identifier (e.g. KTLX) and anchor the
-   chunk listing to the current UTC hour, so startup does not replay earlier chunks
-2. Query the chunk bucket's ListObjectsV2 listing for keys newer than the last seen key
-3. For each new key, classify chunk kind (-S / -I / -E) and fetch the object body
-4. Decompress the chunk (strip the volume header for -S; BZ2-decompress the block(s))
-5. Hand the decompressed message stream to the NEXRAD decoder (see below)
-6. Feed the decoded radials to the volume assembly state machine (ADR-0012), which
+1. On startup, resolve the selected radar site identifier (e.g. KTLX) and list the site
+   prefix with delimiter=/ (list_volume_folders) to enumerate volume-sequence directories
+   as CommonPrefixes, parsed numerically
+2. Anchor cold start one behind the newest known volume (cold_start_baseline), so the
+   first poll fetches the current volume rather than replaying the full 24-hour
+   retention window
+3. Each poll, list the single volume-sequence directory last_completed_volume + 1 via
+   ListObjectsV2, using start-after within that directory only — fixed-width
+   <timestamp>-<n>-<kind> filenames make lexical order chronological there
+4. Classify each new key by its -S / -I / -E suffix and fetch chunk bodies sequentially
+   (ADR-0014: the client holds one keepalive connection, no connection pool)
+5. Decompress each chunk (strip the volume header for -S; BZ2-decompress the block(s))
+6. Hand the decompressed message stream to the NEXRAD decoder (see below)
+7. Feed the decoded radials to the volume assembly state machine (ADR-0012), which
    accumulates them into the in-progress VolumeScan and signals the compute layer as
    each sweep closes
-7. Sleep for the configured polling interval (implementation default: 5 seconds)
-8. Repeat from step 2
+8. On seeing an -E chunk, advance to the next volume-sequence directory for the
+   following poll
+9. Sleep for the configured polling interval (implementation default: 5 seconds)
+10. Repeat from step 3
 ```
+
+**Known accepted gap:** if a volume-sequence directory never appears — for example an
+RDA restart that skips sequence numbers, observed live — the poller stalls waiting on a
+directory that will never exist. Recorded in `s3_poll.rs` and tracked as wanting its own
+issue; not fixed here.
 
 On site change, the current polling task is cancelled and a new one is spawned for
 the new site. The shared state is cleared and the display resets to the new site's
@@ -171,7 +192,13 @@ handles these gracefully — a failed decode is logged and the previous scan rem
 displayed. The UI does not crash.
 
 ### Testing
-The decoder has a dedicated test suite exercising:
+The decoder has a dedicated test suite: 24 tests, all passing, against fixtures covering
+one site (KDOX), one scan mode (VCP 35), one era, and super-resolution dual-pol data
+only. The target coverage below is what FR-ND-8 specifies for v1.0, not what exists
+today — see `crates/nexrad-decoder/TESTING.md` for the current-vs-target breakdown and
+the fixture-coverage gap this leaves.
+
+Target coverage:
 - Known-good Level II files from NCEI archive (multiple sites, scan modes, eras)
 - Corrupt and truncated input (must not panic, must return typed error)
 - Dual-pol and non-dual-pol variants

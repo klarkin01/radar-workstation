@@ -50,9 +50,14 @@ site. The user must see the new site's data within the time target defined in Se
 successfully fetched scan must remain displayed. The status bar must indicate the error
 condition and the age of the displayed data.
 
-**FR-DA-6.** The application must fetch map imagery tiles via HTTPS from the configured
-XYZ tile provider. Tile fetching must not block the render loop — missing tiles render
-as transparent until delivered.
+**FR-DA-6.** **[OPEN — Q16]** The application must fetch map imagery tiles via HTTPS
+from the configured XYZ tile provider. Tile fetching must not block the render loop —
+missing tiles render as transparent until delivered. As stated, this requirement is
+**currently unimplementable against the accepted ADR set**: no client in the workspace
+can fetch from an arbitrary, user-configured host — `http-ingest`'s compile-time host
+allowlist makes that an explicit non-goal (ADR-0014). Resolving Q16 (which HTTP client
+serves tile fetching) is a precondition for this requirement, not an implementation
+detail of it.
 
 **FR-DA-7.** The application must fetch placefile data via HTTP or HTTPS from
 user-configured URLs, on a per-placefile polling interval.
@@ -178,21 +183,28 @@ sweep, scan timestamp, polling status, and any active error conditions.
 
 ### 2.5 Map Underlays
 
-**FR-MU-1.** County boundaries, state and country boundaries, and major highways must
-be sourced from bundled Census TIGER/Line and Natural Earth shapefiles. These require
-no network connection and must be available immediately at startup.
+**FR-MU-1.** **[OPEN — Q15]** County boundaries, state and country boundaries, and major
+highways must be sourced from bundled Census TIGER/Line and Natural Earth shapefiles.
+These require no network connection and must be available immediately at startup.
+Whether a 0.x single-maintainer shapefile parser is on the application's startup path at
+all, or geometry is instead pre-projected into a flat bundled format at build time, is
+unresolved — see Q15.
 
-**FR-MU-2.** All vector overlay geometry must be pre-projected into azimuthal equidistant
-coordinates at load time. The GPU receives already-projected geometry — no projection
-happens per frame.
+**FR-MU-2.** **[OPEN — Q15]** All vector overlay geometry must be pre-projected into
+azimuthal equidistant coordinates at load time. The GPU receives already-projected
+geometry — no projection happens per frame. Q15's resolution changes *when* "load time"
+means: build-time pre-projection would mean geometry ships already projected, with no
+projection step at application load at all.
 
 **FR-MU-3.** NEXRAD site locations must be sourced from a bundled site list derived
 from the NOAA site registry. No network connection is required to populate the site
 list.
 
-**FR-MU-4.** The default map imagery tile provider must be the USGS National Map
-(publicly accessible, no authentication). The tile provider URL must be user-configurable
-to any XYZ-scheme HTTPS tile source.
+**FR-MU-4.** **[OPEN — Q16]** The default map imagery tile provider must be the USGS
+National Map (publicly accessible, no authentication). The tile provider URL must be
+user-configurable to any XYZ-scheme HTTPS tile source. As stated, the second sentence is
+**currently unimplementable against the accepted ADR set** — same gap as FR-DA-6: no
+client in the workspace can fetch from an arbitrary host. See Q16.
 
 **FR-MU-5.** Fetched map tiles must be cached to disk using an LRU eviction policy.
 The cache must be stored in the XDG cache directory by default. **[OPEN — Q7]** Maximum
@@ -504,6 +516,10 @@ of the relevant subsystem begins.
 | FR-CT-1 | Color table format | Q11 |
 | PL-3 | Distribution mechanism | Q12 |
 | PL-4 | Minimum system requirements | Q13 |
+| FR-MU-1 | Shapefile parser on the startup path, or build-time pre-projection | Q15 |
+| FR-MU-2 | When vector overlay projection happens | Q15 |
+| FR-DA-6 | HTTP client for arbitrary-host tile fetching (currently unimplementable) | Q16 |
+| FR-MU-4 | User-configurable tile provider URL (currently unimplementable) | Q16 |
 
 When an open question is resolved, update the corresponding requirement here, remove
 the **[OPEN]** marker, and close the question in open-questions.md. If the resolution

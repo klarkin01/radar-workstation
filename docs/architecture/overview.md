@@ -4,6 +4,13 @@
 entry point to the architecture directory. For the principles that govern every decision
 made here, see [PHILOSOPHY.md](../PHILOSOPHY.md).*
 
+> **Implementation status:** The NEXRAD decoder (Message 31), the workspace-local
+> HTTP/1.1 client (`crates/http-ingest`), and the chunk ingest layer (S3 chunk-stream
+> polling, chunk detection, BZ2 decompression) are implemented and tested. The volume
+> assembly state machine (ADR-0012), compute layer, shared application state, and
+> render loop described below are architecture, not yet code — `main.rs` is currently a
+> stub. See the root [README.md](../../README.md) for the full status statement.
+
 ---
 
 ## Project Structure
@@ -13,14 +20,18 @@ radar-workstation/
 ├── Cargo.toml                     ← workspace manifest (virtual, see ADR-0010)
 ├── crates/
 │   ├── radar-workstation/         ← application crate (binary)
-│   └── nexrad-decoder/            ← decoder library crate
+│   ├── nexrad-decoder/            ← decoder library crate
+│   └── http-ingest/               ← workspace-local HTTP/1.1 client — ADR-0014
 ├── utility/                       ← dev-only tooling, not part of the product
 │   ├── nexrad-inspect/            ← Python cross-validation scripts (MetPy-based)
 │   ├── nexrad-sample/             ← fetch/decode sample chunks from S3
 │   └── radar-viz/                 ← render a decoded scan to PNG for visual checks
 └── docs/
+    ├── README.md                  ← documentation index
     ├── PHILOSOPHY.md
     ├── REQUIREMENTS.md
+    ├── dependency-inventory.md
+    ├── documentation-inventory.md
     ├── architecture/
     │   ├── overview.md            ← this document
     │   ├── data-flow.md
@@ -31,6 +42,7 @@ radar-workstation/
     │   ├── 0001-use-rust.md
     │   ├── 0002-use-egui.md
     │   └── ...
+    ├── plans/                     ← executable work plans, retained as a record after execution
     └── open-questions.md
 ```
 
@@ -54,6 +66,7 @@ application starts, runs, and exits cleanly as a normal user process.
 | UI framework | egui | Immediate mode, pure Rust, GPU-accelerated, minimal overhead. Does not need to match OS widget style. See ADR-0002. |
 | GPU rendering | wgpu | Cross-platform Vulkan/OpenGL abstraction. Radar data rendered directly to GPU surface, bypassing egui's renderer. |
 | Async I/O | tokio | Non-blocking network I/O for radar data polling, tile fetching, and placefile retrieval. |
+| HTTP client | Custom HTTP/1.1 implementation (`crates/http-ingest`) | Workspace-local; no third-party HTTP client. Purpose-built for the S3 acquisition path, with a compile-time host allowlist. See ADR-0014. |
 | Data parallelism | rayon | CPU-bound product computation distributed across cores without blocking the render loop. |
 | Map vector data | Bundled shapefiles | Census TIGER/Line and Natural Earth data shipped with the binary. No runtime map API dependency. |
 | Map imagery | Pluggable XYZ tile providers | USGS National Map by default. Fetched on demand, cached to disk. Optional and toggleable. |
@@ -79,6 +92,11 @@ Polls the Unidata AWS NEXRAD real-time chunk stream (ADR-0011) for new chunks an
 assembles them into volume scans (ADR-0012). Also responsible for map tile fetching and
 placefile retrieval. All network I/O is non-blocking. The render loop is never waiting
 on the data pipeline. See [data-flow.md](data-flow.md) for detail.
+
+The NEXRAD acquisition path (chunk discovery and fetch) speaks HTTP through
+`crates/http-ingest` — a separately-audited, first-party HTTP/1.1 client with its own
+fuzz corpus and threat model (ADR-0014), not a general-purpose library shared with the
+tile or placefile paths. See [ADR-0014](../adr/0014-http-ingest-own-the-boundary.md).
 
 ### Compute Layer (rayon)
 Receives decoded volume scans and derives products: Echo Tops, VIL, VILD, dual-pol

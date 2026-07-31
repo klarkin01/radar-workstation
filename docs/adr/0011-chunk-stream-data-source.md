@@ -97,7 +97,8 @@ rather than waiting for the full volume.
 switch data sources transparently based on whether the requested time is within the
 chunk retention window.
 
-**No impact on the decoder library.** The decoder crate (`radar-decoder`) operates on
-decompressed Message 31 byte streams regardless of how those bytes arrived. The chunk
+**No impact on the decoder library.** The decoder crate (`nexrad-decoder`
+<!-- corrected 2026-07-30, was `radar-decoder` — no such crate exists; see ADR-0010 -->)
+operates on decompressed Message 31 byte streams regardless of how those bytes arrived. The chunk
 format complexity is entirely contained in the data acquisition layer. The decoder sees
 the same input whether the source was a chunk or an assembled volume file.

@@ -97,9 +97,17 @@ Sample files can be obtained from:
 
 - **Unidata NEXRAD S3 archive (free, no auth, current):**
   `s3://unidata-nexrad-level2/<YYYY>/<MM>/<DD>/<SITE>/` for assembled volume files, or
-  `s3://unidata-nexrad-level2-chunks/<SITE>/<YYYY>/<MM>/<DD>/<HH>/` for real-time
-  chunks (chunks persist 24 hours). The legacy `noaa-nexrad-level2` bucket stopped
-  receiving updates September 1, 2025 but retains historical data through that date.
+  `s3://unidata-nexrad-level2-chunks/<SITE>/<volume-sequence>/<YYYYMMDD-HHMMSS>-<n>-<kind>`
+  for real-time chunks, e.g. `KDOX/166/20260728-095259-001-S` (chunks persist 24 hours).
+  `<volume-sequence>` is an **unpadded**, monotonically increasing per-site integer
+  identifying the volume scan — it is not derivable from wall-clock time, and its
+  lexical order does not match numeric order across digit widths (`"78"` sorts after
+  `"709"`), so listing the bucket flatly and sorting by key does not give chronological
+  order. Within one volume's directory the fixed-width `<timestamp>-<n>-<kind>`
+  filenames do sort chronologically. See `docs/architecture/nexrad-binary-format.md`
+  for the file-level format and ADR-0014 erratum item 8 for the provenance of this
+  correction. The legacy `noaa-nexrad-level2` bucket stopped receiving updates
+  September 1, 2025 but retains historical data through that date.
   Browse at [https://registry.opendata.aws/noaa-nexrad/](https://registry.opendata.aws/noaa-nexrad/)
 
 - **Iowa State IEM archive:**
