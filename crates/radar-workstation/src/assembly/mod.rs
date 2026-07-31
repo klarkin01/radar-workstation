@@ -12,13 +12,16 @@
 //! shell around the core on purpose — if it grows logic, that logic belongs
 //! above instead.
 
+mod context;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use nexrad_decoder::{Radial, RadialStatus, Sweep, VolumeScan, VolumeStatus};
+use nexrad_decoder::{Radial, RadialStatus, Sweep, VcpDefinition, VolumeScan, VolumeStatus};
 
 use crate::chunk::ChunkKind;
+use context::VolumeContext;
 
 /// ADR-0012: "approximately 10-15 minutes (well beyond the longest VCP
 /// cycle)". 12 minutes splits the difference. Not user-configurable at this
@@ -94,47 +97,10 @@ impl SweepBuilder {
     }
 }
 
-/// Volume-level metadata hoisted from radials as they arrive. This is the
-/// ADR-0012 missing-`-S` fallback path, used unconditionally until S1-W2
-/// lands a decoded `VolumeContext` from Message 5 / `-S` metadata — VCP
-/// number and site calibration constants come from the RVOL block on
-/// whichever radial happens to carry one, since that must work whether or
-/// not a `-S` chunk was ever seen.
-#[derive(Default)]
-struct VolumeMeta {
-    site_id: [u8; 4],
-    scan_time_ms: u32,
-    julian_date: u16,
-    vcp_number: u16,
-    latitude: f32,
-    longitude: f32,
-    site_amsl_m: i16,
-}
-
-impl VolumeMeta {
-    /// `is_first` captures the per-radial timestamp/site fields from the
-    /// very first radial of the volume only; RVOL-derived fields are taken
-    /// from whichever radial carries them, since that isn't guaranteed to
-    /// be the first one.
-    fn apply(&mut self, radial: &Radial, is_first: bool) {
-        if is_first {
-            self.site_id = radial.site_id;
-            self.scan_time_ms = radial.scan_time_ms;
-            self.julian_date = radial.julian_date;
-        }
-        if let Some(sp) = &radial.site_parameters {
-            self.vcp_number = sp.vcp_number;
-            self.latitude = sp.latitude;
-            self.longitude = sp.longitude;
-            self.site_amsl_m = sp.site_amsl_m;
-        }
-    }
-}
-
 pub struct VolumeAssembler {
     config: AssemblyConfig,
     state: AssemblyState,
-    meta: VolumeMeta,
+    context: VolumeContext,
     current_sweep: Option<SweepBuilder>,
     closed_sweeps: Vec<Arc<Sweep>>,
     closed_elevations: HashSet<u8>,
@@ -146,7 +112,7 @@ impl VolumeAssembler {
         Self {
             config,
             state: AssemblyState::Idle,
-            meta: VolumeMeta::default(),
+            context: VolumeContext::default(),
             current_sweep: None,
             closed_sweeps: Vec::new(),
             closed_elevations: HashSet::new(),
@@ -162,21 +128,41 @@ impl VolumeAssembler {
     /// change) consumes this in a later stage.
     pub fn reset(&mut self) {
         self.state = AssemblyState::Idle;
-        self.meta = VolumeMeta::default();
+        self.context = VolumeContext::default();
         self.current_sweep = None;
         self.closed_sweeps = Vec::new();
         self.closed_elevations = HashSet::new();
         self.last_activity = None;
     }
 
+    /// Feed one decoded `-S` chunk. `vcp` is the decoded VCP definition
+    /// from Message 5, if the `-S` chunk's metadata stream contained one
+    /// (S1-W2) — `None` falls back to ADR-0012's missing-`-S` handling,
+    /// which is exactly what happens if this is never called for a volume
+    /// at all (see `on_chunk`'s own defensive `ChunkKind::Start` handling
+    /// for that case).
+    pub fn on_start_chunk(&mut self, vcp: Option<VcpDefinition>, now: Instant) -> Vec<AssemblyEvent> {
+        let mut events = Vec::new();
+        self.last_activity = Some(now);
+        self.begin_new_volume(&mut events);
+        if let Some(vcp) = vcp {
+            self.context.apply_vcp(vcp);
+        }
+        events
+    }
+
     /// Feed one decompressed, decoded chunk. `radials` is empty for `-S`
-    /// chunks (they carry no Message 31 data in this codebase's decoder).
+    /// chunks (they carry no Message 31 data in this codebase's decoder) —
+    /// a `-S` chunk should normally go through [`Self::on_start_chunk`]
+    /// instead, which also decodes its VCP definition; `on_chunk` still
+    /// handles `ChunkKind::Start` defensively (with no VCP) so it remains
+    /// total regardless of which entry point a caller uses.
     pub fn on_chunk(&mut self, kind: ChunkKind, radials: Vec<Radial>, now: Instant) -> Vec<AssemblyEvent> {
         let mut events = Vec::new();
         self.last_activity = Some(now);
 
         if kind == ChunkKind::Start {
-            self.on_start_chunk(&mut events);
+            self.begin_new_volume(&mut events);
             return events;
         }
 
@@ -201,7 +187,7 @@ impl VolumeAssembler {
             if is_first_radial_of_volume {
                 self.state = AssemblyState::Accumulating;
             }
-            self.meta.apply(&radial, is_first_radial_of_volume);
+            self.context.apply_radial(&radial, is_first_radial_of_volume);
 
             self.ingest_radial(radial, &mut events);
         }
@@ -243,7 +229,10 @@ impl VolumeAssembler {
         events
     }
 
-    fn on_start_chunk(&mut self, events: &mut Vec<AssemblyEvent>) {
+    /// Shared by `on_chunk(ChunkKind::Start, ...)` and `on_start_chunk`:
+    /// supersede whatever volume was accumulating (if any) and reset for a
+    /// new one. Does not touch VCP metadata — callers apply that after.
+    fn begin_new_volume(&mut self, events: &mut Vec<AssemblyEvent>) {
         if self.state == AssemblyState::Accumulating {
             // Early -S before -E: the new volume begins immediately in
             // this same call.
@@ -252,7 +241,7 @@ impl VolumeAssembler {
             }
             self.finish_volume(VolumeStatus::Superseded, events);
         }
-        self.meta = VolumeMeta::default();
+        self.context = VolumeContext::default();
         self.current_sweep = None;
         self.closed_sweeps = Vec::new();
         self.closed_elevations = HashSet::new();
@@ -299,19 +288,19 @@ impl VolumeAssembler {
 
     fn finish_volume(&mut self, status: VolumeStatus, events: &mut Vec<AssemblyEvent>) {
         let volume = VolumeScan {
-            site_id: self.meta.site_id,
-            scan_time_ms: self.meta.scan_time_ms,
-            julian_date: self.meta.julian_date,
-            vcp_number: self.meta.vcp_number,
-            latitude: self.meta.latitude,
-            longitude: self.meta.longitude,
-            site_amsl_m: self.meta.site_amsl_m,
+            site_id: self.context.site_id,
+            scan_time_ms: self.context.scan_time_ms,
+            julian_date: self.context.julian_date,
+            vcp_number: self.context.vcp_number(),
+            latitude: self.context.latitude,
+            longitude: self.context.longitude,
+            site_amsl_m: self.context.site_amsl_m,
             sweeps: std::mem::take(&mut self.closed_sweeps),
             status,
         };
         events.push(AssemblyEvent::VolumeClosed { volume });
         self.state = AssemblyState::Idle;
-        self.meta = VolumeMeta::default();
+        self.context = VolumeContext::default();
         self.closed_elevations = HashSet::new();
     }
 }
@@ -338,6 +327,14 @@ fn decode_and_ingest(
     let Ok(decompressed) = crate::chunk::decompress_chunk(&envelope.raw_bytes, envelope.kind) else {
         return Vec::new();
     };
+
+    if envelope.kind == ChunkKind::Start {
+        // A missing or unreadable Message 5 is not a hard failure — the
+        // RVOL fallback (VolumeContext::apply_radial) covers it.
+        let vcp = nexrad_decoder::parse_metadata_stream(&decompressed).ok().and_then(|m| m.vcp);
+        return assembler.on_start_chunk(vcp, now);
+    }
+
     let Ok(radials) = nexrad_decoder::parse_radial_stream(&decompressed) else {
         return Vec::new();
     };
