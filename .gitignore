@@ -1,6 +1,5 @@
 # Rust
 /target/
-Cargo.lock
 
 # Claude workflow
 CLAUDE.md
@@ -12,7 +11,6 @@ CLAUDE.md
 *.swp
 *.swo
 *~
-*.code-workspace
 
 # OS artifacts
 .DS_Store
@@ -21,8 +19,16 @@ Thumbs.db
 # Environment
 .env
 .env.*
+.inspect
 
 # Local notes
 scratch/
 notes/
 TODO.local.md
+
+# radar-viz POC/verification output
+/*.png
+
+# Data
+downloads/
+utility/radar-viz/data/

@@ -171,7 +171,7 @@ body** (i.e., relative to record offset 28).
 | 16          | 1    | `u8`       | `compression`          | 0 = uncompressed (always 0 in practice)          |
 | 17          | 1    | `u8`       | `spare`                | Reserved                                         |
 | 18          | 2    | `u16`      | `radial_len`           | Radial length in halfwords                       |
-| 20          | 1    | `u8`       | `az_spacing`           | 1 = 1.0° spacing, 2 = 0.5° (super-resolution)   |
+| 20          | 1    | `u8`       | `az_spacing`           | 1 = 0.5° (super-resolution), 2 = 1.0° spacing   |
 | 21          | 1    | `u8`       | `radial_status`        | See Radial Status table below                    |
 | 22          | 1    | `u8`       | `el_num`               | Elevation number within volume (1-indexed)       |
 | 23          | 1    | `u8`       | `sector_cut_num`       | Sector cut number                                |
@@ -179,6 +179,18 @@ body** (i.e., relative to record offset 28).
 | 28          | 1    | `u8`       | `radial_spot_blanking` | Spot blanking status bitmask                     |
 | 29          | 1    | `u8`       | `az_index_mode`        | Azimuth indexing mode                            |
 | 30          | 2    | `u16`      | `num_data_blks`        | Total data block count (vol + el + rad + moments)|
+
+**Corrected 2026-07-31 (S1-W4d):** the `az_spacing` code meaning was previously stated
+backwards. Measured directly against consecutive `az_angle` values across full volumes
+from two independent sites/VCPs (KDOX VCP 35 in `downloads/KDOX_20260629_1811/`, and
+KTLH VCP 212 — see `docs/plans/stage-0-1-close-the-acquisition-path.md` S1-W4d): every
+elevation carrying code **1** measured a mean spacing of **0.500°** between consecutive
+radials (super-resolution), and every elevation carrying code **2** measured **1.000°**
+(standard resolution) — the reverse of what this table previously said. This also
+retires half of Q17 (`docs/open-questions.md`): standard-resolution gate geometry
+(gate width, first gate) is identical to super-resolution on the same site/VCP: only
+the azimuthal radial count differs (720 vs 360 radials per 360° sweep in the volumes
+measured). See `docs/architecture/rendering.md`'s Polar Grid Representation section.
 
 #### Radial Status Codes (`radial_status`)
 
@@ -189,7 +201,20 @@ body** (i.e., relative to record offset 28).
 | 2    | End of Elevation                    | Last radial of the sweep; `complete = true`     |
 | 3    | Start of Volume                     | First radial of the volume (implies sweep 1)    |
 | 4    | End of Volume                       | Last radial; signals volume completion         |
-| 5    | Start of Elevation (SAILS)          | SAILS supplemental low-level cut               |
+| 5    | Start of Elevation, Last Elevation  | Start of the volume's final (highest) elevation |
+
+**Corrected 2026-07-31 (S1-W4d):** code 5 does **not** mean "SAILS supplemental
+low-level cut" as an earlier revision of this table stated. Confirmed against real
+KTLH VCP 212 data: in a 16-elevation volume, code 5 appeared exactly once, on the
+single highest-elevation cut (angle ≈9.84°, `el_num`=16) — matching MetPy's
+`remap_status` (`START_ELEVATION | LAST_ELEVATION`), not a low-level repeat. The
+same volume's two SAILS/MRLE-inserted low-level cuts (repeated elevation angle
+≈0.65° and ≈0.53°, matching elevations 1 and 2) carried ordinary code 0
+(`StartOfElevation`) with new, incrementing `elevation_number` values (9 and 10) —
+**`elevation_number` never repeated**, only the elevation angle did. This confirms
+ADR-0012's late-data discard rule (keyed on elevation number) is safe as designed;
+see `crates/nexrad-decoder/tests/fixtures/ktlh_vcp212_sails_repeated_low_elevation.bin`
+and `docs/plans/stage-0-1-close-the-acquisition-path.md` §3 Risks.
 
 Code 3 (Start of Volume) is the only radial that carries a populated RVOL block
 with site metadata (lat/lon, VCP number). All other radials carry a null or absent
@@ -484,3 +509,81 @@ empirical validation. The following entries were superseded by binary inspection
 discrepancy may arise from the ICD specifying data-only size (22 bytes for v1)
 versus the binary storing total block size (28 bytes); the source of the "20" value
 is unclear.
+
+---
+
+## 15. Message 5 — Volume Coverage Pattern (VCP)
+
+Found in `-S` chunks. Layout confirmed by direct binary inspection of
+`downloads/KDOX_20260629_1801/20260629-180100-001-S` (S1-W2,
+`docs/plans/stage-0-1-close-the-acquisition-path.md`) and cross-checked against
+MetPy's `_nexrad.py` (`vcp_fmt` / `vcp_el_fmt` / `_decode_msg5`), which is treated as
+authoritative for this message the same way it was for Message 31.
+
+**Segmentation:** the message header (§5) carries `num_segments`/`segment_num`. In the
+confirmed sample (VCP 35, 16 elevation cuts), Message 5 has `num_segments = 1` — the
+whole message fits in one legacy 2432-byte record (message body is 758 bytes: 22-byte
+VCP header + 16 × 46-byte elevation records). The message body only grows with the
+elevation count (22 + `num_el_cuts` × 46 bytes), and no defined VCP has anywhere near
+enough elevations to exceed one segment's ~2416 usable body bytes (that would take
+over 52 elevation cuts). Segment reassembly for Message 5 is therefore not implemented
+— unlike Message 15 (Clutter Filter Map), which *was* observed segmented (5 segments)
+in the same `-S` chunk, but is out of Stage 1 scope (nothing consumes it in v1.0).
+
+### 15.1 VCP Header (22 bytes, message body offset 0)
+
+| Body offset | Size | Type  | Field                  | Notes                                          |
+|-------------|------|-------|-------------------------|------------------------------------------------|
+| 0           | 2    | `u16` | `size_hw`               | VCP message size in halfwords (per ICD; not the same field as the outer message header) |
+| 2           | 2    | `u16` | `pattern_type`          | Confirmed `2` for VCP 35                        |
+| 4           | 2    | `u16` | `vcp_number`             | Confirmed `35`                                  |
+| 6           | 2    | `u16` | `num_el_cuts`           | Confirmed `16` for this VCP 35 sample           |
+| 8           | 1    | `u8`  | `vcp_version`           |                                                  |
+| 9           | 1    | `u8`  | `clutter_map_group`     |                                                  |
+| 10          | 1    | `u8`  | `dop_res`               | Doppler velocity resolution code               |
+| 11          | 1    | `u8`  | `pulse_width`           |                                                  |
+| 12          | 4    | —     | spare                   |                                                  |
+| 16          | 2    | `u16` | `vcp_sequencing`        |                                                  |
+| 18          | 2    | `u16` | `vcp_supplemental_info` |                                                  |
+| 20          | 2    | —     | spare                   |                                                  |
+
+Total header = 22 bytes, immediately followed by `num_el_cuts` elevation records.
+
+### 15.2 Elevation Cut Record (46 bytes each)
+
+Only the fields this project's compute layer will plausibly need are decoded; the
+remaining ICD-defined fields (per-sector PRF/pulse-count breakdowns, thresholds) are
+read past but not retained, consistent with "resist decoding fields nobody will read."
+
+| Record offset | Size | Type  | Field            | Notes                                             |
+|---------------|------|-------|------------------|----------------------------------------------------|
+| 0             | 2    | `u16` | `elevation_angle` | NEXRAD angle format: `physical = raw × 360 / 65536` |
+| 2             | 1    | `u8`  | `channel_config`  | 0=Constant Phase, 1=Random Phase, 2=SZ2 Phase       |
+| 3             | 1    | `u8`  | `waveform`        | 1=Contiguous Surveillance, 2=Contig. Doppler (w/ ambiguity res.), 3=Contig. Doppler (w/o ambiguity res.), 4=Batch, 5=Staggered Pulse Pair |
+| 4             | 1    | `u8`  | `super_res`       | Bitmask: bit0=0.5°az/0.25km range res., bit1=Doppler to 300km, bit2=Dual-pol control, bit3=Dual-pol to 300km |
+| 5–44          | 40   | —     | (not decoded)     | PRF numbers, pulse counts, az rate, moment thresholds, sector edges — read past, not retained |
+
+`elevation_angle` here is the VCP's *commanded* elevation, not the same value as a
+Message 31 radial's measured `el_angle` — in the confirmed sample the two differ by up
+to ~0.08° at the lowest cuts (commanded 0.308° vs. measured ~0.39°) while converging
+closely at the highest cuts (commanded 6.416° vs. measured 6.37°). This is expected
+antenna-pointing behavior, not a parsing error — do not "fix" a decoder that reports
+the commanded angle by making it match the measured one, and do not assume the two are
+interchangeable in code that compares them.
+
+**Confirmed VCP 35 elevation table (16 cuts) from this sample**, showing the paired
+surveillance/Doppler split cuts (`waveform=1` then `waveform=2` at the same angle) that
+account for the lower five distinct angles, plus a repeated low-angle insert (0.308°
+appearing at both cut index 0 and index 6) — the same one-repeated-low-cut structure as
+the SAILS/MRLE case confirmed empirically for KTLH VCP 212 in §6.1:
+
+| Cut | Angle | Waveform | Cut | Angle | Waveform |
+|---|---|---|---|---|---|
+| 0 | 0.308° | Surveillance | 8 | 1.274° | Surveillance |
+| 1 | 0.308° | Doppler | 9 | 1.274° | Doppler |
+| 2 | 0.483° | Surveillance | 10 | 1.802° | Batch |
+| 3 | 0.483° | Doppler | 11 | 2.417° | Batch |
+| 4 | 0.879° | Surveillance | 12 | 3.076° | Batch |
+| 5 | 0.879° | Doppler | 13 | 3.999° | Batch |
+| 6 | 0.308° | Surveillance | 14 | 5.098° | Batch |
+| 7 | 0.308° | Doppler | 15 | 6.416° | Batch |

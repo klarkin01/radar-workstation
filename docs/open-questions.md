@@ -98,17 +98,19 @@ table format would give immediate access to this ecosystem. Define: which palett
 to support, where user palettes are stored, and how defaults are shipped with the
 application.
 
-**Q17: What are the radar texture's grid dimensions, for standard-res and super-res
-alike?** `docs/architecture/rendering.md`'s Polar Grid Representation section records
-measured super-resolution geometry (0.25 km gates, ~0.5° azimuthal spacing, maximum
-range varying by moment and tilt from 174 km to 460 km) from the KDOX VCP 35 fixtures in
-`crates/nexrad-decoder/tests/fixtures/` — but all five fixtures are super-resolution
-only, so standard-resolution cut geometry is not yet confirmed against sample data
-(overlaps DOC-09's fixture-coverage gap, see decoder `TESTING.md`). FR-ND-3 requires the
-decoder to support both variants. Open: whether standard-res and super-res sweeps share
-one texture format or two, and what the shared/differing dimensions are. **Blocks:** the
-compute layer's texture generation. Related: Q8 (v1.0 product set — dual-pol moments
-have their own, narrower range at some tilts, per the measured table).
+**Q17 (narrowed 2026-07-31, S1-W4d): does the compute layer use one texture format for
+standard-res and super-res, or two?** `docs/architecture/rendering.md`'s Polar Grid
+Representation section now records measured standard-resolution geometry alongside
+super-resolution, from a real KTLH VCP 212 volume (gate width and first-gate range are
+identical to super-resolution on the same site/VCP — 0.25 km gates, 2.125 km first
+gate — confirmed across two independent sites/VCPs; azimuthal spacing is 1.0° instead
+of 0.5°, i.e. 360 radials per 360° sweep instead of 720). This also corrected
+`nexrad-binary-format.md` §6.1's `az_spacing` code table, which had the 1/2 meaning
+backwards. What remains open is purely a texture-layout decision: whether the compute
+layer allocates one texture width for both (padding standard-res sweeps, or upsampling)
+or two distinct formats selected per-sweep. **Blocks:** the compute layer's texture
+generation. Related: Q8 (v1.0 product set — dual-pol moments have their own, narrower
+range at some tilts, per the measured table).
 
 ---
 

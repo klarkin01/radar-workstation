@@ -14,3 +14,4 @@ bytes        = "1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+fuzz-support = { path = "../fuzz-support" }

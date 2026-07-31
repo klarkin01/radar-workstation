@@ -153,13 +153,26 @@ azimuth_number}` (see `crates/nexrad-decoder/src/types/{product,radial}.rs`):
   The 230 km figure in the document this replaced does not match any measured
   moment/tilt combination.
 
-**Standard-resolution geometry is not yet confirmed against sample data.** All five
-fixtures in this repository are KDOX VCP 35, which is super-resolution only — there is
-no standard-resolution fixture to measure from (this overlaps DOC-09's fixture-coverage
-gap). FR-ND-3 requires the decoder to support both variants; how the render texture
-accommodates the standard-resolution case, and whether super-res and standard-res
-sweeps share one texture format or two, is recorded as **Q17** in
-`docs/open-questions.md` rather than assumed here.
+**Standard-resolution geometry, measured 2026-07-31 (S1-W4d).** A real KTLH VCP 212
+volume gave the decoder its first standard-resolution fixtures
+(`crates/nexrad-decoder/tests/fixtures/ktlh_vcp212_*.bin`). Measured directly against
+consecutive `az_angle` values across the full volume (also cross-checked against a full
+KDOX VCP 35 volume in `downloads/KDOX_20260629_1811/`):
+
+- **Gate width and first gate are identical to super-resolution** on the same site/VCP:
+  0.25 km gates, 2.125 km first gate. Resolution does not change gate geometry.
+- **Azimuthal spacing is the only thing that differs:** 1.0° (360 radials per 360°
+  sweep) for standard-resolution elevations, vs. 0.5° (720 radials per sweep) for
+  super-resolution ones — both measured directly, not assumed from the ICD.
+- This also corrected `docs/architecture/nexrad-binary-format.md` §6.1: the `az_spacing`
+  field's code meaning was previously documented backwards (code 1 was stated as 1.0°
+  and code 2 as super-resolution 0.5°; measurement shows the reverse — code 1 is
+  super-resolution, code 2 is standard-resolution).
+
+FR-ND-3's requirement that the decoder support both variants is now verified against
+real data. What remains open — whether the compute layer's texture format is shared
+between the two resolutions (padding or upsampling the narrower one) or kept as two
+distinct formats — is recorded as the narrowed **Q17** in `docs/open-questions.md`.
 
 Whatever grid dimensions Q17 settles on, the polar grid is mapped to the azimuthal
 equidistant projection coordinate space by the vertex shader — that mechanism does not

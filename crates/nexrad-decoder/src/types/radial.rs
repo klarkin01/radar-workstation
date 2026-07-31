@@ -8,20 +8,39 @@ pub enum RadialStatus {
     EndOfElevation,
     StartOfVolume,
     EndOfVolume,
-    /// SAILS supplemental low-level cut.
-    SailsCut,
+    /// Start of the volume's last elevation. Confirmed against real KTLH
+    /// VCP 212 data (2026-07-31) and MetPy's `remap_status`
+    /// (`START_ELEVATION | LAST_ELEVATION`): code 5 appeared on the single
+    /// highest-elevation cut of a 16-elevation volume, not on a repeated
+    /// low-level SAILS/MRLE cut. This corrects the repo's earlier
+    /// assumption (both here and in `nexrad-binary-format.md` §6.1) that
+    /// code 5 meant "SAILS supplemental low-level cut" — the same volume
+    /// showed SAILS/MRLE-inserted low-level cuts (repeated elevation angle)
+    /// carrying ordinary code 0 (`StartOfElevation`) with a new, incrementing
+    /// `elevation_number`, never a repeated one. See S1-W4d in
+    /// `docs/plans/stage-0-1-close-the-acquisition-path.md`.
+    StartOfLastElevation,
+    /// A radial status code this build does not recognize. Newer RDA builds
+    /// have added status codes; an unrecognized code is not by itself a
+    /// reason to discard 120 radials of real data (FR-ND-7). The radial's
+    /// geometry and moment data are decoded and kept intact; only the
+    /// closure-signal meaning of the code is unknown, and callers must
+    /// treat it as `Intermediate` for sweep-closure purposes — an
+    /// unrecognized code is by definition not a closure signal we can act
+    /// on.
+    Unknown(u8),
 }
 
 impl RadialStatus {
-    pub fn from_code(code: u8) -> Option<Self> {
+    pub fn from_code(code: u8) -> Self {
         match code {
-            0 => Some(Self::StartOfElevation),
-            1 => Some(Self::Intermediate),
-            2 => Some(Self::EndOfElevation),
-            3 => Some(Self::StartOfVolume),
-            4 => Some(Self::EndOfVolume),
-            5 => Some(Self::SailsCut),
-            _ => None,
+            0 => Self::StartOfElevation,
+            1 => Self::Intermediate,
+            2 => Self::EndOfElevation,
+            3 => Self::StartOfVolume,
+            4 => Self::EndOfVolume,
+            5 => Self::StartOfLastElevation,
+            other => Self::Unknown(other),
         }
     }
 }
@@ -37,6 +56,9 @@ pub struct Radial {
     pub azimuth_deg: f32,
     pub elevation_deg: f32,
     pub azimuth_number: u16,
+    /// Raw `az_spacing` code: 1 = 0.5° (super-resolution), 2 = 1.0°
+    /// (standard resolution). See `docs/architecture/nexrad-binary-format.md` §6.1.
+    pub azimuth_spacing_code: u8,
     pub radial_status: RadialStatus,
     pub elevation_number: u8,
     /// Unambiguous range in km. `None` if the RRAD block was absent or unreadable.

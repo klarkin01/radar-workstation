@@ -163,8 +163,8 @@ struct SweepStats {
     moments: HashMap<ProductKind, u16>,
 }
 
-fn count_statuses(radials: &[nexrad_decoder::Radial]) -> [u32; 6] {
-    let mut counts = [0u32; 6];
+fn count_statuses(radials: &[nexrad_decoder::Radial]) -> [u32; 7] {
+    let mut counts = [0u32; 7];
     for r in radials {
         let i = match r.radial_status {
             RadialStatus::StartOfElevation     => 0,
@@ -172,15 +172,16 @@ fn count_statuses(radials: &[nexrad_decoder::Radial]) -> [u32; 6] {
             RadialStatus::EndOfElevation       => 2,
             RadialStatus::StartOfVolume        => 3,
             RadialStatus::EndOfVolume          => 4,
-            RadialStatus::SailsCut              => 5,
+            RadialStatus::StartOfLastElevation => 5,
+            RadialStatus::Unknown(_)           => 6,
         };
         counts[i] += 1;
     }
     counts
 }
 
-fn format_status_counts(counts: &[u32; 6]) -> String {
-    let labels = ["SOEl", "Int", "EOEl", "SOVol", "EOVol", "SAILS"];
+fn format_status_counts(counts: &[u32; 7]) -> String {
+    let labels = ["SOEl", "Int", "EOEl", "SOVol", "EOVol", "LastEl", "Unk"];
     counts
         .iter()
         .zip(labels.iter())

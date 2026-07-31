@@ -37,11 +37,13 @@ External Sources
                Display
 ```
 
-> **Implementation status:** The chunk ingest layer (fetch + BZ2 decompression) and the
-> NEXRAD decoder are implemented and tested (`crates/radar-workstation`,
-> `crates/nexrad-decoder`). The volume assembly state machine (ADR-0012), compute layer,
-> shared application state, and render loop described below are architecture, not yet
-> code — `main.rs` is currently a stub.
+> **Implementation status:** The chunk ingest layer (fetch + BZ2 decompression), the
+> NEXRAD decoder, and the volume assembly state machine (ADR-0012) are implemented and
+> tested (`crates/radar-workstation`, `crates/nexrad-decoder`) — see
+> `crates/radar-workstation/src/assembly/`. The compute layer, shared application state,
+> and render loop described below are still architecture, not yet code — `main.rs` is
+> currently a stub; nothing yet consumes the `SweepClosed`/`VolumeClosed` events the
+> assembler emits.
 
 ---
 
@@ -118,10 +120,20 @@ authoritative implementation.
 10. Repeat from step 3
 ```
 
-**Known accepted gap:** if a volume-sequence directory never appears — for example an
-RDA restart that skips sequence numbers, observed live — the poller stalls waiting on a
-directory that will never exist. Recorded in `s3_poll.rs` and tracked as wanting its own
-issue; not fixed here.
+**Skipped-sequence recovery (S1-W3a):** if a volume-sequence directory never
+appears — an RDA restart that skips sequence numbers, observed live (79→90, 92→165,
+195→268) — the poller no longer stalls waiting on a directory that will never exist. It
+tracks empty polls since the last key seen for the current target; past a threshold
+(~60s) with no key ever seen, it re-lists the bucket's volume folders and re-anchors
+forward if a genuine gap exists. A volume that produced real data but then stalls mid-
+volume (past a longer, ~5 minute threshold) is abandoned and the poller advances to the
+next one, leaving the assembly layer's own watchdog to mark that volume `TimedOut`. See
+`S3Poller::apply_recovery` / `next_target` in `s3_poll.rs`.
+
+**Observable poller health (S1-W3b):** `S3Poller::status()` returns a `watch::Receiver`
+publishing `IngestState` (`Polling` / `Retrying{attempts}` / `Stalled` /
+`ReAnchoring`), the last success time, and a typed `IngestErrorKind` — the seam a status
+bar attaches to for FR-DA-5 once shared application state exists to read it from.
 
 On site change, the current polling task is cancelled and a new one is spawned for
 the new site. The shared state is cleared and the display resets to the new site's
@@ -129,15 +141,22 @@ most recent available data.
 
 ### Volume Assembly (ADR-0012)
 
-The chunk stream offers no atomic "volume complete" guarantee, so an explicit state
-machine tracks assembly: `IDLE → AWAITING_DATA → ACCUMULATING`. Each sweep closes
-independently as its end-of-elevation signal arrives (or is inferred from the next
-elevation number), and the volume itself closes on `-E` receipt, on the next `-S`
-arriving early (`Superseded`), or on a watchdog timeout (`TimedOut`). `VolumeScan`
-carries this completion status explicitly so downstream layers can indicate incomplete
-data without withholding it — a visible gap is preferable to silently modifying data
-already rendered. See ADR-0012 for the full state machine, per-chunk-type missing-data
-handling, and the rationale against a late-data waiting window.
+**Implemented and tested** — `crates/radar-workstation/src/assembly/`. The chunk stream
+offers no atomic "volume complete" guarantee, so an explicit state machine tracks
+assembly: `Idle → AwaitingData → Accumulating`. Each sweep closes independently as its
+end-of-elevation signal arrives (or is inferred from the next elevation number), and the
+volume itself closes on `-E` receipt, on the next `-S` arriving early (`Superseded`), or
+on a watchdog timeout (`TimedOut`). `VolumeScan` carries this completion status
+explicitly so downstream layers can indicate incomplete data without withholding it — a
+visible gap is preferable to silently modifying data already rendered. `VolumeAssembler`
+is a pure, synchronous core (no async, no I/O, no clock access — `now` is a parameter),
+with a thin `assembly::run` wrapper driving it from a chunk channel and a watchdog timer.
+Message 5 (VCP definition) is decoded and wired into the assembler's `VolumeContext`,
+falling back to the RVOL block on whichever radial carries one when a `-S` chunk was
+missed or unreadable. See ADR-0012 for the full state machine, per-chunk-type
+missing-data handling, and the rationale against a late-data waiting window; see
+`docs/plans/stage-0-1-close-the-acquisition-path.md` for the measured 1.5s wall-clock
+time from poller start to first `SweepClosed` (against FR-DA-3's 30-60s target).
 
 ### Tile Fetching Task
 
@@ -192,17 +211,18 @@ handles these gracefully — a failed decode is logged and the previous scan rem
 displayed. The UI does not crash.
 
 ### Testing
-The decoder has a dedicated test suite: 24 tests, all passing, against fixtures covering
-one site (KDOX), one scan mode (VCP 35), one era, and super-resolution dual-pol data
-only. The target coverage below is what FR-ND-8 specifies for v1.0, not what exists
-today — see `crates/nexrad-decoder/TESTING.md` for the current-vs-target breakdown and
-the fixture-coverage gap this leaves.
+The decoder has a dedicated test suite spanning two sites (KDOX, KTLH), three scan
+modes (VCP 35 clear-air, VCP 212 precipitation with SAILS/MRLE, VCP 121 legacy),
+two eras (current and a 2010 pre-dual-pol archive file), both resolution variants, and
+a committed hostile-input corpus (structural truncation, hostile pointers/counts/framing)
+run through a seeded-mutator fuzz test on plain `cargo test` — mirroring the pattern
+`http-ingest` established. See `crates/nexrad-decoder/TESTING.md` for the current
+coverage table and the gaps that remain (only two sites; no VCP 12 fixture; no
+mid-volume dropped-moment fixture).
 
-Target coverage:
-- Known-good Level II files from NCEI archive (multiple sites, scan modes, eras)
-- Corrupt and truncated input (must not panic, must return typed error)
-- Dual-pol and non-dual-pol variants
-- Super-resolution and standard-resolution variants
+Remaining target coverage (FR-ND-8):
+- More sites, to sample regional hardware/firmware variation
+- Additional VCPs beyond the three currently covered
 
 ---
 
