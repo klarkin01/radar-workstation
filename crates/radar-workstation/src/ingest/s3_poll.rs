@@ -1,8 +1,8 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use quick_xml::events::Event;
 use quick_xml::Reader;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::chunk::ChunkKind;
 
@@ -30,6 +30,15 @@ const REANCHOR_EMPTY_POLLS: u32 = 12;
 /// this poller) is what eventually marks that volume `TimedOut`; this
 /// threshold only stops the poller from polling a directory forever.
 const STUCK_MID_VOLUME_EMPTY_POLLS: u32 = 60;
+/// Consecutive `poll_once` failures (not empty polls — actual errors: HTTP,
+/// connection, XML parsing) before the published status escalates from
+/// `Retrying` to `Stalled`. 5 × the 5s poll interval ≈ 25s of unbroken
+/// failure — `http-ingest` already retries once at the connection layer
+/// (ADR-0014), so a poller-level failure here means that retry also
+/// failed; this threshold is about repeated failures over time, not a
+/// single dropped connection, and does not add a second retry loop on top
+/// of the client's.
+const STALLED_AFTER_CONSECUTIVE_ERRORS: u32 = 5;
 
 #[derive(Debug)]
 pub enum PollError {
@@ -51,6 +60,81 @@ impl std::error::Error for PollError {
         match self {
             Self::Http(e) => Some(e),
             Self::Xml(e) => Some(e),
+        }
+    }
+}
+
+/// A typed classification of what went wrong, for a status bar to key off
+/// of directly rather than parsing a formatted string. Deliberately
+/// coarser than `PollError`/`http_ingest::Error` — just the distinctions a
+/// UI plausibly cares about ("no network" vs. "S3 returned an error status"
+/// vs. "the listing response itself was malformed").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngestErrorKind {
+    /// Connect, TLS, timeout, or an unexpected connection close.
+    Network,
+    /// An HTTP-level error status from S3 itself.
+    Http { status: u16 },
+    /// The XML listing response didn't parse.
+    MalformedListing,
+    /// A framing violation, oversized body, or other protocol-level issue
+    /// that isn't simply "no network."
+    Protocol,
+}
+
+impl From<&PollError> for IngestErrorKind {
+    fn from(e: &PollError) -> Self {
+        match e {
+            PollError::Http(http_ingest::Error::Http { status }) => Self::Http { status: *status },
+            PollError::Http(
+                http_ingest::Error::Connect(_)
+                | http_ingest::Error::Tls(_)
+                | http_ingest::Error::Timeout { .. }
+                | http_ingest::Error::Closed,
+            ) => Self::Network,
+            PollError::Http(_) => Self::Protocol,
+            PollError::Xml(_) => Self::MalformedListing,
+        }
+    }
+}
+
+/// The poller's current health, as a `watch` channel value (S1-W3b, FR-DA-5).
+/// `watch` rather than `mpsc`: a status bar wants the *latest* status every
+/// frame, not a queue of every transition, and a `watch` receiver cannot
+/// apply backpressure to the poller if nothing is reading it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngestState {
+    Polling,
+    /// `attempts` consecutive `poll_once` failures so far, below the
+    /// `Stalled` threshold.
+    Retrying { attempts: u32 },
+    /// `poll_once` has failed `STALLED_AFTER_CONSECUTIVE_ERRORS` times in a
+    /// row.
+    Stalled,
+    /// `apply_recovery` (S1-W3a) is re-anchoring or advancing past a
+    /// stalled volume this poll.
+    ReAnchoring,
+}
+
+#[derive(Debug, Clone)]
+pub struct IngestStatus {
+    pub state: IngestState,
+    pub last_success: Option<Instant>,
+    /// Typed, not a formatted string — see `IngestErrorKind`.
+    pub last_error: Option<IngestErrorKind>,
+    /// The last volume-sequence number known to be fully delivered. Gives
+    /// the status bar the data-age display FR-DA-5 asks for, computed at
+    /// read time from `last_success`.
+    pub current_volume: Option<u64>,
+}
+
+impl Default for IngestStatus {
+    fn default() -> Self {
+        Self {
+            state: IngestState::Polling,
+            last_success: None,
+            last_error: None,
+            current_volume: None,
         }
     }
 }
@@ -86,10 +170,14 @@ pub struct S3Poller {
     /// volume" (S1-W3a) — both otherwise look identical (zero keys
     /// returned).
     seen_any_key_in_current_volume: bool,
+    /// Consecutive `poll_once` failures. Reset to 0 on any success.
+    consecutive_errors: u32,
+    status_tx: watch::Sender<IngestStatus>,
 }
 
 impl S3Poller {
     pub fn new(site_id: impl Into<String>, client: http_ingest::Client) -> Self {
+        let (status_tx, _rx) = watch::channel(IngestStatus::default());
         Self {
             site_id: site_id.into(),
             client,
@@ -97,18 +185,35 @@ impl S3Poller {
             last_seen_key: None,
             consecutive_empty_polls: 0,
             seen_any_key_in_current_volume: false,
+            consecutive_errors: 0,
+            status_tx,
         }
     }
 
-    /// Runs the polling loop, sending each new chunk over `tx`.
-    /// Returns when `tx` is closed (receiver dropped).
-    /// Transient S3 errors are logged and skipped; the loop never exits on its own.
+    /// A live view of this poller's health (FR-DA-5). Subscribe before
+    /// calling [`Self::run`], which consumes `self`.
+    pub fn status(&self) -> watch::Receiver<IngestStatus> {
+        self.status_tx.subscribe()
+    }
+
+    /// Runs the polling loop, sending each new chunk over `tx` and
+    /// publishing health updates to the receiver from [`Self::status`].
+    /// Returns when `tx` is closed (receiver dropped). Errors are
+    /// classified and published rather than causing the loop to exit; it
+    /// never stops on its own.
     pub async fn run(mut self, tx: mpsc::Sender<ChunkEnvelope>) {
         let mut interval = tokio::time::interval(POLL_INTERVAL);
         loop {
             interval.tick().await;
             match self.poll_once().await {
                 Ok(envelopes) => {
+                    self.consecutive_errors = 0;
+                    let current_volume = self.last_completed_volume;
+                    self.status_tx.send_modify(|s| {
+                        s.state = IngestState::Polling;
+                        s.last_success = Some(Instant::now());
+                        s.current_volume = current_volume;
+                    });
                     for envelope in envelopes {
                         if tx.send(envelope).await.is_err() {
                             return;
@@ -116,7 +221,21 @@ impl S3Poller {
                     }
                 }
                 Err(e) => {
-                    // TODO: replace with structured logging once a logging crate is added
+                    self.consecutive_errors += 1;
+                    let kind = IngestErrorKind::from(&e);
+                    let state = if self.consecutive_errors >= STALLED_AFTER_CONSECUTIVE_ERRORS {
+                        IngestState::Stalled
+                    } else {
+                        IngestState::Retrying { attempts: self.consecutive_errors }
+                    };
+                    self.status_tx.send_modify(|s| {
+                        s.state = state;
+                        s.last_error = Some(kind);
+                    });
+                    // TODO: replace with structured logging once a typed
+                    // event module lands (S1-W3c) — status_tx above is
+                    // what a UI consumes; this is still the diagnostic
+                    // trail for a human reading logs directly.
                     eprintln!("[s3_poll] {e}");
                 }
             }
@@ -227,6 +346,10 @@ impl S3Poller {
                      after {} empty polls with no key ever seen",
                     state.consecutive_empty_polls
                 );
+                self.status_tx.send_modify(|s| {
+                    s.state = IngestState::ReAnchoring;
+                    s.current_volume = Some(new_target - 1);
+                });
                 self.last_completed_volume = Some(new_target - 1);
                 self.last_seen_key = None;
                 self.consecutive_empty_polls = 0;
@@ -238,6 +361,10 @@ impl S3Poller {
                      after {} empty polls (assembly watchdog will mark it TimedOut)",
                     state.consecutive_empty_polls
                 );
+                self.status_tx.send_modify(|s| {
+                    s.state = IngestState::ReAnchoring;
+                    s.current_volume = Some(new_target - 1);
+                });
                 self.last_completed_volume = Some(new_target - 1);
                 self.last_seen_key = None;
                 self.consecutive_empty_polls = 0;
@@ -621,6 +748,53 @@ mod tests {
         assert_eq!(parse_volume_folder("KDOX/", "KDOX/166"), None); // no trailing slash
         assert_eq!(parse_volume_folder("KDOX/", "KDOX/abc/"), None); // not an integer
         assert_eq!(parse_volume_folder("KDOX/", "OTHER/166/"), None); // wrong prefix
+    }
+
+    #[test]
+    fn ingest_error_kind_classifies_network_failures() {
+        assert_eq!(
+            IngestErrorKind::from(&PollError::Http(http_ingest::Error::Connect(
+                std::io::Error::other("refused")
+            ))),
+            IngestErrorKind::Network
+        );
+        assert_eq!(
+            IngestErrorKind::from(&PollError::Http(http_ingest::Error::Timeout {
+                phase: http_ingest::Phase::Connect
+            })),
+            IngestErrorKind::Network
+        );
+        assert_eq!(IngestErrorKind::from(&PollError::Http(http_ingest::Error::Closed)), IngestErrorKind::Network);
+    }
+
+    #[test]
+    fn ingest_error_kind_classifies_http_status_and_malformed_listing() {
+        assert_eq!(
+            IngestErrorKind::from(&PollError::Http(http_ingest::Error::Http { status: 503 })),
+            IngestErrorKind::Http { status: 503 }
+        );
+
+        let xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Contents>
+    <Key>KDOX/166/a&nbsp;b</Key>
+  </Contents>
+</ListBucketResult>"#;
+        let err = match parse_list_xml(xml) {
+            Err(e) => e,
+            Ok(_) => panic!("unrecognized entity should fail to parse"),
+        };
+        assert_eq!(IngestErrorKind::from(&err), IngestErrorKind::MalformedListing);
+    }
+
+    #[test]
+    fn new_poller_publishes_default_polling_status() {
+        let client = http_ingest::Client::new(BUCKET_HOST).expect("client");
+        let poller = S3Poller::new("KDOX", client);
+        let status = poller.status().borrow().clone();
+        assert_eq!(status.state, IngestState::Polling);
+        assert!(status.last_success.is_none());
+        assert!(status.last_error.is_none());
     }
 
     #[test]
