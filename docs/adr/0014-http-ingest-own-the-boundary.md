@@ -44,16 +44,45 @@ Direct dependencies of the new crate:
 | `rustls`             | TLS implementation                       | Memory-safe TLS. Configured with the `ring` provider (see below).                     |
 | `tokio-rustls`       | Async glue for rustls                    | Minimal; maintained by the rustls project.                                            |
 | `webpki-roots`       | Trust anchors                            | Mozilla root store, compiled in. No runtime dependency on the system certificate store. |
-| `httparse`           | HTTP/1.1 response header parsing         | Single crate, no transitive dependencies, well-audited. Alternative to hand-rolling.  |
+| `bytes`              | Zero-copy body handoff                   | Response bodies are handed to the framing layer without a copy (ADR-0017).            |
+
+This table matches `crates/http-ingest/Cargo.toml` `[dependencies]` exactly, row for row.
+Header and chunk-framing parsing (status line, headers, `Content-Length` /
+`Transfer-Encoding: chunked` bodies) is hand-rolled in `src/response.rs`, not delegated to
+`httparse` (see Erratum, item 2).
 
 The `ring` crypto provider is selected over `aws-lc-rs`. Ring is not strictly C-free (Perl-generated assembly, a small C shim), but its trusted surface is roughly two orders of magnitude smaller than AWS-LC, and the FIPS validation that justified accepting AWS-LC does not apply to the declared configuration in any case. This trade — smaller trusted surface for absence of FIPS validation — is deliberate. Should FIPS-validated cryptography become a procurement requirement, `aws-lc-rs` with the `fips` feature enabled may be reintroduced under a superseding ADR; the crate boundary makes the swap local.
+
+### TLS protocol version policy (`tls12`)
+
+`rustls` and `tokio-rustls` both enable the `tls12` feature, alongside TLS 1.3 (which
+`rustls` enables unconditionally and cannot be turned off). This is a recorded decision,
+not a default left in place:
+
+- **Live evidence.** Direct measurement against both S3 hosts (`curl -vI`, 2026-07-31)
+  shows both `unidata-nexrad-level2-chunks.s3.amazonaws.com` and
+  `unidata-nexrad-level2.s3.amazonaws.com` negotiate TLS 1.3
+  (`TLS_AES_128_GCM_SHA256` / `X25519MLKEM768`) today. Dropping `tls12` would cost nothing
+  against these two hosts as they currently stand.
+- **Rationale for keeping it anyway.** The deployment context is an operator on an
+  arbitrary network during a severe weather event — a hotel, a vehicle hotspot, an
+  agency network behind a TLS-inspecting middlebox — not a controlled data-center path to
+  S3. An endpoint or middlebox that only offers TLS 1.2 would turn a cosmetic protocol-
+  surface reduction into total acquisition failure at the worst possible time. Under
+  Principle 2 (Stability as Ethics), that trade goes against narrowing the surface:
+  resilience of the acquisition path outweighs the marginal attack-surface reduction of
+  dropping a still-current, still-secure TLS version.
+- **Reversal condition.** If a future deployment profile can guarantee TLS 1.3 end to end
+  (e.g. a locked-down agency network with a known-compliant egress path), dropping `tls12`
+  is a one-line feature-flag change; record it as a superseding note here rather than
+  silently flipping it.
 
 The crate implements:
 
 - Connection establishment with configurable connect / TLS handshake / headers / body timeouts (four distinct deadlines)
 - A single long-lived keepalive connection per `(host, port)` pair, reopened on failure. No connection pool. Polling cadence does not justify pool complexity.
 - Request formatting for `GET` with query parameters (percent-encoded per RFC 3986 for the S3 base64 continuation-token character set, which contains `=`, `+`, and `/`)
-- Response parsing bounded by `Content-Length`. Requests advertise `Connection: keep-alive` and do not accept `Transfer-Encoding: chunked` — chunked responses are rejected with a typed error rather than parsed.
+- Response parsing bounded by `Content-Length`, or by a bounded `Transfer-Encoding: chunked` decoder under `max_body_bytes` for the one accepted chunked shape — any other `Transfer-Encoding` value, a duplicate header, or `Transfer-Encoding` combined with `Content-Length` is rejected as a framing violation (see Erratum, item 1).
 - Rustls session resumption via a process-local `ClientSessionStore` to amortize TLS handshake cost across polls
 - Structured errors distinguishing transport, TLS, protocol, and status-code failures
 
@@ -104,11 +133,11 @@ Any future need for one of these is a signal to reopen this ADR, not to grow the
 
 ## Implementation notes
 
-- The new crate lives at `crates/http-ingest`. It exposes a `Client` type constructed once per process, and two methods: `list_prefix(prefix: &str, continuation_token: Option<&str>) -> ListResponse` and `get_object(key: &str) -> Bytes`. It does not expose a general `request()` method.
+- The new crate lives at `crates/http-ingest`. It exposes a `Client` type constructed once per process, and two methods: `list_prefix(prefix: &str, start_after: Option<&str>, continuation_token: Option<&str>, delimiter: Option<&str>) -> Bytes` and `get_object(key: &str) -> Bytes` (see Erratum, items 3 and 9). It does not expose a general `request()` method.
 - The `S3PollingSource` acquisition layer takes the `Client` by value in its constructor. This preserves the existing seam where the caller wires the transport, and matches the current pattern of `S3Poller::new` accepting its HTTP client from above.
 - Timeout policy: 5 s connect, 5 s TLS handshake, 10 s response headers, 30 s body read. These are configurable but have opinionated defaults.
 - Error taxonomy distinguishes at minimum: `Connect`, `Tls`, `Protocol` (framing violation), `Http { status }`, `Timeout { phase }`, `Closed` (peer closed keepalive connection). Framing layer maps `Closed` to a transparent retry; other errors bubble.
-- A `dev-server/` module under `crates/http-ingest` provides a minimal rustls-fronted HTTP/1.1 responder for integration tests. It is `#[cfg(test)]`-gated and does not ship in the release binary.
+- A `src/test_server.rs` module provides a minimal plaintext HTTP/1.1 responder for integration tests. It is `#[cfg(test)]`-gated and does not ship in the release binary (see Erratum, item 4).
 
 ## Migration
 
@@ -169,3 +198,31 @@ reflect. Recorded here so the ADR and the shipped code agree.
 7. **LOC estimate revised.** This ADR's original estimate of 500–900 lines and the
    plan's revised estimate of ~1,000 lines of production code both undershoot somewhat
    once the chunked decoder (item 1) is counted; not a reason to revisit the design.
+
+## Erratum (added during dependency-inventory remediation, 2026-07-31)
+
+8. **Item 6, above, is itself wrong about the chunks bucket and is superseded.** Item 6
+   asserted the chunks bucket's key layout is `SITE/YYYY/MM/DD/...`. Direct inspection of
+   the live bucket (2026-07-31, while measuring cold-start latency for
+   `docs/plans/dependency-inventory-remediation.md` W1) found the real layout is
+   `SITE/<volume-sequence>/<timestamp>-<n>-<kind>`: an unpadded, monotonically increasing
+   per-site volume counter as the first path segment, with the calendar timestamp embedded
+   in the filename rather than the path. This is not a wording nit — `S3Poller`'s
+   `current_hour_anchor` was built directly on the wrong assumption, and a live measurement
+   against it returned 32,524 keys (a whole day's near-complete backlog) instead of a small
+   hour-boundary backlog, because the constructed anchor string didn't correspond to any
+   real prefix and unpadded lexical sort put most of the bucket's contents after it. Fixed
+   in the same session: `S3Poller` now discovers volume-sequence folders via `delimiter=/`
+   (item 9) and anchors on the numeric volume number, not a synthetic calendar path. See
+   `crates/radar-workstation/src/ingest/s3_poll.rs` doc comments and the plan's W1 Results
+   for the full account. Item 6's claim about the *archive* bucket's layout
+   (`YYYY/MM/DD/SITE/...`) is unaffected — that bucket was not re-verified here and nothing
+   found this session contradicts it.
+9. **`list_prefix` gains a fourth parameter, `delimiter: Option<&str>`.** Added to support
+   `S3Poller::list_volume_folders` (item 8, above): `Some("/")` requests S3's
+   `<CommonPrefixes>` grouping instead of a flat key listing, which is what makes
+   enumerating volume-sequence directories cheap (one small request instead of paging
+   through every chunk in the retention window). Same endpoint, same host allowlist, same
+   trust boundary as the existing `list-type=2` query — this is an additional optional
+   query parameter, not a new capability, so it does not reopen the "no connection pool" /
+   scope-boundary decisions above.

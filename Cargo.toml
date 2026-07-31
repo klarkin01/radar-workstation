@@ -6,5 +6,29 @@ members = [
     "utility/nexrad-sample",
     "utility/radar-viz",
 ]
+default-members = [
+    "crates/radar-workstation",
+    "crates/nexrad-decoder",
+    "crates/http-ingest",
+]
 exclude = ["crates/http-ingest/fuzz"]
 resolver = "2"
+
+[profile.release]
+# unwind, not abort: a panic in one decode/fetch task must not take down the
+# whole workstation mid-warning. ADR-0012 already defines the degraded path
+# (TimedOut / missing-chunk handling) for the task that panicked.
+panic = "unwind"
+# Nearly all of fat LTO's cross-crate benefit at a fraction of the build
+# time; release builds are on the measure-and-iterate path for performance
+# work, so build time matters here.
+lto = "thin"
+codegen-units = 1
+# Deliberately debuginfo, not symbols: a panic during an event must produce
+# a readable backtrace, not just addresses.
+strip = "debuginfo"
+# The decoder parses gate counts, pointer offsets, and block sizes straight
+# out of attacker-influenceable radar bytes. Under panic = "unwind", a
+# malformed radial overflowing an offset produces a contained, logged panic
+# instead of silently wrapping into a plausible-looking wrong answer.
+overflow-checks = true

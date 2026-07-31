@@ -28,7 +28,7 @@ fn first_tag(xml: &[u8], tag: &str) -> Option<String> {
 #[ignore]
 async fn list_prefix_against_chunks_bucket_returns_at_least_one_key() {
     let mut client = Client::new(CHUNKS_HOST).unwrap();
-    let body = client.list_prefix("KDOX/", None, None).await.unwrap();
+    let body = client.list_prefix("KDOX/", None, None, None).await.unwrap();
     assert!(first_tag(&body, "Key").is_some(), "expected at least one <Key> in {body:?}");
 }
 
@@ -36,7 +36,7 @@ async fn list_prefix_against_chunks_bucket_returns_at_least_one_key() {
 #[ignore]
 async fn get_object_on_first_listed_key_returns_bytes() {
     let mut client = Client::new(CHUNKS_HOST).unwrap();
-    let listing = client.list_prefix("KDOX/", None, None).await.unwrap();
+    let listing = client.list_prefix("KDOX/", None, None, None).await.unwrap();
     let key = first_tag(&listing, "Key").expect("listing should contain at least one key");
 
     let bytes = client.get_object(&key).await.unwrap();
@@ -47,7 +47,7 @@ async fn get_object_on_first_listed_key_returns_bytes() {
 #[ignore]
 async fn two_sequential_get_object_calls_succeed_over_one_connection() {
     let mut client = Client::new(CHUNKS_HOST).unwrap();
-    let listing = client.list_prefix("KDOX/", None, None).await.unwrap();
+    let listing = client.list_prefix("KDOX/", None, None, None).await.unwrap();
     let key = first_tag(&listing, "Key").expect("listing should contain at least one key");
 
     let first = client.get_object(&key).await.unwrap();
@@ -62,26 +62,43 @@ async fn two_sequential_get_object_calls_succeed_over_one_connection() {
 #[ignore]
 async fn list_prefix_with_continuation_token_from_a_truncated_page_succeeds() {
     let mut client = Client::new(CHUNKS_HOST).unwrap();
-    let first_page = client.list_prefix("KDOX/", None, None).await.unwrap();
+    let first_page = client.list_prefix("KDOX/", None, None, None).await.unwrap();
 
     let is_truncated = first_tag(&first_page, "IsTruncated").as_deref() == Some("true");
     assert!(is_truncated, "expected the unfiltered KDOX/ prefix to be truncated (>1000 keys)");
     let token = first_tag(&first_page, "NextContinuationToken")
         .expect("truncated listing should carry a NextContinuationToken");
 
-    let second_page = client.list_prefix("KDOX/", None, Some(&token)).await.unwrap();
+    let second_page = client.list_prefix("KDOX/", None, Some(&token), None).await.unwrap();
     assert!(first_tag(&second_page, "Key").is_some(), "second page should contain keys too");
+}
+
+#[tokio::test]
+#[ignore]
+async fn list_prefix_with_delimiter_groups_by_common_prefix() {
+    // The chunks bucket's real key layout is `SITE/<volume-seq>/<timestamp>-
+    // <n>-<kind>` (confirmed live 2026-07-31; corrects an earlier assumption
+    // of `SITE/YYYY/MM/DD/HH/...` recorded here and in `current_hour_anchor`
+    // — see docs/plans/dependency-inventory-remediation.md, W1 Results).
+    // `delimiter=/` groups keys by that first path segment into
+    // `<CommonPrefixes>`, which is what `S3Poller::list_volume_folders`
+    // relies on to enumerate volumes without paging through every chunk.
+    let mut client = Client::new(CHUNKS_HOST).unwrap();
+    let body = client.list_prefix("KDOX/", None, None, Some("/")).await.unwrap();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(text.contains("<CommonPrefixes>"), "expected CommonPrefixes grouping in {text}");
+    assert!(!text.contains("<Contents>"), "delimiter=/ on SITE/ should yield no flat Contents");
 }
 
 #[tokio::test]
 #[ignore]
 async fn archive_bucket_answers_both_request_shapes() {
     // The archive bucket's key layout is `YYYY/MM/DD/SITE/...` — the reverse
-    // of the chunks bucket's `SITE/YYYY/MM/DD/...` — confirmed live
+    // of the chunks bucket's site-then-volume layout — confirmed live
     // (2026-07-29). Worth carrying forward to whatever `ChunkSource`
     // eventually consumes this bucket (ADR-0014 open question 2).
     let mut client = Client::new(ARCHIVE_HOST).unwrap();
-    let listing = client.list_prefix("2026/07/29/KDOX/", None, None).await.unwrap();
+    let listing = client.list_prefix("2026/07/29/KDOX/", None, None, None).await.unwrap();
     let key = first_tag(&listing, "Key").expect("archive listing should contain at least one key");
 
     let bytes = client.get_object(&key).await.unwrap();

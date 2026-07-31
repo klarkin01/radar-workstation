@@ -11,4 +11,4 @@ http-ingest = { path = "../http-ingest" }
 bzip2 = "0.6"
 bytes = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util"] }
-quick-xml = "0.37"
+quick-xml = "0.41"
