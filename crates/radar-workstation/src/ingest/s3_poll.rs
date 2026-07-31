@@ -14,6 +14,23 @@ use super::ChunkEnvelope;
 pub const BUCKET_HOST: &str = "unidata-nexrad-level2-chunks.s3.amazonaws.com";
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
+/// Empty polls, with no key ever seen for the current target volume,
+/// before re-listing volume folders to check for a skipped sequence
+/// number (E-observed live: 79→90, 92→165, 195→268). 12 polls × 5s poll
+/// interval ≈ 60s — a normal gap between chunks within a volume is a
+/// handful of empty polls; a genuinely absent directory produces an
+/// unbounded run of them.
+const REANCHOR_EMPTY_POLLS: u32 = 12;
+/// Empty polls, after real data was seen for the current target volume,
+/// before giving up on it and advancing to the next one. 60 polls × 5s ≈
+/// 5 minutes — longer than the re-anchor threshold because real data
+/// having arrived means this is very likely the volume's actual final
+/// chunk being late or lost, not an absent directory, and a false-positive
+/// here abandons in-progress data. The assembly layer's own watchdog (not
+/// this poller) is what eventually marks that volume `TimedOut`; this
+/// threshold only stops the poller from polling a directory forever.
+const STUCK_MID_VOLUME_EMPTY_POLLS: u32 = 60;
+
 #[derive(Debug)]
 pub enum PollError {
     Http(http_ingest::Error),
@@ -60,11 +77,27 @@ pub struct S3Poller {
     /// (`last_completed_volume + 1`). Reset to `None` whenever that volume
     /// completes and the poller moves on to the next one.
     last_seen_key: Option<String>,
+    /// Empty polls in a row for the volume currently being drained. Reset
+    /// to 0 whenever a key is seen or the target volume changes.
+    consecutive_empty_polls: u32,
+    /// Whether any key has been seen yet for the volume currently being
+    /// drained. Distinguishes "this directory doesn't exist yet" (a
+    /// skipped sequence number) from "stuck partway through a real
+    /// volume" (S1-W3a) — both otherwise look identical (zero keys
+    /// returned).
+    seen_any_key_in_current_volume: bool,
 }
 
 impl S3Poller {
     pub fn new(site_id: impl Into<String>, client: http_ingest::Client) -> Self {
-        Self { site_id: site_id.into(), client, last_completed_volume: None, last_seen_key: None }
+        Self {
+            site_id: site_id.into(),
+            client,
+            last_completed_volume: None,
+            last_seen_key: None,
+            consecutive_empty_polls: 0,
+            seen_any_key_in_current_volume: false,
+        }
     }
 
     /// Runs the polling loop, sending each new chunk over `tx`.
@@ -112,8 +145,13 @@ impl S3Poller {
 
         if keys.is_empty() {
             self.last_completed_volume = Some(baseline);
+            self.consecutive_empty_polls += 1;
+            self.apply_recovery(&prefix, volume).await?;
             return Ok(vec![]);
         }
+
+        self.consecutive_empty_polls = 0;
+        self.seen_any_key_in_current_volume = true;
 
         let mut to_fetch: Vec<(String, ChunkKind)> = Vec::with_capacity(keys.len());
         for key in &keys {
@@ -141,18 +179,73 @@ impl S3Poller {
 
         self.last_seen_key = keys.into_iter().next_back();
         if saw_end {
-            // Volume complete: move on to the next volume-sequence directory
-            // next poll. Known gap, not fixed here (mirrors the pre-existing
-            // permanently-404ing-key issue): if `volume + 1` never appears —
-            // e.g. an RDA restart skips sequence numbers, as observed live —
-            // the poller stalls waiting on a directory that will never exist.
+            // Volume complete: move on to the next volume-sequence
+            // directory next poll. If `volume + 1` never appears — e.g. an
+            // RDA restart skips sequence numbers, as observed live —
+            // apply_recovery's re-anchor path (S1-W3a) is what keeps the
+            // poller from stalling on a directory that will never exist.
             self.last_completed_volume = Some(volume);
             self.last_seen_key = None;
+            self.seen_any_key_in_current_volume = false;
         } else {
             self.last_completed_volume = Some(baseline);
         }
 
         Ok(envelopes)
+    }
+
+    /// Skipped-volume and stuck-mid-volume recovery (S1-W3a). Called only
+    /// when `poll_once` saw zero keys this poll. Re-listing the bucket's
+    /// volume folders costs a measured ~196ms (dependency-inventory-
+    /// remediation.md §2.1), so this only does it when
+    /// `REANCHOR_EMPTY_POLLS` have passed with no key seen at all for
+    /// `target_volume` — and throttles back to checking again only every
+    /// `REANCHOR_EMPTY_POLLS` polls thereafter, not on every poll.
+    async fn apply_recovery(&mut self, prefix: &str, target_volume: u64) -> Result<(), PollError> {
+        let state = PollState {
+            current_target: target_volume,
+            consecutive_empty_polls: self.consecutive_empty_polls,
+            seen_any_key_in_current_volume: self.seen_any_key_in_current_volume,
+        };
+
+        let should_relist =
+            !state.seen_any_key_in_current_volume && state.consecutive_empty_polls >= REANCHOR_EMPTY_POLLS;
+        let listing =
+            if should_relist { Some(self.list_volume_folders(prefix).await?) } else { None };
+
+        match next_target(&state, listing.as_deref()) {
+            PollAction::Continue => {
+                if should_relist {
+                    // Checked and found no gap; wait another full
+                    // REANCHOR_EMPTY_POLLS before checking again.
+                    self.consecutive_empty_polls = 0;
+                }
+            }
+            PollAction::ReAnchor { new_target } => {
+                eprintln!(
+                    "[s3_poll] re-anchoring from volume {target_volume} to {new_target} \
+                     after {} empty polls with no key ever seen",
+                    state.consecutive_empty_polls
+                );
+                self.last_completed_volume = Some(new_target - 1);
+                self.last_seen_key = None;
+                self.consecutive_empty_polls = 0;
+                self.seen_any_key_in_current_volume = false;
+            }
+            PollAction::AdvancePastStuckVolume { new_target } => {
+                eprintln!(
+                    "[s3_poll] advancing past stalled volume {target_volume} to {new_target} \
+                     after {} empty polls (assembly watchdog will mark it TimedOut)",
+                    state.consecutive_empty_polls
+                );
+                self.last_completed_volume = Some(new_target - 1);
+                self.last_seen_key = None;
+                self.consecutive_empty_polls = 0;
+                self.seen_any_key_in_current_volume = false;
+            }
+        }
+
+        Ok(())
     }
 
     /// Lists the numeric volume-sequence subdirectories directly under `prefix`
@@ -246,6 +339,60 @@ impl S3Poller {
 /// new site, no data yet) yields `0`, so the poller waits on volume `1`.
 fn cold_start_baseline(folders: &[u64]) -> u64 {
     folders.iter().copied().max().unwrap_or(0).saturating_sub(1)
+}
+
+/// Minimal state `next_target` needs to decide what to do about an empty
+/// poll. Deliberately narrower than all of `S3Poller` — same spirit as
+/// `cold_start_baseline` being a pure, offline-testable function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PollState {
+    /// The volume-sequence number `poll_once` was polling this cycle
+    /// (`last_completed_volume + 1`).
+    current_target: u64,
+    consecutive_empty_polls: u32,
+    seen_any_key_in_current_volume: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PollAction {
+    /// Keep polling `current_target`; nothing has crossed a threshold.
+    Continue,
+    /// A gap was found: `current_target` will never produce data because a
+    /// later volume already exists. Anchor to `new_target` instead.
+    ReAnchor { new_target: u64 },
+    /// `current_target` produced real data but has now stalled past the
+    /// longer threshold. Give up on it and move to `new_target`.
+    AdvancePastStuckVolume { new_target: u64 },
+}
+
+/// Pure decision function for S1-W3a's skipped-volume and
+/// stuck-mid-volume recovery. `listing` is the numeric volume-sequence
+/// folders from a fresh `list_volume_folders` call — `Some` only when the
+/// caller actually performed that (costly) listing this poll, which itself
+/// only happens when `state` already indicates a re-anchor check is due
+/// (see `S3Poller::apply_recovery`). Passing `None` when nothing was
+/// fetched avoids pretending a decision was made from data that was never
+/// gathered.
+fn next_target(state: &PollState, listing: Option<&[u64]>) -> PollAction {
+    if !state.seen_any_key_in_current_volume && state.consecutive_empty_polls >= REANCHOR_EMPTY_POLLS {
+        if let Some(folders) = listing {
+            let newest = folders.iter().copied().max().unwrap_or(state.current_target);
+            // Never re-anchor backwards past a volume already delivered:
+            // current_target - 1 is already delivered, so the candidate
+            // can never go below current_target itself.
+            let candidate = newest.saturating_sub(1).max(state.current_target);
+            if candidate > state.current_target {
+                return PollAction::ReAnchor { new_target: candidate };
+            }
+        }
+        return PollAction::Continue;
+    }
+
+    if state.seen_any_key_in_current_volume && state.consecutive_empty_polls >= STUCK_MID_VOLUME_EMPTY_POLLS {
+        return PollAction::AdvancePastStuckVolume { new_target: state.current_target + 1 };
+    }
+
+    PollAction::Continue
 }
 
 /// Parses the numeric volume-sequence directory name out of a `CommonPrefixes`
@@ -405,6 +552,62 @@ mod tests {
     #[test]
     fn cold_start_baseline_does_not_underflow_at_volume_one() {
         assert_eq!(cold_start_baseline(&[1]), 0);
+    }
+
+    fn poll_state(current_target: u64, consecutive_empty_polls: u32, seen_any_key: bool) -> PollState {
+        PollState { current_target, consecutive_empty_polls, seen_any_key_in_current_volume: seen_any_key }
+    }
+
+    #[test]
+    fn normal_empty_polls_below_threshold_do_not_reanchor() {
+        let state = poll_state(90, REANCHOR_EMPTY_POLLS - 1, false);
+        assert_eq!(next_target(&state, None), PollAction::Continue);
+        // Even if a listing happened to be available, still below
+        // threshold means it must not be used.
+        assert_eq!(next_target(&state, Some(&[90])), PollAction::Continue);
+    }
+
+    #[test]
+    fn gap_in_listing_reanchors_forward() {
+        // Volume 90 never materializes; 92 through 165 do (E-observed gap).
+        let state = poll_state(90, REANCHOR_EMPTY_POLLS, false);
+        let folders: Vec<u64> = (92..=165).collect();
+        assert_eq!(
+            next_target(&state, Some(&folders)),
+            PollAction::ReAnchor { new_target: 164 }
+        );
+    }
+
+    #[test]
+    fn no_gap_in_listing_does_not_reanchor() {
+        // The directory just hasn't appeared yet — normal cold-tail wait.
+        let state = poll_state(90, REANCHOR_EMPTY_POLLS, false);
+        assert_eq!(next_target(&state, Some(&[89])), PollAction::Continue);
+    }
+
+    #[test]
+    fn reanchor_never_moves_backwards_past_current_target() {
+        // A stale/short listing must never suggest going backwards.
+        let state = poll_state(200, REANCHOR_EMPTY_POLLS, false);
+        assert_eq!(next_target(&state, Some(&[5, 10, 50])), PollAction::Continue);
+    }
+
+    #[test]
+    fn stuck_mid_volume_advances_only_after_the_longer_threshold() {
+        let state = poll_state(90, STUCK_MID_VOLUME_EMPTY_POLLS - 1, true);
+        assert_eq!(next_target(&state, None), PollAction::Continue);
+
+        let state = poll_state(90, STUCK_MID_VOLUME_EMPTY_POLLS, true);
+        assert_eq!(next_target(&state, None), PollAction::AdvancePastStuckVolume { new_target: 91 });
+    }
+
+    #[test]
+    fn stuck_mid_volume_does_not_trigger_the_reanchor_path() {
+        // seen_any_key_in_current_volume=true means this is the
+        // stuck-mid-volume case, not the never-saw-a-key case, even past
+        // the (smaller) reanchor threshold.
+        let state = poll_state(90, REANCHOR_EMPTY_POLLS, true);
+        assert_eq!(next_target(&state, Some(&[92, 93])), PollAction::Continue);
     }
 
     #[test]
@@ -620,5 +823,56 @@ mod tests {
         }
 
         println!("keepalive_amortization: first={first:?} subsequent={subsequent:?}");
+    }
+
+    /// S1-W3a, against the real bucket. Forces the poller's target one
+    /// volume past whatever currently exists (indistinguishable, from the
+    /// poller's perspective, from a target that will never materialize —
+    /// a genuine permanent gap can't be manufactured against a live site
+    /// that's actually producing volumes) and polls in a loop at the real
+    /// 5s cadence. The property under test is the one the historical bug
+    /// violated: the poller must not get stuck polling a directory
+    /// forever. It doesn't matter here whether the forced volume resolves
+    /// by arriving normally or via `apply_recovery`'s re-anchor path (that
+    /// specific branch is what the pure `next_target` unit tests above
+    /// verify); what matters live is that `last_completed_volume` reaches
+    /// or passes `forced_target` within a generous deadline rather than
+    /// stalling. Slow — bounded by how long the site's VCP takes to
+    /// produce another volume or two, not by a fixed poll count.
+    #[tokio::test]
+    #[ignore]
+    async fn does_not_stall_when_forced_past_the_newest_real_volume() {
+        let client = http_ingest::Client::new(BUCKET_HOST).expect("client");
+        let mut poller = S3Poller::new(LIVE_TEST_SITE, client);
+        let prefix = format!("{}/", poller.site_id);
+
+        let folders = poller.list_volume_folders(&prefix).await.expect("list folders");
+        let newest_at_start = folders.iter().copied().max().expect("at least one volume folder");
+        let forced_target = newest_at_start + 1;
+        poller.last_completed_volume = Some(forced_target - 1);
+
+        let start = Instant::now();
+        let deadline = Duration::from_secs(20 * 60);
+        let mut interval = tokio::time::interval(POLL_INTERVAL);
+
+        let progressed = loop {
+            interval.tick().await;
+            poller.poll_once().await.expect("poll_once");
+            if poller.last_completed_volume.expect("set by poll_once") >= forced_target {
+                break true;
+            }
+            if start.elapsed() > deadline {
+                break false;
+            }
+        };
+
+        println!(
+            "does_not_stall_when_forced_past_the_newest_real_volume: newest_at_start={newest_at_start} \
+             forced_target={forced_target} progressed={progressed} elapsed={:?} \
+             last_completed_volume={:?}",
+            start.elapsed(),
+            poller.last_completed_volume
+        );
+        assert!(progressed, "poller stalled past {deadline:?} without reaching {forced_target}");
     }
 }
