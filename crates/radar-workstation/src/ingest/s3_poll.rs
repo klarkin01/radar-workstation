@@ -232,11 +232,7 @@ impl S3Poller {
                         s.state = state;
                         s.last_error = Some(kind);
                     });
-                    // TODO: replace with structured logging once a typed
-                    // event module lands (S1-W3c) — status_tx above is
-                    // what a UI consumes; this is still the diagnostic
-                    // trail for a human reading logs directly.
-                    eprintln!("[s3_poll] {e}");
+                    crate::event::log_to_stderr(&crate::event::Event::PollFailed(e));
                 }
             }
         }
@@ -276,7 +272,9 @@ impl S3Poller {
         for key in &keys {
             match chunk_kind_from_key(key) {
                 Some(kind) => to_fetch.push((key.clone(), kind)),
-                None => eprintln!("[s3_poll] unrecognized key suffix, skipping: {key}"),
+                None => crate::event::log_to_stderr(&crate::event::Event::UnrecognizedKeySuffix {
+                    key: key.clone(),
+                }),
             }
         }
 
@@ -341,11 +339,11 @@ impl S3Poller {
                 }
             }
             PollAction::ReAnchor { new_target } => {
-                eprintln!(
-                    "[s3_poll] re-anchoring from volume {target_volume} to {new_target} \
-                     after {} empty polls with no key ever seen",
-                    state.consecutive_empty_polls
-                );
+                crate::event::log_to_stderr(&crate::event::Event::ReAnchored {
+                    from_volume: target_volume,
+                    to_volume: new_target,
+                    empty_polls: state.consecutive_empty_polls,
+                });
                 self.status_tx.send_modify(|s| {
                     s.state = IngestState::ReAnchoring;
                     s.current_volume = Some(new_target - 1);
@@ -356,11 +354,11 @@ impl S3Poller {
                 self.seen_any_key_in_current_volume = false;
             }
             PollAction::AdvancePastStuckVolume { new_target } => {
-                eprintln!(
-                    "[s3_poll] advancing past stalled volume {target_volume} to {new_target} \
-                     after {} empty polls (assembly watchdog will mark it TimedOut)",
-                    state.consecutive_empty_polls
-                );
+                crate::event::log_to_stderr(&crate::event::Event::AdvancedPastStalledVolume {
+                    from_volume: target_volume,
+                    to_volume: new_target,
+                    empty_polls: state.consecutive_empty_polls,
+                });
                 self.status_tx.send_modify(|s| {
                     s.state = IngestState::ReAnchoring;
                     s.current_volume = Some(new_target - 1);
@@ -393,9 +391,9 @@ impl S3Poller {
             for common_prefix in &page.common_prefixes {
                 match parse_volume_folder(prefix, common_prefix) {
                     Some(volume) => folders.push(volume),
-                    None => {
-                        eprintln!("[s3_poll] unrecognized volume folder, skipping: {common_prefix}")
-                    }
+                    None => crate::event::log_to_stderr(&crate::event::Event::UnrecognizedVolumeFolder {
+                        entry: common_prefix.clone(),
+                    }),
                 }
             }
 
