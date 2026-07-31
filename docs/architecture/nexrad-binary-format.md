@@ -171,7 +171,7 @@ body** (i.e., relative to record offset 28).
 | 16          | 1    | `u8`       | `compression`          | 0 = uncompressed (always 0 in practice)          |
 | 17          | 1    | `u8`       | `spare`                | Reserved                                         |
 | 18          | 2    | `u16`      | `radial_len`           | Radial length in halfwords                       |
-| 20          | 1    | `u8`       | `az_spacing`           | 1 = 1.0° spacing, 2 = 0.5° (super-resolution)   |
+| 20          | 1    | `u8`       | `az_spacing`           | 1 = 0.5° (super-resolution), 2 = 1.0° spacing   |
 | 21          | 1    | `u8`       | `radial_status`        | See Radial Status table below                    |
 | 22          | 1    | `u8`       | `el_num`               | Elevation number within volume (1-indexed)       |
 | 23          | 1    | `u8`       | `sector_cut_num`       | Sector cut number                                |
@@ -179,6 +179,18 @@ body** (i.e., relative to record offset 28).
 | 28          | 1    | `u8`       | `radial_spot_blanking` | Spot blanking status bitmask                     |
 | 29          | 1    | `u8`       | `az_index_mode`        | Azimuth indexing mode                            |
 | 30          | 2    | `u16`      | `num_data_blks`        | Total data block count (vol + el + rad + moments)|
+
+**Corrected 2026-07-31 (S1-W4d):** the `az_spacing` code meaning was previously stated
+backwards. Measured directly against consecutive `az_angle` values across full volumes
+from two independent sites/VCPs (KDOX VCP 35 in `downloads/KDOX_20260629_1811/`, and
+KTLH VCP 212 — see `docs/plans/stage-0-1-close-the-acquisition-path.md` S1-W4d): every
+elevation carrying code **1** measured a mean spacing of **0.500°** between consecutive
+radials (super-resolution), and every elevation carrying code **2** measured **1.000°**
+(standard resolution) — the reverse of what this table previously said. This also
+retires half of Q17 (`docs/open-questions.md`): standard-resolution gate geometry
+(gate width, first gate) is identical to super-resolution on the same site/VCP: only
+the azimuthal radial count differs (720 vs 360 radials per 360° sweep in the volumes
+measured). See `docs/architecture/rendering.md`'s Polar Grid Representation section.
 
 #### Radial Status Codes (`radial_status`)
 
@@ -189,7 +201,20 @@ body** (i.e., relative to record offset 28).
 | 2    | End of Elevation                    | Last radial of the sweep; `complete = true`     |
 | 3    | Start of Volume                     | First radial of the volume (implies sweep 1)    |
 | 4    | End of Volume                       | Last radial; signals volume completion         |
-| 5    | Start of Elevation (SAILS)          | SAILS supplemental low-level cut               |
+| 5    | Start of Elevation, Last Elevation  | Start of the volume's final (highest) elevation |
+
+**Corrected 2026-07-31 (S1-W4d):** code 5 does **not** mean "SAILS supplemental
+low-level cut" as an earlier revision of this table stated. Confirmed against real
+KTLH VCP 212 data: in a 16-elevation volume, code 5 appeared exactly once, on the
+single highest-elevation cut (angle ≈9.84°, `el_num`=16) — matching MetPy's
+`remap_status` (`START_ELEVATION | LAST_ELEVATION`), not a low-level repeat. The
+same volume's two SAILS/MRLE-inserted low-level cuts (repeated elevation angle
+≈0.65° and ≈0.53°, matching elevations 1 and 2) carried ordinary code 0
+(`StartOfElevation`) with new, incrementing `elevation_number` values (9 and 10) —
+**`elevation_number` never repeated**, only the elevation angle did. This confirms
+ADR-0012's late-data discard rule (keyed on elevation number) is safe as designed;
+see `crates/nexrad-decoder/tests/fixtures/ktlh_vcp212_sails_repeated_low_elevation.bin`
+and `docs/plans/stage-0-1-close-the-acquisition-path.md` §3 Risks.
 
 Code 3 (Start of Volume) is the only radial that carries a populated RVOL block
 with site metadata (lat/lon, VCP number). All other radials carry a null or absent

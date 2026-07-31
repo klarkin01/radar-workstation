@@ -27,7 +27,7 @@ pub fn parse_message31(record: &[u8]) -> Result<Radial, DecodeError> {
     let _compression = c.read_u8()?;
     let _spare = c.read_u8()?;
     let _radial_len = c.read_u16_be()?;
-    let _az_spacing = c.read_u8()?;
+    let azimuth_spacing_code = c.read_u8()?;
     let radial_status_code = c.read_u8()?;
     let el_num = c.read_u8()?;
     let _sector_cut_num = c.read_u8()?;
@@ -66,6 +66,7 @@ pub fn parse_message31(record: &[u8]) -> Result<Radial, DecodeError> {
         azimuth_deg: az_angle,
         elevation_deg: el_angle,
         azimuth_number: az_num,
+        azimuth_spacing_code,
         radial_status,
         elevation_number: el_num,
         unambiguous_range_km,

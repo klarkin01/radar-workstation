@@ -172,8 +172,8 @@ fn count_statuses(radials: &[nexrad_decoder::Radial]) -> [u32; 7] {
             RadialStatus::EndOfElevation       => 2,
             RadialStatus::StartOfVolume        => 3,
             RadialStatus::EndOfVolume          => 4,
-            RadialStatus::SailsCut              => 5,
-            RadialStatus::Unknown(_)            => 6,
+            RadialStatus::StartOfLastElevation => 5,
+            RadialStatus::Unknown(_)           => 6,
         };
         counts[i] += 1;
     }
@@ -181,7 +181,7 @@ fn count_statuses(radials: &[nexrad_decoder::Radial]) -> [u32; 7] {
 }
 
 fn format_status_counts(counts: &[u32; 7]) -> String {
-    let labels = ["SOEl", "Int", "EOEl", "SOVol", "EOVol", "SAILS", "Unk"];
+    let labels = ["SOEl", "Int", "EOEl", "SOVol", "EOVol", "LastEl", "Unk"];
     counts
         .iter()
         .zip(labels.iter())

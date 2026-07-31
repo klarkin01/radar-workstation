@@ -42,7 +42,7 @@ STATUS_NAMES = {
     2: 'end_of_elevation',
     3: 'start_of_volume',
     4: 'end_of_volume',
-    5: 'start_of_elevation_sails',
+    5: 'start_of_last_elevation',
 }
 
 # Message 31 body layout (ICD 2620002 Table V):
@@ -174,7 +174,7 @@ TARGET_STATUSES = {
     1: 'intermediate',
     2: 'end_of_elevation',
     4: 'end_of_volume',
-    5: 'start_of_elevation_sails',
+    5: 'start_of_last_elevation',
 }
 
 
@@ -213,6 +213,46 @@ def collect_fixtures(chunks_dir: Path) -> dict[int, bytes]:
     return collected
 
 
+def collect_by_elevation(chunks_dir: Path, el_nums: set[int]) -> dict[int, bytes]:
+    """
+    Scan chunk files in order, collecting the first Message 31 of each
+    requested `elevation_number` (as opposed to `collect_fixtures`, which
+    keys on radial status). Used for fixtures where the interesting property
+    is which *elevation* a radial belongs to — e.g. a SAILS/MRLE-inserted
+    low-level cut, which repeats an earlier elevation *angle* under a new,
+    incrementing `elevation_number` rather than reusing the old one (S1-W4d;
+    see docs/architecture/nexrad-binary-format.md §6.1's corrected radial
+    status table).
+    """
+    collected: dict[int, bytes] = {}
+    remaining = set(el_nums)
+
+    chunk_files = sorted(chunks_dir.iterdir())
+    print(f"Scanning {len(chunk_files)} chunk files in {chunks_dir} ...")
+
+    for path in chunk_files:
+        if not remaining:
+            break
+        stream = decompress_chunk(path)
+        if stream is None:
+            print(f"  skip (unknown format): {path.name}")
+            continue
+
+        for record, status in iter_msg31(stream):
+            el_num = record[RADIAL_STATUS_OFFSET + 1]
+            if el_num in remaining:
+                collected[el_num] = record
+                remaining.discard(el_num)
+                print(f"  captured el_num={el_num} (status={status})  {len(record):,} bytes  from {path.name}")
+            if not remaining:
+                break
+
+    if remaining:
+        print(f"  Note: no radials found for elevation numbers: {sorted(remaining)}")
+
+    return collected
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -224,6 +264,9 @@ def main() -> None:
     parser.add_argument('output_dir', help='Output directory for fixture .bin files')
     parser.add_argument('--prefix', default='kdox_vcp35',
                         help='Filename prefix (default: kdox_vcp35)')
+    parser.add_argument('--by-elevation', default=None,
+                        help='Comma-separated elevation_number values to capture instead of '
+                             'by-status (e.g. "1,9,16"); output named <prefix>_el<N>.bin')
     parser.add_argument('--dry-run', action='store_true',
                         help='Print what would be written without writing')
     args = parser.parse_args()
@@ -236,6 +279,21 @@ def main() -> None:
         sys.exit(1)
 
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.by_elevation:
+        el_nums = {int(n) for n in args.by_elevation.split(',')}
+        fixtures = collect_by_elevation(chunks_dir, el_nums)
+        print(f"\nWriting {len(fixtures)} fixture files to {output_dir} ...")
+        for el_num, record in sorted(fixtures.items()):
+            filename = f'{args.prefix}_el{el_num}.bin'
+            out_path = output_dir / filename
+            if args.dry_run:
+                print(f"  [dry-run] would write {len(record):,} bytes -> {filename}")
+            else:
+                out_path.write_bytes(record)
+                print(f"  wrote {len(record):,} bytes -> {filename}")
+        print("\nDone.")
+        return
 
     fixtures = collect_fixtures(chunks_dir)
 
