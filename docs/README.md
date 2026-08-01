@@ -21,6 +21,7 @@ Read in this order:
 | [`open-questions.md`](open-questions.md) | Unresolved design questions, what they block, and (as of this index) a resolution log for questions already closed. |
 | [`dependency-inventory.md`](dependency-inventory.md) | Point-in-time audit of the dependency graph against `PHILOSOPHY.md`, as of `74a1065` (2026-07-29). Superseded for current state by `plans/dependency-inventory-remediation.md` §9 — see the banner at the top of the document. |
 | [`documentation-inventory.md`](documentation-inventory.md) | Point-in-time audit of this documentation set against the code, as of `d46042c` (2026-07-30). The evidence base for `plans/documentation-remediation.md`. |
+| [`project-inventory.md`](project-inventory.md) | Point-in-time audit of the project against the v1.0 scope boundary, as of `668b1ca` (2026-07-30) — what exists, what doesn't, and the order the missing work should be taken up in. Superseded for current state by each stage plan's own Results section — see the banner at the top of the document. |
 
 ## Architecture (`architecture/`)
 
@@ -56,6 +57,8 @@ context, alternatives considered, and consequences.
 | [0015](adr/0015-bzip2.md) | Use bzip2 for NEXRAD chunk decompression |
 | [0016](adr/0016-quick-xml.md) | Use quick-xml for S3 `ListObjectsV2` response parsing |
 | [0017](adr/0017-bytes.md) | Use bytes for zero-copy buffer handoff |
+| [0018](adr/0018-shared-application-state.md) | Shared application state structure (Q4) |
+| [0019](adr/0019-config-format.md) | Configuration file format — workspace-local parser, not toml/serde |
 
 ## Plans (`plans/`)
 
@@ -69,3 +72,5 @@ just what was intended.
 | [`0014-http-ingest-implementation.md`](plans/0014-http-ingest-implementation.md) | Draft | Implementation plan for `crates/http-ingest` (ADR-0014). |
 | [`dependency-inventory-remediation.md`](plans/dependency-inventory-remediation.md) | Implemented | Closed most of `dependency-inventory.md`'s findings (E-02 through E-06); also where E-11 and E-12 were found and fixed. Its §9 Results is the authoritative account of the current dependency posture. |
 | [`documentation-remediation.md`](plans/documentation-remediation.md) | This document's own remediation plan | Addresses `documentation-inventory.md`'s eleven findings, including writing this index. |
+| [`stage-0-1-close-the-acquisition-path.md`](plans/stage-0-1-close-the-acquisition-path.md) | Implemented | Volume assembly state machine (ADR-0012), `-S` metadata decoding, poller skipped-volume recovery, decoder hardening. Its §8 Results is the authoritative account of what was measured. |
+| [`stage-2-make-the-application-exist.md`](plans/stage-2-make-the-application-exist.md) | Implemented | Answers Q4 (ADR-0018); runtime/supervision skeleton; bundled site list; configuration persistence (ADR-0019). `main.rs` is a real, runnable program as of this plan. Its §12 Results is the authoritative account of what was measured. |

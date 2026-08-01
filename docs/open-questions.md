@@ -15,12 +15,6 @@ None outstanding.
 
 ## Architecture — Resolve Before the Relevant Subsystem
 
-**Q4: Exact shared state structure?**
-`Arc<RwLock<AppState>>` is the chosen pattern. The structure of `AppState` needs to be
-defined: what it holds, how it is partitioned, and whether a single lock or multiple
-finer-grained locks better serves the read/write patterns of the render loop vs. the
-data pipeline.
-
 **Q5: How are multiple instances coordinated, if at all?**
 Each instance is designed to be fully independent. Is there any case where instances
 should share resources — for example, a shared on-disk tile cache to avoid redundant
@@ -158,3 +152,15 @@ delete" instruction is meant to prevent.
 projection, centered on the active radar site. Documented in
 [rendering.md](architecture/rendering.md). Removed from this document 2026-07-28
 (commit `a3c323c`).
+
+**Q4: Exact shared state structure?** — Resolved 2026-07-31 (Stage 2, S2-W1):
+`Arc<AppState>` with an interior `RwLock<RadarState>` scoped to radar data only — not
+the outer `Arc<RwLock<AppState>>` this document originally specified. View state
+(pan/zoom/active product/window geometry) is owned outright by the render loop and
+never enters `AppState`; ingest health is read through the `watch::Receiver
+<IngestStatus>` `S3Poller::status()` already publishes, not copied into a second
+structure. `AppState::snapshot()` is the only read API, returning owned data so holding
+a lock guard across a frame is impossible by construction. Full rationale, retention
+policy, and alternatives considered in
+[ADR-0018](adr/0018-shared-application-state.md). `overview.md`, `data-flow.md`, and
+`CLAUDE.md` corrected in the same change.

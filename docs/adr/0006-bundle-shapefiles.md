@@ -29,3 +29,22 @@ at startup and tessellated into GPU geometry held in memory for the lifetime of 
   boundary changes) are handled via application releases, not runtime fetching.
 - The `geo` and `shapefile` crates handle file parsing. `lyon` handles tessellation of
   geographic polygons into GPU-ready triangle meshes.
+
+## Erratum (added during Stage 2, 2026-07-31)
+
+1. **NEXRAD site locations are a generated `const` Rust table, not a bundled JSON file
+   parsed at startup.** This ADR's Decision and Consequences sections say "NEXRAD site
+   locations are bundled as a JSON file derived from the NOAA site list." Implementing
+   that literally means adding `serde_json` (or a hand-rolled JSON parser) to the
+   application's startup path for data that never changes at runtime — a startup path
+   that can fail to parse data the project ships itself, for no benefit (Stability as
+   Ethics). Instead, `utility/nexrad-sites/generate.py` converts a committed NOAA HOMR
+   station export (see `utility/README.md` for provenance) into
+   `crates/radar-workstation/src/sites_generated.rs`, a `pub static SITES: &[Site]`
+   compiled directly into the binary. Zero dependencies, zero runtime parse step, zero
+   startup failure mode, and the table's shape is checked by the compiler rather than by
+   a parser. See `docs/open-questions.md` Q4 (Resolved) and
+   `docs/adr/0018-shared-application-state.md`, which records this alongside the Q4
+   decision it shipped with. This erratum applies only to the *NEXRAD site list*; the
+   Decision's shapefile/vector-overlay bundling (counties, states, highways, coastlines,
+   loaded via `geo`/`shapefile`/`lyon`) is unaffected and remains open per Q15.

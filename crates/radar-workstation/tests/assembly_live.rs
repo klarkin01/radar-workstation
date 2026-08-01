@@ -9,12 +9,14 @@
 //! docs/plans/stage-0-1-close-the-acquisition-path.md): wall-clock time
 //! from poller start to the first SweepClosed event.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nexrad_decoder::VolumeStatus;
 use radar_workstation::assembly::{self, AssemblyConfig, AssemblyEvent};
-use radar_workstation::ingest::s3_poll::{S3Poller, BUCKET_HOST};
+use radar_workstation::ingest::s3_poll::{IngestStatus, S3Poller, BUCKET_HOST, DEFAULT_POLL_INTERVAL};
 use radar_workstation::ingest::ChunkEnvelope;
+use radar_workstation::state::AppState;
 
 const LIVE_TEST_SITE: &str = "KDOX";
 const OVERALL_TIMEOUT: Duration = Duration::from_secs(20 * 60);
@@ -23,13 +25,19 @@ const OVERALL_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 #[ignore]
 async fn polls_a_real_site_to_one_complete_volume() {
     let client = http_ingest::Client::new(BUCKET_HOST).expect("client");
-    let poller = S3Poller::new(LIVE_TEST_SITE, client);
+    let site = radar_workstation::sites::by_id(LIVE_TEST_SITE).expect("site in bundled table");
+    let (status_tx, ingest_rx) = tokio::sync::watch::channel(IngestStatus::default());
+    let poller = S3Poller::new(LIVE_TEST_SITE, client, status_tx);
+    let app_state = Arc::new(AppState::new(site, ingest_rx));
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
     let (chunk_tx, chunk_rx) = tokio::sync::mpsc::channel::<ChunkEnvelope>(32);
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<AssemblyEvent>(256);
 
-    let poll_task = tokio::spawn(poller.run(chunk_tx));
-    let assembly_task = tokio::spawn(assembly::run(chunk_rx, event_tx, AssemblyConfig::default()));
+    let poll_task =
+        tokio::spawn(poller.run(chunk_tx, Arc::clone(&app_state), shutdown_rx.clone(), DEFAULT_POLL_INTERVAL));
+    let assembly_task =
+        tokio::spawn(assembly::run(chunk_rx, event_tx, AssemblyConfig::default(), shutdown_rx));
 
     let start = Instant::now();
     let mut time_to_first_sweep: Option<Duration> = None;
@@ -38,7 +46,7 @@ async fn polls_a_real_site_to_one_complete_volume() {
     let result = tokio::time::timeout(OVERALL_TIMEOUT, async {
         while let Some(event) = event_rx.recv().await {
             match event {
-                AssemblyEvent::SweepClosed { sweep } => {
+                AssemblyEvent::SweepClosed { sweep, .. } => {
                     sweep_count += 1;
                     if time_to_first_sweep.is_none() {
                         time_to_first_sweep = Some(start.elapsed());

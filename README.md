@@ -7,20 +7,27 @@ same use case as [GR2Analyst](https://www.grlevelx.com/) (Windows-only, $250/lic
 
 ## Status
 
-**There is no runnable application yet.** `crates/radar-workstation/src/main.rs` is a
-four-line stub that prints a startup banner and exits. This is early, not abandoned —
-here is what exists and what doesn't:
+**Stage 2 complete** (`docs/plans/stage-2-make-the-application-exist.md`).
+`cargo run --release -- KDOX` is a real, runnable program: it polls the live chunk
+stream, decodes and assembles volumes, and holds the current radar state in memory,
+printing state transitions to the terminal until you press Ctrl-D. It draws nothing yet
+— no window, no map, no radar image. Here is what exists and what doesn't:
 
 - **Implemented and tested:** the NEXRAD decoder (Message 31 parsing,
   `crates/nexrad-decoder`), the workspace-local HTTP/1.1 client
   (`crates/http-ingest`, [ADR-0014](docs/adr/0014-http-ingest-own-the-boundary.md)),
-  and the chunk ingest layer (S3 chunk-stream polling, chunk detection, BZ2
-  decompression, in `crates/radar-workstation`).
-- **Design-only, not yet code:** the volume assembly state machine
-  ([ADR-0012](docs/adr/0012-volume-assembly-state-machine.md)), the compute layer,
-  shared application state, and the render loop (egui/wgpu).
+  the chunk ingest layer (S3 chunk-stream polling, chunk detection, BZ2
+  decompression), the volume assembly state machine
+  ([ADR-0012](docs/adr/0012-volume-assembly-state-machine.md)), shared application
+  state ([ADR-0018](docs/adr/0018-shared-application-state.md)), the tokio
+  runtime/task-supervision skeleton, the bundled WSR-88D site list, and configuration
+  persistence ([ADR-0019](docs/adr/0019-config-format.md)) — all in
+  `crates/radar-workstation`.
+- **Design-only, not yet code:** the compute layer and the render loop (egui/wgpu).
+  `main.rs`'s headless terminal loop is the placeholder Stage 4 replaces with real
+  rendering.
 
-For something you can actually run today, see `utility/` — `fetch-sample` and
+For something else you can run today, see `utility/` — `fetch-sample` and
 `decode-sample` (fetch and decode real chunk data from S3) and `radar-viz` (render a
 decoded scan to a PNG). These are development tools with no stability guarantee, not
 part of the product; see [`utility/README.md`](utility/README.md).
@@ -50,7 +57,7 @@ cargo install --locked cargo-audit --version 0.22.2
 
 | Path | Contents |
 |---|---|
-| `crates/radar-workstation` | The application: chunk ingest, S3 polling, and (eventually) volume assembly, compute, and render |
+| `crates/radar-workstation` | The application: chunk ingest, S3 polling, volume assembly, shared state, runtime/supervision, site list, and configuration. Compute and render are not yet implemented |
 | `crates/nexrad-decoder` | Custom NEXRAD Level II Message 31 decoder, zero third-party dependencies |
 | `crates/http-ingest` | Workspace-local HTTP/1.1 client purpose-built for the S3 acquisition path ([ADR-0014](docs/adr/0014-http-ingest-own-the-boundary.md)) |
 | `utility/` | Development-only tools: not part of the product, no stability guarantee — see its own README |

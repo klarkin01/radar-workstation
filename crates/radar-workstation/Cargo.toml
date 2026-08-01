@@ -12,3 +12,6 @@ bzip2 = "0.6"
 bytes = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util"] }
 quick-xml = "0.41"
+
+[dev-dependencies]
+fuzz-support = { path = "../fuzz-support" }

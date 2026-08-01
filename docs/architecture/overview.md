@@ -4,12 +4,16 @@
 entry point to the architecture directory. For the principles that govern every decision
 made here, see [PHILOSOPHY.md](../PHILOSOPHY.md).*
 
-> **Implementation status:** The NEXRAD decoder (Message 31), the workspace-local
-> HTTP/1.1 client (`crates/http-ingest`), and the chunk ingest layer (S3 chunk-stream
-> polling, chunk detection, BZ2 decompression) are implemented and tested. The volume
-> assembly state machine (ADR-0012), compute layer, shared application state, and
-> render loop described below are architecture, not yet code — `main.rs` is currently a
-> stub. See the root [README.md](../../README.md) for the full status statement.
+> **Implementation status:** Stage 2 complete (`docs/plans/
+> stage-2-make-the-application-exist.md`). The NEXRAD decoder (Message 31), the
+> workspace-local HTTP/1.1 client (`crates/http-ingest`), the chunk ingest layer (S3
+> chunk-stream polling, chunk detection, BZ2 decompression), the volume assembly state
+> machine (ADR-0012), shared application state (ADR-0018), the runtime/supervision
+> skeleton (`pipeline.rs`), the bundled site list (`sites.rs`), and configuration
+> persistence (ADR-0019) are all implemented and tested — `cargo run --release -- KDOX`
+> is a real, runnable program. The compute layer and render loop described below are
+> still architecture, not yet code; `main.rs`'s headless placeholder loop is what Stage 4
+> replaces. See the root [README.md](../../README.md) for the full status statement.
 
 ---
 
@@ -25,6 +29,7 @@ radar-workstation/
 ├── utility/                       ← dev-only tooling, not part of the product
 │   ├── nexrad-inspect/            ← Python cross-validation scripts (MetPy-based)
 │   ├── nexrad-sample/             ← fetch/decode sample chunks from S3
+│   ├── nexrad-sites/              ← generate the bundled WSR-88D site table
 │   └── radar-viz/                 ← render a decoded scan to PNG for visual checks
 └── docs/
     ├── README.md                  ← documentation index
@@ -111,17 +116,24 @@ its own test suite. The decoder is the foundation — everything else depends on
 correct.
 
 ### Shared Application State
-The single source of truth for the running application. Holds the current volume scan,
-derived products, site configuration, and user settings. Written by the data pipeline and
-compute layer. Read by the rendering subsystem every frame. Access is coordinated via
-Rust's `Arc<RwLock<>>` — multiple readers, exclusive writers, no data races by construction.
+The single source of truth for radar data — **not** user settings or view state, which
+the render loop owns outright and never shares (see [ADR-0018](../adr/0018-shared-application-state.md),
+Q4's resolution). Holds the newest closed sweep per elevation, the last complete volume
+scan, and (from Stage 3 on) derived product textures. Written by the data pipeline and
+compute layer through a narrow apply/report API; read by the rendering subsystem every
+frame through a single `snapshot()` call that returns owned data. `Arc<AppState>`
+internally holds `RwLock<RadarState>` — one lock, scoped to radar data only, not an
+outer lock over the whole application — multiple readers, exclusive writers, no data
+races by construction. See [data-flow.md](data-flow.md) for the full structure.
 
 ### Basemap Data
 Census TIGER/Line shapefiles (counties, states, highways) and Natural Earth data
 (country boundaries, coastlines) are bundled with the binary. Loaded once at startup,
-tessellated into GPU geometry, and held in memory. NEXRAD site locations are loaded from
-a bundled JSON file derived from the NOAA site list. None of this data requires a network
-connection.
+tessellated into GPU geometry, and held in memory. NEXRAD site locations are compiled
+directly into the binary as a generated `const` Rust table (`crates/radar-workstation/
+src/sites_generated.rs`, `crate::sites`) derived from the NOAA site registry — not a
+JSON file parsed at startup; see the ADR-0006 erratum. None of this data requires a
+network connection.
 
 ---
 

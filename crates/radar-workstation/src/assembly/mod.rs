@@ -33,6 +33,19 @@ pub struct AssemblyConfig {
     pub watchdog_timeout: Duration,
 }
 
+/// Identifies which volume a sweep or scan came from. Ordered by
+/// `(julian_date, scan_time_ms)` — `scan_time_ms` is milliseconds since
+/// midnight UTC and wraps daily, so it is never compared on its own. Lives
+/// here (not `state`) because its fields are exactly the identifying subset
+/// of `VolumeContext`/`VolumeScan`, computed at sweep-closure time from data
+/// `VolumeAssembler` already holds — `state::apply` (S2-W1) consumes it but
+/// does not derive it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct VolumeId {
+    pub julian_date: u16,
+    pub scan_time_ms: u32,
+}
+
 impl Default for AssemblyConfig {
     fn default() -> Self {
         Self { watchdog_timeout: WATCHDOG_TIMEOUT_DEFAULT }
@@ -51,7 +64,12 @@ pub enum AssemblyState {
 
 #[derive(Debug)]
 pub enum AssemblyEvent {
-    SweepClosed { sweep: Arc<Sweep> },
+    /// `volume` and `vcp_number` are the accumulating volume's identity and
+    /// VCP at the moment this sweep closed — read from `VolumeContext`,
+    /// which is always populated by the time any sweep can close (the first
+    /// radial of the volume sets it before any elevation-closure signal is
+    /// possible).
+    SweepClosed { sweep: Arc<Sweep>, volume: VolumeId, vcp_number: u16 },
     VolumeClosed { volume: VolumeScan },
     /// Radials arrived for an elevation number whose sweep is already
     /// closed. `count` radials were discarded, unmutated, for that one
@@ -283,7 +301,8 @@ impl VolumeAssembler {
         let sweep = Arc::new(builder.close(complete));
         self.closed_elevations.insert(elevation_number);
         self.closed_sweeps.push(Arc::clone(&sweep));
-        events.push(AssemblyEvent::SweepClosed { sweep });
+        let volume = VolumeId { julian_date: self.context.julian_date, scan_time_ms: self.context.scan_time_ms };
+        events.push(AssemblyEvent::SweepClosed { sweep, volume, vcp_number: self.context.vcp_number() });
     }
 
     fn finish_volume(&mut self, status: VolumeStatus, events: &mut Vec<AssemblyEvent>) {
@@ -342,12 +361,16 @@ fn decode_and_ingest(
 }
 
 /// Drives a [`VolumeAssembler`] from a channel of raw chunks, decoding each
-/// one and forwarding assembly events to `tx`. Returns when `rx` closes or
-/// `tx`'s receiver is dropped.
+/// one and forwarding assembly events to `tx`. Returns when `rx` closes,
+/// `tx`'s receiver is dropped, or `shutdown` publishes `true` (S2-W2 §4.2) —
+/// checked promptly via `select!` rather than only at the next chunk or tick,
+/// which may not come for a while (that's exactly the case the watchdog
+/// exists for).
 pub async fn run(
     mut rx: tokio::sync::mpsc::Receiver<crate::ingest::ChunkEnvelope>,
     tx: tokio::sync::mpsc::Sender<AssemblyEvent>,
     config: AssemblyConfig,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
     let mut assembler = VolumeAssembler::new(config);
     let mut ticker = tokio::time::interval(TICK_INTERVAL);
@@ -359,6 +382,7 @@ pub async fn run(
                 decode_and_ingest(&mut assembler, envelope, Instant::now())
             }
             _ = ticker.tick() => assembler.on_tick(Instant::now()),
+            _ = shutdown.wait_for(|s| *s) => return,
         };
         for event in events {
             if tx.send(event).await.is_err() {
