@@ -26,6 +26,7 @@ session's purpose.
 | `nexrad-inspect/gen_fixtures.py` | Generate binary test fixtures for `nexrad-decoder`'s unit tests |
 | `nexrad-sample/` (Rust) | Fetch (`fetch-sample`) and decode (`decode-sample`) NEXRAD chunk files from S3 for manual inspection |
 | `radar-viz/` (Rust) | Render a decoded volume scan to a PNG PPI image for visual verification — see its own README |
+| `nexrad-sites/generate.py` | Generate `crates/radar-workstation/src/sites_generated.rs` (the bundled WSR-88D site table) from `nexrad-sites/data/nexrad-stations.txt` |
 
 ---
 
@@ -116,6 +117,38 @@ Sample files can be obtained from:
 A small number of well-chosen sample files (specific events, known edge cases)
 may be stored locally for consistent regression testing, but they live outside
 the repository on the developer's machine.
+
+---
+
+## nexrad-sites/
+
+Generates the bundled WSR-88D site table (`crates/radar-workstation/src/sites_generated.rs`,
+S2-W3, FR-MU-3/FR-SS-1) from a committed NOAA station export. A generated `const` Rust
+table, not a bundled JSON file parsed at startup — see the dated erratum in
+[`docs/adr/0006-bundle-shapefiles.md`](../docs/adr/0006-bundle-shapefiles.md) and
+[`docs/adr/0018-shared-application-state.md`](../docs/adr/0018-shared-application-state.md).
+
+**Source data:** `data/nexrad-stations.txt`, retrieved 2026-07-31 from
+`https://www.ncei.noaa.gov/access/homr/file/nexrad-stations.txt` — NOAA NCEI's Historical
+Observing Metadata Repository (HOMR) NEXRAD station export. U.S. federal government data,
+public domain. Filtered to `STNTYPE == NEXRAD` (163 sites at retrieval time), which excludes
+the co-listed TDWR sites (Restraint is a Feature — TDWR is out of scope). Includes a handful
+of overseas DoD-operated WSR-88D sites (Kadena, Kunsan, Osan/Humphreys, Lajes) with a blank
+`state` field in the source data; whether these publish to the real-time chunk bucket is
+exactly what the `#[ignore]`d `bucket_site_prefixes_match_bundled_site_list` live test (in
+`crates/radar-workstation/src/ingest/s3_poll.rs`) checks.
+
+**Regenerate:**
+
+```bash
+curl -o utility/nexrad-sites/data/nexrad-stations.txt \
+  https://www.ncei.noaa.gov/access/homr/file/nexrad-stations.txt
+python3 utility/nexrad-sites/generate.py
+```
+
+The generator asserts the source file's fixed-width column layout matches what it expects
+before parsing, so a reflowed source format fails loudly at generation time rather than
+silently misparsing a field.
 
 ---
 

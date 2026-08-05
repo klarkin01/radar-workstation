@@ -54,7 +54,7 @@ fn sweep_closed_events(events: &[AssemblyEvent]) -> Vec<(u8, bool)> {
     events
         .iter()
         .filter_map(|e| match e {
-            AssemblyEvent::SweepClosed { sweep } => Some((sweep.elevation_number, sweep.complete)),
+            AssemblyEvent::SweepClosed { sweep, .. } => Some((sweep.elevation_number, sweep.complete)),
             _ => None,
         })
         .collect()
@@ -255,7 +255,7 @@ fn missing_intermediate_leaves_azimuth_gap() {
     let events =
         a.on_chunk(ChunkKind::Intermediate, vec![radial(1, RadialStatus::EndOfElevation)], t0());
 
-    let AssemblyEvent::SweepClosed { sweep } = &events[0] else { panic!("expected SweepClosed") };
+    let AssemblyEvent::SweepClosed { sweep, .. } = &events[0] else { panic!("expected SweepClosed") };
     assert_eq!(sweep.radials.len(), 2, "only the radials actually received are present");
     assert!(sweep.complete, "EndOfElevation was received, so the sweep is still marked complete");
 }

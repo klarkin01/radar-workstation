@@ -5,6 +5,7 @@ use quick_xml::Reader;
 use tokio::sync::{mpsc, watch};
 
 use crate::chunk::ChunkKind;
+use crate::state::AppState;
 
 use super::ChunkEnvelope;
 
@@ -12,7 +13,7 @@ use super::ChunkEnvelope;
 /// passed into `S3Poller::new`. Not used internally — `Client` already knows
 /// its own host once constructed.
 pub const BUCKET_HOST: &str = "unidata-nexrad-level2-chunks.s3.amazonaws.com";
-const POLL_INTERVAL: Duration = Duration::from_secs(5);
+pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Empty polls, with no key ever seen for the current target volume,
 /// before re-listing volume folders to check for a skipped sequence
@@ -176,8 +177,15 @@ pub struct S3Poller {
 }
 
 impl S3Poller {
-    pub fn new(site_id: impl Into<String>, client: http_ingest::Client) -> Self {
-        let (status_tx, _rx) = watch::channel(IngestStatus::default());
+    /// `status_tx` is external, not owned/created here (S2-W2) — `AppState`
+    /// holds a `watch::Receiver<IngestStatus>` (FR-DA-5) that must survive
+    /// across pipeline restarts, but a panicking `S3Poller` does not: the
+    /// supervisor (`pipeline::supervise`) rebuilds a fresh `S3Poller` on
+    /// every restart, and every one of those must publish into the *same*
+    /// long-lived channel for `AppState`'s receiver to keep working.
+    /// `watch::Sender` is cheaply `Clone`, so callers hand each new poller
+    /// a clone of one sender created once, up front.
+    pub fn new(site_id: impl Into<String>, client: http_ingest::Client, status_tx: watch::Sender<IngestStatus>) -> Self {
         Self {
             site_id: site_id.into(),
             client,
@@ -190,22 +198,27 @@ impl S3Poller {
         }
     }
 
-    /// A live view of this poller's health (FR-DA-5). Subscribe before
-    /// calling [`Self::run`], which consumes `self`.
-    pub fn status(&self) -> watch::Receiver<IngestStatus> {
-        self.status_tx.subscribe()
-    }
-
     /// Runs the polling loop, sending each new chunk over `tx` and
     /// publishing health updates to the receiver from [`Self::status`].
-    /// Returns when `tx` is closed (receiver dropped). Errors are
-    /// classified and published rather than causing the loop to exit; it
-    /// never stops on its own.
-    pub async fn run(mut self, tx: mpsc::Sender<ChunkEnvelope>) {
-        let mut interval = tokio::time::interval(POLL_INTERVAL);
+    /// Returns when `tx` is closed (receiver dropped) or `shutdown`
+    /// publishes `true` (S2-W2 §4.2) — checked promptly via `select!`
+    /// rather than only at the next poll interval boundary, so shutdown is
+    /// deterministic instead of lazy. Errors are classified and published
+    /// rather than causing the loop to exit; it never stops on its own.
+    pub async fn run(
+        mut self,
+        tx: mpsc::Sender<ChunkEnvelope>,
+        app_state: std::sync::Arc<AppState>,
+        mut shutdown: watch::Receiver<bool>,
+        poll_interval: Duration,
+    ) {
+        let mut interval = tokio::time::interval(poll_interval);
         loop {
-            interval.tick().await;
-            match self.poll_once().await {
+            tokio::select! {
+                _ = interval.tick() => {}
+                _ = shutdown.wait_for(|s| *s) => return,
+            }
+            match self.poll_once(&app_state).await {
                 Ok(envelopes) => {
                     self.consecutive_errors = 0;
                     let current_volume = self.last_completed_volume;
@@ -223,28 +236,28 @@ impl S3Poller {
                 Err(e) => {
                     self.consecutive_errors += 1;
                     let kind = IngestErrorKind::from(&e);
-                    let state = if self.consecutive_errors >= STALLED_AFTER_CONSECUTIVE_ERRORS {
+                    let ingest_state = if self.consecutive_errors >= STALLED_AFTER_CONSECUTIVE_ERRORS {
                         IngestState::Stalled
                     } else {
                         IngestState::Retrying { attempts: self.consecutive_errors }
                     };
                     self.status_tx.send_modify(|s| {
-                        s.state = state;
+                        s.state = ingest_state;
                         s.last_error = Some(kind);
                     });
-                    crate::event::log_to_stderr(&crate::event::Event::PollFailed(e));
+                    app_state.report(crate::event::Event::PollFailed(e));
                 }
             }
         }
     }
 
-    async fn poll_once(&mut self) -> Result<Vec<ChunkEnvelope>, PollError> {
+    async fn poll_once(&mut self, app_state: &AppState) -> Result<Vec<ChunkEnvelope>, PollError> {
         let prefix = format!("{}/", self.site_id);
 
         let baseline = match self.last_completed_volume {
             Some(v) => v,
             None => {
-                let folders = self.list_volume_folders(&prefix).await?;
+                let folders = self.list_volume_folders(app_state, &prefix).await?;
                 // Cold start: anchor one behind the newest known volume, so the
                 // very next poll fetches the current volume rather than
                 // replaying the full 24-hour retention window (E-10).
@@ -261,7 +274,7 @@ impl S3Poller {
         if keys.is_empty() {
             self.last_completed_volume = Some(baseline);
             self.consecutive_empty_polls += 1;
-            self.apply_recovery(&prefix, volume).await?;
+            self.apply_recovery(app_state, &prefix, volume).await?;
             return Ok(vec![]);
         }
 
@@ -272,9 +285,7 @@ impl S3Poller {
         for key in &keys {
             match chunk_kind_from_key(key) {
                 Some(kind) => to_fetch.push((key.clone(), kind)),
-                None => crate::event::log_to_stderr(&crate::event::Event::UnrecognizedKeySuffix {
-                    key: key.clone(),
-                }),
+                None => app_state.report(crate::event::Event::UnrecognizedKeySuffix { key: key.clone() }),
             }
         }
 
@@ -318,19 +329,24 @@ impl S3Poller {
     /// `REANCHOR_EMPTY_POLLS` have passed with no key seen at all for
     /// `target_volume` — and throttles back to checking again only every
     /// `REANCHOR_EMPTY_POLLS` polls thereafter, not on every poll.
-    async fn apply_recovery(&mut self, prefix: &str, target_volume: u64) -> Result<(), PollError> {
-        let state = PollState {
+    async fn apply_recovery(
+        &mut self,
+        app_state: &AppState,
+        prefix: &str,
+        target_volume: u64,
+    ) -> Result<(), PollError> {
+        let poll_state = PollState {
             current_target: target_volume,
             consecutive_empty_polls: self.consecutive_empty_polls,
             seen_any_key_in_current_volume: self.seen_any_key_in_current_volume,
         };
 
-        let should_relist =
-            !state.seen_any_key_in_current_volume && state.consecutive_empty_polls >= REANCHOR_EMPTY_POLLS;
+        let should_relist = !poll_state.seen_any_key_in_current_volume
+            && poll_state.consecutive_empty_polls >= REANCHOR_EMPTY_POLLS;
         let listing =
-            if should_relist { Some(self.list_volume_folders(prefix).await?) } else { None };
+            if should_relist { Some(self.list_volume_folders(app_state, prefix).await?) } else { None };
 
-        match next_target(&state, listing.as_deref()) {
+        match next_target(&poll_state, listing.as_deref()) {
             PollAction::Continue => {
                 if should_relist {
                     // Checked and found no gap; wait another full
@@ -339,10 +355,10 @@ impl S3Poller {
                 }
             }
             PollAction::ReAnchor { new_target } => {
-                crate::event::log_to_stderr(&crate::event::Event::ReAnchored {
+                app_state.report(crate::event::Event::ReAnchored {
                     from_volume: target_volume,
                     to_volume: new_target,
-                    empty_polls: state.consecutive_empty_polls,
+                    empty_polls: poll_state.consecutive_empty_polls,
                 });
                 self.status_tx.send_modify(|s| {
                     s.state = IngestState::ReAnchoring;
@@ -354,10 +370,10 @@ impl S3Poller {
                 self.seen_any_key_in_current_volume = false;
             }
             PollAction::AdvancePastStuckVolume { new_target } => {
-                crate::event::log_to_stderr(&crate::event::Event::AdvancedPastStalledVolume {
+                app_state.report(crate::event::Event::AdvancedPastStalledVolume {
                     from_volume: target_volume,
                     to_volume: new_target,
-                    empty_polls: state.consecutive_empty_polls,
+                    empty_polls: poll_state.consecutive_empty_polls,
                 });
                 self.status_tx.send_modify(|s| {
                     s.state = IngestState::ReAnchoring;
@@ -376,7 +392,7 @@ impl S3Poller {
     /// Lists the numeric volume-sequence subdirectories directly under `prefix`
     /// (e.g. `KDOX/166/`, `KDOX/167/`), using S3's `delimiter=/` so the response
     /// is `CommonPrefixes` rather than a flat, potentially enormous object listing.
-    async fn list_volume_folders(&mut self, prefix: &str) -> Result<Vec<u64>, PollError> {
+    async fn list_volume_folders(&mut self, app_state: &AppState, prefix: &str) -> Result<Vec<u64>, PollError> {
         let mut folders = Vec::new();
         let mut continuation_token: Option<String> = None;
 
@@ -391,9 +407,8 @@ impl S3Poller {
             for common_prefix in &page.common_prefixes {
                 match parse_volume_folder(prefix, common_prefix) {
                     Some(volume) => folders.push(volume),
-                    None => crate::event::log_to_stderr(&crate::event::Event::UnrecognizedVolumeFolder {
-                        entry: common_prefix.clone(),
-                    }),
+                    None => app_state
+                        .report(crate::event::Event::UnrecognizedVolumeFolder { entry: common_prefix.clone() }),
                 }
             }
 
@@ -651,6 +666,14 @@ mod tests {
 
     use super::*;
 
+    /// A throwaway `AppState` for tests that exercise `S3Poller`'s private
+    /// methods directly and need something to report events into but don't
+    /// otherwise care about its contents.
+    fn test_app_state() -> AppState {
+        let (_tx, rx) = tokio::sync::watch::channel(IngestStatus::default());
+        AppState::new(crate::sites::by_id("KDOX").expect("KDOX in bundled table"), rx)
+    }
+
     #[test]
     fn chunk_kind_from_known_suffixes() {
         assert_eq!(chunk_kind_from_key("KDOX/166/20260728-095259-001-S"), Some(ChunkKind::Start));
@@ -788,8 +811,9 @@ mod tests {
     #[test]
     fn new_poller_publishes_default_polling_status() {
         let client = http_ingest::Client::new(BUCKET_HOST).expect("client");
-        let poller = S3Poller::new("KDOX", client);
-        let status = poller.status().borrow().clone();
+        let (status_tx, status_rx) = watch::channel(IngestStatus::default());
+        let _poller = S3Poller::new("KDOX", client, status_tx);
+        let status = status_rx.borrow().clone();
         assert_eq!(status.state, IngestState::Polling);
         assert!(status.last_success.is_none());
         assert!(status.last_error.is_none());
@@ -916,11 +940,13 @@ mod tests {
     #[ignore]
     async fn cold_start_listing_size() {
         let client = http_ingest::Client::new(BUCKET_HOST).expect("client");
-        let mut poller = S3Poller::new(LIVE_TEST_SITE, client);
+        let (status_tx, _status_rx) = watch::channel(IngestStatus::default());
+        let mut poller = S3Poller::new(LIVE_TEST_SITE, client, status_tx);
         let prefix = format!("{}/", poller.site_id);
+        let app_state = test_app_state();
 
         let start = Instant::now();
-        let folders = poller.list_volume_folders(&prefix).await.expect("list folders");
+        let folders = poller.list_volume_folders(&app_state, &prefix).await.expect("list folders");
         let t_list = start.elapsed();
 
         let newest = folders.iter().copied().max();
@@ -934,10 +960,12 @@ mod tests {
     #[ignore]
     async fn cold_start_poll_once_latency() {
         let client = http_ingest::Client::new(BUCKET_HOST).expect("client");
-        let mut poller = S3Poller::new(LIVE_TEST_SITE, client);
+        let (status_tx, _status_rx) = watch::channel(IngestStatus::default());
+        let mut poller = S3Poller::new(LIVE_TEST_SITE, client, status_tx);
+        let app_state = test_app_state();
 
         let total_start = Instant::now();
-        let envelopes = poller.poll_once().await.expect("poll_once");
+        let envelopes = poller.poll_once(&app_state).await.expect("poll_once");
         let total = total_start.elapsed();
 
         println!(
@@ -951,18 +979,20 @@ mod tests {
     #[ignore]
     async fn steady_state_poll_latency() {
         let client = http_ingest::Client::new(BUCKET_HOST).expect("client");
-        let mut poller = S3Poller::new(LIVE_TEST_SITE, client);
+        let (status_tx, _status_rx) = watch::channel(IngestStatus::default());
+        let mut poller = S3Poller::new(LIVE_TEST_SITE, client, status_tx);
+        let app_state = test_app_state();
 
-        let _first = poller.poll_once().await.expect("poll 1 (cold start)");
+        let _first = poller.poll_once(&app_state).await.expect("poll 1 (cold start)");
 
-        tokio::time::sleep(POLL_INTERVAL).await;
+        tokio::time::sleep(DEFAULT_POLL_INTERVAL).await;
         let start2 = Instant::now();
-        let second = poller.poll_once().await.expect("poll 2");
+        let second = poller.poll_once(&app_state).await.expect("poll 2");
         let t2 = start2.elapsed();
 
-        tokio::time::sleep(POLL_INTERVAL).await;
+        tokio::time::sleep(DEFAULT_POLL_INTERVAL).await;
         let start3 = Instant::now();
-        let third = poller.poll_once().await.expect("poll 3");
+        let third = poller.poll_once(&app_state).await.expect("poll 3");
         let t3 = start3.elapsed();
 
         println!(
@@ -997,6 +1027,56 @@ mod tests {
         println!("keepalive_amortization: first={first:?} subsequent={subsequent:?}");
     }
 
+    /// S2-W3 (§5.3): lists the chunk bucket's top-level `CommonPrefixes`
+    /// (site codes) and diffs them against the bundled site table
+    /// (`crate::sites::all()`), reusing this module's own listing/pagination
+    /// machinery rather than re-implementing it. Reports mismatches in
+    /// either direction rather than asserting equality — the chunk bucket
+    /// only reflects sites that have delivered a chunk within its 24h
+    /// retention window, and a handful of bundled sites (overseas
+    /// DoD-operated radars) may not publish to it at all, so a mismatch
+    /// here is a prompt for a human to investigate, not necessarily a bug.
+    /// Turns "is our site list current?" from an opinion into a command —
+    /// run with `cargo test -p radar-workstation -- --ignored --nocapture
+    /// bucket_site_prefixes_match_bundled_site_list`.
+    #[tokio::test]
+    #[ignore]
+    async fn bucket_site_prefixes_match_bundled_site_list() {
+        let mut client = http_ingest::Client::new(BUCKET_HOST).expect("client");
+        let mut bucket_sites = std::collections::BTreeSet::new();
+        let mut continuation_token: Option<String> = None;
+
+        loop {
+            let body = client
+                .list_prefix("", None, continuation_token.as_deref(), Some("/"))
+                .await
+                .expect("list bucket root");
+            let page = parse_list_xml(&body).expect("parse bucket root listing");
+            for prefix in &page.common_prefixes {
+                if let Some(site) = prefix.strip_suffix('/') {
+                    bucket_sites.insert(site.to_string());
+                }
+            }
+            if !page.is_truncated {
+                break;
+            }
+            continuation_token = page.next_token;
+        }
+
+        let bundled: std::collections::BTreeSet<&str> = crate::sites::all().iter().map(|s| s.id).collect();
+        let missing_from_table: Vec<&String> =
+            bucket_sites.iter().filter(|s| !bundled.contains(s.as_str())).collect();
+        let missing_from_bucket: Vec<&&str> =
+            bundled.iter().filter(|s| !bucket_sites.contains(**s)).collect();
+
+        println!(
+            "bucket_site_prefixes_match_bundled_site_list: bucket_sites={} bundled_sites={} \
+             in_bucket_not_in_table={missing_from_table:?} in_table_not_in_bucket={missing_from_bucket:?}",
+            bucket_sites.len(),
+            bundled.len(),
+        );
+    }
+
     /// S1-W3a, against the real bucket. Forces the poller's target one
     /// volume past whatever currently exists (indistinguishable, from the
     /// poller's perspective, from a target that will never materialize —
@@ -1015,21 +1095,23 @@ mod tests {
     #[ignore]
     async fn does_not_stall_when_forced_past_the_newest_real_volume() {
         let client = http_ingest::Client::new(BUCKET_HOST).expect("client");
-        let mut poller = S3Poller::new(LIVE_TEST_SITE, client);
+        let (status_tx, _status_rx) = watch::channel(IngestStatus::default());
+        let mut poller = S3Poller::new(LIVE_TEST_SITE, client, status_tx);
         let prefix = format!("{}/", poller.site_id);
+        let app_state = test_app_state();
 
-        let folders = poller.list_volume_folders(&prefix).await.expect("list folders");
+        let folders = poller.list_volume_folders(&app_state, &prefix).await.expect("list folders");
         let newest_at_start = folders.iter().copied().max().expect("at least one volume folder");
         let forced_target = newest_at_start + 1;
         poller.last_completed_volume = Some(forced_target - 1);
 
         let start = Instant::now();
         let deadline = Duration::from_secs(20 * 60);
-        let mut interval = tokio::time::interval(POLL_INTERVAL);
+        let mut interval = tokio::time::interval(DEFAULT_POLL_INTERVAL);
 
         let progressed = loop {
             interval.tick().await;
-            poller.poll_once().await.expect("poll_once");
+            poller.poll_once(&app_state).await.expect("poll_once");
             if poller.last_completed_volume.expect("set by poll_once") >= forced_target {
                 break true;
             }

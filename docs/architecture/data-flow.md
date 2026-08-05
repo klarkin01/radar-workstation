@@ -28,7 +28,7 @@ External Sources
       │   Compute Layer (rayon)
       │         │
       │         ▼
-      └──────► Shared App State (Arc<RwLock<>>)
+      └──────► Shared App State (Arc<AppState>)
                     │
                     ▼
               Render Loop (wgpu)
@@ -37,13 +37,15 @@ External Sources
                Display
 ```
 
-> **Implementation status:** The chunk ingest layer (fetch + BZ2 decompression), the
-> NEXRAD decoder, and the volume assembly state machine (ADR-0012) are implemented and
-> tested (`crates/radar-workstation`, `crates/nexrad-decoder`) — see
-> `crates/radar-workstation/src/assembly/`. The compute layer, shared application state,
-> and render loop described below are still architecture, not yet code — `main.rs` is
-> currently a stub; nothing yet consumes the `SweepClosed`/`VolumeClosed` events the
-> assembler emits.
+> **Implementation status:** Stage 2 complete. The chunk ingest layer (fetch + BZ2
+> decompression), the NEXRAD decoder, the volume assembly state machine (ADR-0012),
+> shared application state (ADR-0018), the runtime/supervision skeleton, and
+> configuration persistence (ADR-0019) are implemented and tested
+> (`crates/radar-workstation`, `crates/nexrad-decoder`) — see
+> `crates/radar-workstation/src/{assembly,state,pipeline.rs,config}`. `main.rs` consumes
+> the assembler's `SweepClosed`/`VolumeClosed` events end to end, through `AppState`,
+> today. The compute layer and render loop described below are still architecture, not
+> yet code.
 
 ---
 
@@ -256,24 +258,41 @@ not perform color mapping or product computation at render time.
 
 ## Shared Application State
 
-`Arc<RwLock<AppState>>` is the coordination point between the data pipeline, compute
-layer, and render loop.
+**Implemented** (Stage 2, S2-W1) — `crates/radar-workstation/src/state/`. Resolved as
+Q4; full rationale in [ADR-0018](../adr/0018-shared-application-state.md). Not the
+single outer `Arc<RwLock<AppState>>` this document previously described: `Arc<AppState>`
+holds an interior `RwLock<RadarState>` scoped to radar data only, plus the
+`watch::Receiver<IngestStatus>` `S3Poller::status()` already publishes and a bounded
+event log behind its own `Mutex`. View state — pan, zoom, active product/sweep, window
+geometry — is owned outright by the render loop and never enters `AppState` at all;
+nothing in the data pipeline can reach it even by mistake. `AppState::snapshot()` is the
+only read API: it takes the read lock, clones `Arc`s and `Copy` fields, and drops the
+lock before returning, so holding a lock guard across a frame is impossible by
+construction rather than a rule to remember.
 
-### Contents
-- Current `VolumeScan` (most recently decoded)
-- Derived product textures (indexed by product type and sweep)
-- Active site configuration (identifier, lat/lon, elevation)
-- Loaded placefile data
-- Tile cache index (in-memory portion)
-- User settings (active product, color table, zoom, pan position)
-- Application status (polling state, last scan time, error messages)
+### Contents (of `RadarState`, the one locked structure)
+- The active site (`&'static Site`, from the bundled table — S2-W3)
+- Newest closed sweep per elevation number (`BTreeMap<u8, DisplaySweep>`), carried
+  across volume boundaries so a closing volume never blanks the display (ADR-0012)
+- The last successfully completed `VolumeScan` (FR-DA-5)
+- A `revision: u64` counter, incremented on every applied change, that the render loop
+  will use (Stage 4) to skip GPU texture re-upload when unchanged (FR-DR-5)
+
+Derived product textures, the tile cache index, and placefile data are Stage 3/5/6
+concerns not yet designed in detail; ADR-0018 notes that adding them is expected to be
+additive to this structure, not a redesign of it. User settings and application status
+in the sense of "what the render loop currently has selected" are view state (above),
+not part of `RadarState`.
 
 ### Access Pattern
-- **Writers:** Data pipeline (new scans, new tiles, new placefiles), compute layer
-  (derived products)
-- **Readers:** Render loop (every frame)
-- Write locks are held briefly. The render loop always acquires a read lock and
-  proceeds — it never blocks waiting for a long-running write.
+- **Writer:** the data pipeline, through `AppState::apply_event` (assembly events) and
+  `AppState::report` (typed events, to both the stderr sink and the bounded in-memory
+  log)
+- **Reader:** the render loop (Stage 4), once per frame, through `AppState::snapshot()`
+- Write locks are held only long enough to apply one event. The render loop never
+  blocks waiting for a long-running write, and a poisoned lock (a panic while holding
+  it) is recovered rather than propagated, so a task restart (S2-W2's supervision)
+  cannot leave every subsequent `snapshot()` panicking too.
 
 ---
 

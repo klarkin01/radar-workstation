@@ -11,6 +11,13 @@ This is an inventory, not a plan. It records what exists, what does not, and the
 which the missing work should be taken up. It does not decide any open question, propose a
 design, or estimate effort in hours.
 
+> **Superseded for current state, 2026-07-31:** Stage 2 (items 6–9 below) is complete —
+> see `docs/plans/stage-2-make-the-application-exist.md` §12 for what was built and
+> measured. This document's numbers (test counts, LOC, open-question counts) reflect the
+> `668b1ca` snapshot and are not re-audited here; the plan's own Results section is the
+> current source of truth for Stage 2, the same relationship `dependency-inventory.md`
+> has to its own remediation plan.
+
 ---
 
 ## 1. Executive summary
