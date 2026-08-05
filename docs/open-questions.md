@@ -61,19 +61,6 @@ must be settled **before** any tile code is written, and recorded in its own ADR
 
 ## Data and Products — Resolve During Decoder Implementation
 
-**Q8: Which derived products are in scope for v1.0?**
-GR2Analyst derives Echo Tops, VIL, VILD, POSH, and MEHS from Level II reflectivity.
-Define the v1.0 product set. A conservative starting point: base reflectivity, base
-velocity, storm-relative velocity, spectrum width (all sweeps), plus Echo Tops and VIL
-as derived products. Dual-pol products (ZDR, CC, KDP) are high value but add decoder
-and rendering complexity.
-
-**Q9: Velocity dealiasing — implement or defer?**
-Velocity aliasing is a known limitation of raw Doppler data that significantly affects
-usability of the velocity product. GR2Analyst implements dealiasing. This is
-algorithmically non-trivial. Decide whether v1.0 ships with dealiasing, ships with
-a known limitation notice, or ships with a simple range-folding indicator only.
-
 **Q14: Backup data source?**
 ADR-0011 partially resolves this: assembled volume files (`unidata-nexrad-level2`) are
 the designated secondary source if the real-time chunk stream is unavailable. What
@@ -85,26 +72,8 @@ fallback beyond Unidata's AWS infrastructure (e.g., Iowa State Mesonet) is warra
 
 ## Rendering — Resolve During Rendering Subsystem Design
 
-**Q11: How is color table / palette support handled?**
-GR2Analyst supports user-supplied color tables in a documented format, and a large
-community ecosystem of custom palettes exists. Supporting GRLevelX-compatible color
-table format would give immediate access to this ecosystem. Define: which palette format
-to support, where user palettes are stored, and how defaults are shipped with the
-application.
-
-**Q17 (narrowed 2026-07-31, S1-W4d): does the compute layer use one texture format for
-standard-res and super-res, or two?** `docs/architecture/rendering.md`'s Polar Grid
-Representation section now records measured standard-resolution geometry alongside
-super-resolution, from a real KTLH VCP 212 volume (gate width and first-gate range are
-identical to super-resolution on the same site/VCP — 0.25 km gates, 2.125 km first
-gate — confirmed across two independent sites/VCPs; azimuthal spacing is 1.0° instead
-of 0.5°, i.e. 360 radials per 360° sweep instead of 720). This also corrected
-`nexrad-binary-format.md` §6.1's `az_spacing` code table, which had the 1/2 meaning
-backwards. What remains open is purely a texture-layout decision: whether the compute
-layer allocates one texture width for both (padding standard-res sweeps, or upsampling)
-or two distinct formats selected per-sweep. **Blocks:** the compute layer's texture
-generation. Related: Q8 (v1.0 product set — dual-pol moments have their own, narrower
-range at some tilts, per the measured table).
+None outstanding at this stage. Q11 and Q17 (below) were the two in this category;
+both resolved in Stage 3.
 
 ---
 
@@ -164,3 +133,49 @@ a lock guard across a frame is impossible by construction. Full rationale, reten
 policy, and alternatives considered in
 [ADR-0018](adr/0018-shared-application-state.md). `overview.md`, `data-flow.md`, and
 `CLAUDE.md` corrected in the same change.
+
+**Q8: Which derived products are in scope for v1.0?** — Resolved 2026-08-05 (Stage 3,
+S3-b): reflectivity, velocity, spectrum width, Echo Tops, VIL, plus ZDR and CC
+(dual-pol). KDP, PHI, CFP, and storm-relative velocity remain deferred — KDP needs a
+real filtering algorithm (differentiating PHI over range), PHI/CFP are diagnostic
+quantities of low value to a general operator, and storm-relative velocity needs a
+storm-motion input mechanism that does not exist before Stage 4's UI. The revision from
+`REQUIREMENTS.md`'s original conservative default (deferring all dual-pol) is because
+the cost calculus changed under ADR-0020's R8+LUT representation: ZDR and CC cost one
+palette and a few megabytes each once gridding is generic across moments, not a new
+algorithm or new decoder work (FR-ND-4 already decoded them). `REQUIREMENTS.md` FR-RP-3
+loses its `[OPEN]` marker; FR-RP-4 (storm-relative velocity) stays deferred but is no
+longer blocked on this question specifically.
+
+**Q9: Velocity dealiasing — implement or defer?** — Resolved 2026-08-05 (Stage 3,
+S3-e): deferred, with both fold conditions made legible instead. Range folding (ICD raw
+value 1) gets its own palette entry (`RF:`) so it renders visually distinct from
+no-echo. Velocity aliasing is bounded by the sweep's Nyquist velocity
+(`Sweep::nyquist_velocity_mps`), carried onto `SweepGrid::nyquist_velocity_mps` so a
+future status bar/legend can state the fold limit. A dealiasing algorithm that unfolds
+wrongly during a warning shows a couplet that is not there; a visible fold with the
+Nyquist stated is read correctly by the operator this application is built for.
+Documented as a known limitation, not silently absent. `REQUIREMENTS.md` FR-RP-5 loses
+its `[OPEN]` marker (deferred, not implemented).
+
+**Q11: How is color table / palette support handled?** — Resolved 2026-08-05 (Stage 3,
+S3-c): a documented subset of the GRLevelX `.pal` format
+(`compute::palette::parse`), bundled defaults compiled in with `include_str!`, user
+overrides from `paths::data_dir()/palettes/<product>.pal`. Unknown directives are
+skipped and reported, never fatal. Full directive table, the fuzz corpus, and a
+recorded gap (the directive table was not cross-checked against real, currently
+circulating community `.pal` files — no network access in the implementing session) in
+[ADR-0021](adr/0021-colour-table-format.md). `REQUIREMENTS.md` FR-CT-1 loses its
+`[OPEN]` marker.
+
+**Q17 (narrowed 2026-07-31, S1-W4d; resolved 2026-08-05, Stage 3 S3-d):** neither one
+shared texture format nor two per-resolution formats — **per-sweep native dimensions**,
+carried as grid metadata (`SweepGrid::{azimuth_count, gate_count, first_gate_m,
+gate_width_m}`) the shader takes as uniforms. Once the representation is R8 + a 256-entry
+LUT (ADR-0020, closed in the same stage), the premise that motivated "one format vs.
+two" no longer applies: the range dimension varies far more across measured tilts (688
+to 1832 gates) than azimuth resolution does (360 vs 720), so no fixed format is
+efficient regardless of the resolution question, and a texture array (the one
+representation actually requiring uniform dimensions) is unnecessary since only one
+(product, sweep) pair is drawn at a time. Full rationale in
+[ADR-0020](adr/0020-product-texture-representation.md).

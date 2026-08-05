@@ -1,5 +1,6 @@
 pub mod assembly;
 pub mod chunk;
+pub mod compute;
 pub mod config;
 pub mod event;
 pub mod ingest;

@@ -11,6 +11,14 @@
 //! `watch::Receiver<IngestStatus>` `S3Poller::status()` already publishes —
 //! no copy, no second source of truth.
 //!
+//! **Stage 3 (S3-g):** `RadarState` holds grids, not raw radials. Once a
+//! sweep is gridded, its `Vec<Radial>` is released — the last `Arc<Sweep>`
+//! is dropped when `compute::compute_loop`'s `spawn_blocking` closure
+//! returns. `last_complete` is metadata only ([`VolumeSummary`]), not the
+//! `VolumeScan` itself: nothing downstream needs the sweeps of a volume
+//! already gridded, and the gridded cells recover the exact physical value
+//! via each grid's own effective scale/offset.
+//!
 //! [`AppState::snapshot`] is the only read API. It takes the read lock,
 //! clones `Arc`s and `Copy` fields, and drops the lock before returning —
 //! there is deliberately no `fn read(&self) -> RwLockReadGuard<'_, _>`, so
@@ -23,27 +31,60 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Instant;
 
-use nexrad_decoder::{Sweep, VolumeScan};
+use nexrad_decoder::{VolumeScan, VolumeStatus};
 use tokio::sync::watch;
 
-use crate::assembly::{AssemblyEvent, VolumeId};
+use crate::assembly::VolumeId;
+use crate::compute::{DisplayProduct, StateUpdate, SweepGrid};
 use crate::event::{Event, EventLog};
 use crate::ingest::s3_poll::IngestStatus;
 use crate::sites::Site;
 
 pub use apply::apply;
 
-/// One elevation's most recently closed sweep, held for display. Cheap to
-/// clone: `Arc` for the sweep data itself, `Copy` fields for everything
-/// else — this is exactly what makes [`AppState::snapshot`]'s per-frame cost
-/// a handful of refcount bumps rather than a copy of the radial data.
+/// One elevation's most recently closed sweep, held for display as grids —
+/// not the sweep itself (S3-g). Cheap to clone: `Arc` for each grid,
+/// `Copy`/small-`Vec` for everything else — this is what keeps
+/// [`AppState::snapshot`]'s per-frame cost a handful of refcount bumps.
 #[derive(Clone)]
 pub struct DisplaySweep {
-    pub sweep: Arc<Sweep>,
+    pub elevation_number: u8,
+    pub elevation_deg: f32,
     pub volume: VolumeId,
     pub vcp_number: u16,
     /// When this sweep was applied. Feeds FR-DA-5's data-age display.
     pub received: Instant,
+    /// One entry per base product present on this sweep, sorted by
+    /// `DisplayProduct` (see `compute::DisplayProduct::BASE`'s doc comment).
+    pub grids: Vec<Arc<SweepGrid>>,
+}
+
+/// Metadata for the last successfully completed volume (FR-DA-5). Replaces
+/// the Stage 2 `Option<Arc<VolumeScan>>` (S3-g): the sweeps a `VolumeScan`
+/// held are already gridded and released by the time a volume closes, so
+/// nothing downstream needs anything but this volume's identity and the
+/// site parameters it carried. Small and `Copy` — no `Arc` needed.
+#[derive(Debug, Clone, Copy)]
+pub struct VolumeSummary {
+    pub volume: VolumeId,
+    pub vcp_number: u16,
+    pub status: VolumeStatus,
+    pub latitude: f32,
+    pub longitude: f32,
+    pub site_amsl_m: i16,
+}
+
+impl VolumeSummary {
+    pub fn from_scan(scan: &VolumeScan) -> Self {
+        Self {
+            volume: VolumeId { julian_date: scan.julian_date, scan_time_ms: scan.scan_time_ms },
+            vcp_number: scan.vcp_number,
+            status: scan.status,
+            latitude: scan.latitude,
+            longitude: scan.longitude,
+            site_amsl_m: scan.site_amsl_m,
+        }
+    }
 }
 
 /// Radar data only — see this module's top-level doc comment for why view
@@ -57,12 +98,22 @@ pub struct RadarState {
     /// which are the only places the retention/staleness rules need to be
     /// enforced.
     sweeps: BTreeMap<u8, DisplaySweep>,
+    /// Volume-level products (Echo Tops, VIL) — one grid each, replaced
+    /// wholesale when a volume closes `Complete`. Cleared, not merged, on
+    /// every replacement: Echo Tops and VIL are properties of one whole
+    /// volume, and a partial merge would mix two volumes' tilts.
+    derived: BTreeMap<DisplayProduct, Arc<SweepGrid>>,
+    /// Which volume `derived` was computed from, so a late/stale
+    /// `DerivedComputed` from an older volume can't clobber a newer one —
+    /// the same out-of-order guard `sweeps` gets from each `DisplaySweep`'s
+    /// own `volume` field.
+    derived_volume: Option<VolumeId>,
     /// VCP number of the sweeps currently held, if any. Used by [`apply`] to
     /// detect a VCP change, which invalidates the old pattern's elevation
     /// set entirely (S2-W1 §3.3) — an incomplete volume in the *same* VCP
     /// does not trigger this.
     current_vcp: Option<u16>,
-    pub last_complete: Option<Arc<VolumeScan>>,
+    pub last_complete: Option<VolumeSummary>,
     /// Increments on every applied change. The render loop (Stage 4) will
     /// compare this against the value it last uploaded to the GPU and skip
     /// texture re-upload when unchanged (FR-DR-5).
@@ -71,18 +122,28 @@ pub struct RadarState {
 
 impl RadarState {
     fn new(site: &'static Site) -> Self {
-        Self { site, sweeps: BTreeMap::new(), current_vcp: None, last_complete: None, revision: 0 }
+        Self {
+            site,
+            sweeps: BTreeMap::new(),
+            derived: BTreeMap::new(),
+            derived_volume: None,
+            current_vcp: None,
+            last_complete: None,
+            revision: 0,
+        }
     }
 
     /// Empties everything and switches to `site`. FR-DA-4 (site change)
-    /// consumes this from Stage 7 on; nothing in Stage 2 calls it outside
-    /// tests. Always bumps `revision` — a reset is itself a change the
-    /// render loop must notice, and `revision` stays a single monotonically
-    /// increasing counter across a site switch rather than resetting to a
-    /// value the render loop may have already seen.
+    /// consumes this from Stage 7 on; nothing before Stage 7 calls it
+    /// outside tests. Always bumps `revision` — a reset is itself a change
+    /// the render loop must notice, and `revision` stays a single
+    /// monotonically increasing counter across a site switch rather than
+    /// resetting to a value the render loop may have already seen.
     pub fn reset(&mut self, site: &'static Site) {
         self.site = site;
         self.sweeps.clear();
+        self.derived.clear();
+        self.derived_volume = None;
         self.current_vcp = None;
         self.last_complete = None;
         self.revision += 1;
@@ -94,7 +155,8 @@ impl RadarState {
 pub struct StateSnapshot {
     pub site: &'static Site,
     pub sweeps: Vec<DisplaySweep>,
-    pub last_complete: Option<Arc<VolumeScan>>,
+    pub derived: Vec<Arc<SweepGrid>>,
+    pub last_complete: Option<VolumeSummary>,
     pub revision: u64,
     pub ingest: IngestStatus,
 }
@@ -130,27 +192,31 @@ impl AppState {
         StateSnapshot {
             site: radar.site,
             sweeps: radar.sweeps.values().cloned().collect(),
-            last_complete: radar.last_complete.clone(),
+            derived: radar.derived.values().cloned().collect(),
+            last_complete: radar.last_complete,
             revision: radar.revision,
             ingest: self.ingest.borrow().clone(),
         }
     }
 
-    /// Apply one assembly event. Returns whether anything changed (i.e.
-    /// whether `revision` was bumped) — the pipeline (S2-W2) uses this only
-    /// for tests; production code does not need to branch on it.
+    /// Apply one compute-layer update. Returns whether anything changed
+    /// (i.e. whether `revision` was bumped) — the pipeline (S2-W2) uses
+    /// this only for tests; production code does not need to branch on it.
     ///
-    /// `LateRadialsDiscarded`/`MissingStartChunk` are observability, not
-    /// radar data (ADR-0012 rule table) — reported here, at the `AppState`
-    /// level where the event log lives, rather than by the pure
-    /// `state::apply`, which only ever touches `RadarState`.
-    pub fn apply_event(&self, event: AssemblyEvent, now: Instant) -> bool {
-        match &event {
-            AssemblyEvent::LateRadialsDiscarded { elevation_number, count } => {
-                self.report(Event::LateRadialsDiscarded { elevation_number: *elevation_number, count: *count });
+    /// `StateUpdate::Info`'s `LateRadialsDiscarded`/`MissingStartChunk` are
+    /// observability, not radar data (ADR-0012 rule table) — reported here,
+    /// at the `AppState` level where the event log lives, rather than by
+    /// the pure `state::apply`, which only ever touches `RadarState`.
+    pub fn apply_event(&self, event: StateUpdate, now: Instant) -> bool {
+        if let StateUpdate::Info(assembly_event) = &event {
+            match assembly_event {
+                crate::assembly::AssemblyEvent::LateRadialsDiscarded { elevation_number, count } => {
+                    self.report(Event::LateRadialsDiscarded { elevation_number: *elevation_number, count: *count });
+                }
+                crate::assembly::AssemblyEvent::MissingStartChunk => self.report(Event::MissingStartChunk),
+                crate::assembly::AssemblyEvent::SweepClosed { .. }
+                | crate::assembly::AssemblyEvent::VolumeClosed { .. } => {}
             }
-            AssemblyEvent::MissingStartChunk => self.report(Event::MissingStartChunk),
-            AssemblyEvent::SweepClosed { .. } | AssemblyEvent::VolumeClosed { .. } => {}
         }
         apply(&mut self.write_radar(), event, now)
     }
@@ -192,6 +258,7 @@ mod tests {
         let snap = state.snapshot();
         assert_eq!(snap.site.id, "KDOX");
         assert!(snap.sweeps.is_empty());
+        assert!(snap.derived.is_empty());
         assert!(snap.last_complete.is_none());
         assert_eq!(snap.revision, 0);
     }
@@ -212,13 +279,16 @@ mod tests {
         let state = app_state();
         assert_eq!(state.event_log_len(), 0);
         let changed = state.apply_event(
-            AssemblyEvent::LateRadialsDiscarded { elevation_number: 3, count: 5 },
+            StateUpdate::Info(crate::assembly::AssemblyEvent::LateRadialsDiscarded { elevation_number: 3, count: 5 }),
             Instant::now(),
         );
         assert!(!changed);
         assert_eq!(state.event_log_len(), 1, "LateRadialsDiscarded must reach the event log");
 
-        state.apply_event(AssemblyEvent::MissingStartChunk, Instant::now());
+        state.apply_event(
+            StateUpdate::Info(crate::assembly::AssemblyEvent::MissingStartChunk),
+            Instant::now(),
+        );
         assert_eq!(state.event_log_len(), 2, "MissingStartChunk must reach the event log");
     }
 

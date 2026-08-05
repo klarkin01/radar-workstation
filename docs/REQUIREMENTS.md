@@ -123,21 +123,34 @@ decoded volume scan:
 - Echo Tops (derived from multi-sweep reflectivity)
 - VIL — Vertically Integrated Liquid (derived from reflectivity)
 
-**FR-RP-3.** **[OPEN — Q8]** Dual-pol products (ZDR, CC, KDP): whether these are
-included in the v1.0 product set is unresolved. They are decoded (FR-ND-4) in all
-cases. The question is whether the compute and display pipeline for them is implemented
-at v1.0. Conservative default: deferred to a post-v1.0 release.
+**FR-RP-3.** Dual-pol products: **ZDR (differential reflectivity) and CC (correlation
+coefficient) are in the v1.0 product set** — resolved 2026-08-05 (Q8, Stage 3, S3-b).
+Both are decoded (FR-ND-4) and gridded/coloured identically to the base products
+(`compute::grid`, ADR-0020). **KDP, PHI, and CFP remain deferred**: KDP requires a real
+filtering algorithm (differentiating PHI over range), not a free moment; PHI and CFP are
+diagnostic quantities a general operator rarely reads directly.
 
-**FR-RP-4.** **[OPEN — Q8]** Storm-relative velocity: requires a storm motion vector
-input mechanism. Whether this is in v1.0 scope is unresolved.
+**FR-RP-4.** Storm-relative velocity: requires a storm motion vector input mechanism
+that does not exist before Stage 4's UI. Deferred (Q8, Stage 3, S3-b) — not blocked on
+further design work, just sequenced after the UI that would feed it.
 
-**FR-RP-5.** **[OPEN — Q9]** Velocity dealiasing: raw Doppler velocity data contains
-range-folded aliasing. Whether v1.0 ships with dealiasing, a known-limitation notice,
-or a range-folding indicator only is unresolved.
+**FR-RP-5.** Velocity dealiasing: **deferred, with both fold conditions made legible
+instead** — resolved 2026-08-05 (Q9, Stage 3, S3-e). Range folding (ICD raw value 1)
+renders with its own palette entry (`RF:`), distinct from no-echo. Velocity aliasing is
+bounded by the sweep's Nyquist velocity, carried onto `SweepGrid::nyquist_velocity_mps`
+for a future status bar/legend to state the fold limit. A dealiasing algorithm that
+unfolds wrongly during a warning shows a couplet that is not there; a visible fold with
+the Nyquist stated is read correctly instead. Documented as a known limitation.
 
-**FR-RP-6.** All products must be pre-computed as color-mapped RGBA textures by the
-compute layer before reaching the render loop. The render loop must not perform color
-mapping or product derivation.
+**FR-RP-6.** **Amended 2026-08-05 (ADR-0020, Stage 3, S3-a).** All products must be
+pre-computed by the compute layer before reaching the render loop, as a single-channel
+8-bit grid of quantised moment values (`compute::grid::SweepGrid`) plus a 256-entry
+palette lookup table (`compute::palette::ColorLut`) — not pre-coloured RGBA textures as
+originally stated. The render loop performs one LUT lookup per pixel in the fragment
+shader; it must not perform per-gate colour arithmetic or product derivation. See
+ADR-0020 for the memory arithmetic (RGBA for the full seven-moment set exceeds the
+128 MB GPU budget in §4.1; R8+LUT does not) and why this still satisfies this
+requirement's intent — the render loop performs no per-frame colour mapping either way.
 
 **FR-RP-7.** Switching between products or elevation sweeps must not require re-fetching
 or re-computing data. Product and sweep switches are GPU state changes only.
@@ -270,10 +283,12 @@ jump due to a data event. The user's spatial context is inviolable.
 
 ### 2.9 Color Tables
 
-**FR-CT-1.** **[OPEN — Q11]** The color table format for user-supplied palettes is
-unresolved. GRLevelX-compatible color table format is the strongly preferred choice,
-as it gives immediate access to the existing community palette ecosystem. Confirm and
-document the supported format.
+**FR-CT-1.** **Resolved 2026-08-05 (Q11, Stage 3, S3-c).** A documented subset of the
+GRLevelX `.pal` format (`compute::palette::parse`), giving access to the existing
+community palette ecosystem this requirement was written to reach. Full directive table
+and a recorded verification gap (not yet cross-checked against real, currently
+circulating community files) in
+[ADR-0021](adr/0021-colour-table-format.md).
 
 **FR-CT-2.** Default color tables for all supported products must be bundled with the
 application. The application must be usable with correct color mapping immediately
@@ -458,6 +473,7 @@ the authoritative definition of "done" for v1.0.
 
 - Single-site NEXRAD Level II analysis for all operational WSR-88D sites
 - Base products: reflectivity, velocity, spectrum width (all sweeps)
+- Dual-pol products: ZDR, CC (resolved 2026-08-05, Q8 — see FR-RP-3)
 - Derived products: Echo Tops, VIL
 - Full sweep set access and sweep switching
 - Bundled vector map overlays: counties, states, country boundaries, major highways
@@ -467,15 +483,16 @@ the authoritative definition of "done" for v1.0.
 - User-configurable placefile URLs with polling
 - Keyboard-driven product, sweep, and navigation controls
 - Bundled default color tables for all in-scope products
-- User-supplied color table support **[OPEN — Q11]**
+- User-supplied color table support (resolved 2026-08-05, Q11 — GRLevelX `.pal` subset,
+  see FR-CT-1)
 - Configuration persistence across restarts
 - Multiple simultaneous independent instances
 
 ### Explicitly Deferred (Post-v1.0)
 
-- Dual-pol products (ZDR, CC, KDP) in the display pipeline **[OPEN — Q8]**
-- Storm-relative velocity **[OPEN — Q8]**
-- Velocity dealiasing **[OPEN — Q9]**
+- KDP, PHI, CFP in the display pipeline (Q8 — see FR-RP-3; ZDR/CC are in scope)
+- Storm-relative velocity (Q8 — see FR-RP-4)
+- Velocity dealiasing (Q9 — see FR-RP-5; resolved as deferred, with fold indicators)
 - Full GRLevelX placefile feature set beyond the minimum viable subset **[OPEN — Q6]**
 - Multi-site display (dual-panel, side-by-side comparison)
 - NEXRAD Level III product support
@@ -509,11 +526,7 @@ of the relevant subsystem begins.
 | FR-DA-8 | Fallback NEXRAD data source behavior | Q14 |
 | FR-MU-5 | Tile cache maximum size and configurability | Q7 |
 | FR-MU-6 | Cross-instance tile cache sharing | Q5 |
-| FR-RP-3 | Dual-pol products in v1.0 | Q8 |
-| FR-RP-4 | Storm-relative velocity in v1.0 | Q8 |
-| FR-RP-5 | Velocity dealiasing in v1.0 | Q9 |
 | FR-PF-4 | Full placefile feature scope for v1.0 | Q6 |
-| FR-CT-1 | Color table format | Q11 |
 | PL-3 | Distribution mechanism | Q12 |
 | PL-4 | Minimum system requirements | Q13 |
 | FR-MU-1 | Shapefile parser on the startup path, or build-time pre-projection | Q15 |

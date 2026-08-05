@@ -1,0 +1,21 @@
+; Vertically Integrated Liquid, VIL (kg/m^2) — authored for this project
+; over the conventional 0..80 kg/m^2 NWS-style display range
+; (compute::derived's VIL_MAX_KG_M2, ADR-0020). Not sourced from a specific
+; published GRLevelX palette — see ADR-0021's verification note. Follows
+; the same blue-to-magenta progression as reflectivity, since VIL is
+; derived from it and operators read the two together.
+Product: Vil
+Units: kg/m^2
+Step: 5
+SolidColor:  0   4 233 231
+SolidColor:  5   1 159 244
+SolidColor: 10   3   0 244
+SolidColor: 20   2 253   2
+SolidColor: 30   1 197   1
+SolidColor: 40 253 248   2
+SolidColor: 50 253 149   0
+SolidColor: 60 253   0   0
+SolidColor: 70 188   0   0
+SolidColor: 80 248   0 253
+RF: 160 160 160
+ND: 0 0 0 0

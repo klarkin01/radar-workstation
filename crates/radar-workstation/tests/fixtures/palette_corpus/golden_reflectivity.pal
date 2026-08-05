@@ -1,0 +1,23 @@
+; Reflectivity (dBZ) — NWS-standard 16-step palette, ported verbatim from
+; utility/radar-viz/src/color_table.rs's nws_reflectivity() (validated
+; against real data by that utility's PPI renderer).
+Product: Reflectivity
+Units: dBZ
+Step: 5
+SolidColor:  5 118 118 118
+SolidColor: 10   4 233 231
+SolidColor: 15   1 159 244
+SolidColor: 20   3   0 244
+SolidColor: 25   2 253   2
+SolidColor: 30   1 197   1
+SolidColor: 35   0 142   0
+SolidColor: 40 253 248   2
+SolidColor: 45 229 188   0
+SolidColor: 50 253 149   0
+SolidColor: 55 253   0   0
+SolidColor: 60 212   0   0
+SolidColor: 65 188   0   0
+SolidColor: 70 248   0 253
+SolidColor: 75 152  84 198
+RF: 160 160 160
+ND: 0 0 0 0

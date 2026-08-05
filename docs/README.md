@@ -57,8 +57,10 @@ context, alternatives considered, and consequences.
 | [0015](adr/0015-bzip2.md) | Use bzip2 for NEXRAD chunk decompression |
 | [0016](adr/0016-quick-xml.md) | Use quick-xml for S3 `ListObjectsV2` response parsing |
 | [0017](adr/0017-bytes.md) | Use bytes for zero-copy buffer handoff |
-| [0018](adr/0018-shared-application-state.md) | Shared application state structure (Q4) |
+| [0018](adr/0018-shared-application-state.md) | Shared application state structure (Q4) — erratum (2026-08-05): grids replace raw sweeps, `VolumeSummary` replaces `Arc<VolumeScan>` |
 | [0019](adr/0019-config-format.md) | Configuration file format — workspace-local parser, not toml/serde |
+| [0020](adr/0020-product-texture-representation.md) | Product texture representation — quantised R8 grid + 256-entry palette LUT, per-sweep native dimensions (Q17); amends FR-RP-6 |
+| [0021](adr/0021-colour-table-format.md) | Colour table format — GRLevelX `.pal` subset (Q11) |
 
 ## Plans (`plans/`)
 
@@ -74,3 +76,4 @@ just what was intended.
 | [`documentation-remediation.md`](plans/documentation-remediation.md) | This document's own remediation plan | Addresses `documentation-inventory.md`'s eleven findings, including writing this index. |
 | [`stage-0-1-close-the-acquisition-path.md`](plans/stage-0-1-close-the-acquisition-path.md) | Implemented | Volume assembly state machine (ADR-0012), `-S` metadata decoding, poller skipped-volume recovery, decoder hardening. Its §8 Results is the authoritative account of what was measured. |
 | [`stage-2-make-the-application-exist.md`](plans/stage-2-make-the-application-exist.md) | Implemented | Answers Q4 (ADR-0018); runtime/supervision skeleton; bundled site list; configuration persistence (ADR-0019). `main.rs` is a real, runnable program as of this plan. Its §12 Results is the authoritative account of what was measured. |
+| [`stage-3-compute-layer.md`](plans/stage-3-compute-layer.md) | Implemented | Answers Q8, Q9, Q11, Q17 (ADR-0020, ADR-0021); the compute layer (`compute::grid`/`palette`/`geometry`/`derived`) grids every in-scope product per sweep and derives Echo Tops/VIL per volume, wired into the pipeline as a fourth stage. Its §15 Results is the authoritative account of what was measured. |

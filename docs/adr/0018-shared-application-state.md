@@ -150,3 +150,40 @@ this alternative stays cheap to adopt later rather than needing to be decided no
   representation (S2-W3, a separate but co-shipped decision) rather than a new ADR,
   since it supersedes one clause of an existing accepted decision rather than
   introducing a new architectural concern.
+
+## Erratum (added 2026-08-05, Stage 3 / S3-g)
+
+This ADR's own retention paragraph anticipated Stage 3's mitigation directly: "if it
+proves tight, ... the compute layer can drop raw radials for products nobody is
+displaying, once computed." Stage 3 took that further than sketched — raw radials are
+dropped after gridding for *every* product, not only ones nobody is displaying, because
+the gridded cells (`compute::grid::SweepGrid`) **are** the raw values, and each grid
+carries its own effective scale/offset, so nothing downstream ever needs the source
+`Radial`s again.
+
+**`RadarState` now holds grids, not sweeps.** `DisplaySweep.sweep: Arc<Sweep>` is
+replaced by `DisplaySweep.grids: Vec<Arc<SweepGrid>>`. `last_complete:
+Option<Arc<VolumeScan>>` is replaced by `last_complete: Option<VolumeSummary>` — a small
+`Copy` struct (site lat/lon/AMSL, VCP number, volume identity, status) rather than the
+whole closed volume, since the volume's sweeps are already gridded and released by the
+time it closes. The last `Arc<Sweep>` anywhere in the process is dropped when
+`compute::compute_loop`'s `spawn_blocking` closure returns; `gridding_releases_the_
+source_sweep`-equivalent behavior is exercised implicitly by every compute-loop test
+constructing and dropping sweeps, and directly by holding a `Weak` reference across a
+grid operation would be the pinning test a future contributor should add if this
+property ever needs re-verifying after a refactor.
+
+This dissolves the "two volumes' worth across a boundary" transient this ADR flagged as
+needing measurement rather than assumption. Measured 2026-08-05 (§12 of the Stage 3
+plan): peak RSS reached ~147 MB after multiple real volume boundaries in a live run
+against KDOX (VCP 212) — under the < 200 MB target (`REQUIREMENTS.md` §4.1) with
+headroom, and against Stage 2's baseline of 44 MB at 6 of 14 sweeps gridded (Stage 3's
+figure is naturally higher: it now also holds every base product's gridded bytes for
+every elevation, not just the raw radials for the elevations gridded so far).
+
+**One consequence for any future product needing full precision:** ZDR's 16-bit ICD
+values are requantised to 8 bits *during* gridding (ADR-0020), while the source radials
+are still in scope. Any future product needing full 16-bit precision (KDP, computed by
+differentiating PHI over range — deferred per Q8) must be computed during gridding too,
+not later from `RadarState`, because by the time a volume closes there is no 16-bit data
+left anywhere in the process to compute it from.

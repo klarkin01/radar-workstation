@@ -6,6 +6,7 @@
 //! revisit at Stage 4 if `RUST_LOG`-style filtering across ten-plus
 //! subsystems makes the cost worth it.
 
+use crate::compute::DisplayProduct;
 use crate::ingest::s3_poll::PollError;
 
 /// Which supervised unit an event pertains to (S2-W2 §4.3). One variant
@@ -57,6 +58,38 @@ pub enum Event {
     /// POLL_INTERVAL_MAX]` and was clamped rather than rejected outright —
     /// an unclamped small value would hammer a public S3 bucket.
     ConfigPollIntervalClamped { requested_secs: u64, clamped_secs: u64 },
+
+    // --- compute layer (S3-W1/W2, `compute::grid`) ---
+    /// A sweep's modal `azimuth_spacing_code` was neither 1 (super-res) nor
+    /// 2 (standard-res); the azimuth count was inferred from radial count
+    /// instead.
+    UnknownAzimuthSpacingCode { elevation_number: u8, inferred_azimuth_count: u16 },
+    /// A sweep's moment geometry for `product` was degenerate (zero gate
+    /// width or zero gate count) and could not be gridded.
+    DegenerateGateGeometry { product: DisplayProduct, elevation_number: u8 },
+    /// One or more radials carried gate geometry for `product` inconsistent
+    /// with the sweep's chosen geometry and were skipped rather than
+    /// partially copied into a row sized for different geometry.
+    InconsistentGateGeometry { product: DisplayProduct, elevation_number: u8, skipped: usize },
+    /// Two or more radials scattered into the same azimuth slot for
+    /// `product` (commonly at the 0°/360° seam); the last writer won.
+    DuplicateAzimuthSlot { product: DisplayProduct, elevation_number: u8, count: usize },
+    /// The compute layer's retained-reflectivity-grid set (held across an
+    /// accumulating volume for Echo Tops/VIL) exceeded its bound; the
+    /// oldest tilt was dropped rather than letting a stuck volume leak.
+    RetainedGridSetBounded { dropped_elevation_number: u8 },
+
+    // --- colour tables (S3-W3, `compute::palette`) ---
+    /// A `.pal` line was neither a comment, blank, nor a recognized,
+    /// well-formed directive.
+    PaletteLineUnparseable { product: DisplayProduct, line: usize },
+    /// A user override palette exists but could not be read (permissions,
+    /// not a regular file, etc.) — distinct from simply not existing, which
+    /// is the expected common case and is not reported.
+    UserPaletteUnreadable { product: DisplayProduct, path: String, reason: String },
+    /// A user override palette was readable but produced no usable colour
+    /// entries; the bundled default was used instead.
+    UserPaletteMalformed { product: DisplayProduct, path: String },
 }
 
 impl std::fmt::Display for Event {
@@ -100,6 +133,40 @@ impl std::fmt::Display for Event {
                 f,
                 "config ingest.poll_interval_seconds={requested_secs} clamped to {clamped_secs}"
             ),
+            Self::UnknownAzimuthSpacingCode { elevation_number, inferred_azimuth_count } => write!(
+                f,
+                "elevation {elevation_number}: unrecognized modal azimuth spacing code, inferred \
+                 {inferred_azimuth_count} azimuths from radial count"
+            ),
+            Self::DegenerateGateGeometry { product, elevation_number } => write!(
+                f,
+                "elevation {elevation_number}: {product} has degenerate gate geometry (zero width or \
+                 zero count), not gridded"
+            ),
+            Self::InconsistentGateGeometry { product, elevation_number, skipped } => write!(
+                f,
+                "elevation {elevation_number}: {skipped} {product} radial(s) had inconsistent gate \
+                 geometry, skipped rather than gridded"
+            ),
+            Self::DuplicateAzimuthSlot { product, elevation_number, count } => write!(
+                f,
+                "elevation {elevation_number}: {count} {product} radial(s) landed on an \
+                 already-filled azimuth slot, last writer kept"
+            ),
+            Self::RetainedGridSetBounded { dropped_elevation_number } => write!(
+                f,
+                "retained reflectivity grid set exceeded its bound, dropped elevation \
+                 {dropped_elevation_number}"
+            ),
+            Self::PaletteLineUnparseable { product, line } => {
+                write!(f, "{product} palette line {line} is not valid, skipping")
+            }
+            Self::UserPaletteUnreadable { product, path, reason } => {
+                write!(f, "user {product} palette {path} unreadable: {reason}, using bundled default")
+            }
+            Self::UserPaletteMalformed { product, path } => {
+                write!(f, "user {product} palette {path} had no usable colour entries, using bundled default")
+            }
         }
     }
 }
