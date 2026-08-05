@@ -11,12 +11,13 @@ This is an inventory, not a plan. It records what exists, what does not, and the
 which the missing work should be taken up. It does not decide any open question, propose a
 design, or estimate effort in hours.
 
-> **Superseded for current state, 2026-07-31:** Stage 2 (items 6–9 below) is complete —
-> see `docs/plans/stage-2-make-the-application-exist.md` §12 for what was built and
-> measured. This document's numbers (test counts, LOC, open-question counts) reflect the
-> `668b1ca` snapshot and are not re-audited here; the plan's own Results section is the
-> current source of truth for Stage 2, the same relationship `dependency-inventory.md`
-> has to its own remediation plan.
+> **Superseded for current state, 2026-08-05:** Stages 2 and 3 (items 6–13 below) are
+> complete — see `docs/plans/stage-2-make-the-application-exist.md` §12 and
+> `docs/plans/stage-3-compute-layer.md` §15 for what was built and measured. This
+> document's numbers (test counts, LOC, open-question counts) reflect the `668b1ca`
+> snapshot and are not re-audited here; each plan's own Results section is the current
+> source of truth for its stage, the same relationship `dependency-inventory.md` has to
+> its own remediation plan.
 
 ---
 
@@ -239,14 +240,19 @@ half the requirements cannot be validated until something renders.
    remembering, and its must-not-crash-on-corrupt requirement is easier to satisfy when
    the config surface is still small.
 
-### Stage 3 — Compute layer
-10. **Answer Q8, Q9, Q11, Q17** as one batch — they jointly define what the compute layer
-    produces and in what format.
-11. **Color table support** — parser, bundled defaults for all in-scope products
-    (FR-CT-2), user palettes from the XDG data directory (FR-CT-3).
-12. **Base product textures** — reflectivity, velocity, spectrum width → pre-computed RGBA
-    (FR-RP-1, FR-RP-6). `radar-viz`'s color table and PPI code is the reference.
-13. **Derived products** — Echo Tops and VIL (FR-RP-2).
+### Stage 3 — Compute layer (complete, `docs/plans/stage-3-compute-layer.md`)
+10. **Answered Q8, Q9, Q11, Q17** as one batch (ADR-0020, ADR-0021) — they jointly
+    define what the compute layer produces and in what format: a quantised R8 grid per
+    (sweep, product) plus a 256-entry palette LUT, per-sweep native dimensions, no
+    dealiasing (fold indicators instead), and dual-pol (ZDR, CC) added to the v1.0 set.
+11. **Color table support** — `.pal` parser, bundled defaults for all seven in-scope
+    products (FR-CT-2), user palettes from the XDG data directory (FR-CT-3).
+12. **Base product grids** — reflectivity, velocity, spectrum width, ZDR, CC →
+    quantised R8 grids (FR-RP-1, FR-RP-3, FR-RP-6, amended). `radar-viz`'s color table
+    and PPI code was the reference for the three base products; its `--path grid`
+    render path is now the same code the application uses.
+13. **Derived products** — Echo Tops and VIL (FR-RP-2), computed per completed volume
+    from the compute task's retained reflectivity grids.
 
 ### Stage 4 — First pixels
 14. **Render loop foundation** — window, event loop, wgpu device/surface, egui integration,

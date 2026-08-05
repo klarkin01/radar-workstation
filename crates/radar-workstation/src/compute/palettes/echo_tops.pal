@@ -1,0 +1,18 @@
+; Echo Tops (kft above the radar) — authored for this project over the
+; conventional 0..70 kft NWS-style display range (compute::derived's
+; ECHO_TOP_MAX_KFT, ADR-0020). Not sourced from a specific published
+; GRLevelX palette — see ADR-0021's verification note. Blue (low tops)
+; through green/yellow to red/magenta (overshooting-top-scale heights).
+Product: EchoTops
+Units: kft
+Step: 5
+SolidColor:  0   0  40 160
+SolidColor: 10   0 120 220
+SolidColor: 20   0 180 120
+SolidColor: 30  60 200   0
+SolidColor: 40 220 220   0
+SolidColor: 50 240 140   0
+SolidColor: 60 230   0   0
+SolidColor: 70 200   0 200
+RF: 160 160 160
+ND: 0 0 0 0

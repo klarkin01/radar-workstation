@@ -1,0 +1,21 @@
+; Correlation coefficient, CC (unitless) — authored for this project over
+; the conventional 0.2..1.05 NWS-style dual-pol display range. Not sourced
+; from a specific published GRLevelX palette — see ADR-0021's verification
+; note. Low CC (non-meteorological: debris, chaff, biota) is red/orange;
+; high CC (~1.0, uniform precipitation) is green; the narrow band just below
+; 1.0, where a tornadic debris signature typically sits, gets the finest
+; steps.
+Product: Cc
+Units: (unitless)
+Step: 0.05
+SolidColor: 0.20 200   0   0
+SolidColor: 0.50 230 100   0
+SolidColor: 0.70 230 200   0
+SolidColor: 0.80 200 230   0
+SolidColor: 0.90 120 220   0
+SolidColor: 0.95  40 200  40
+SolidColor: 0.98  20 160 120
+SolidColor: 1.00   0 120 200
+SolidColor: 1.03  60  60  60
+RF: 160 160 160
+ND: 0 0 0 0

@@ -37,15 +37,16 @@ External Sources
                Display
 ```
 
-> **Implementation status:** Stage 2 complete. The chunk ingest layer (fetch + BZ2
+> **Implementation status:** Stage 3 complete. The chunk ingest layer (fetch + BZ2
 > decompression), the NEXRAD decoder, the volume assembly state machine (ADR-0012),
+> the compute layer (gridding, colour tables, Echo Tops/VIL — ADR-0020, ADR-0021),
 > shared application state (ADR-0018), the runtime/supervision skeleton, and
 > configuration persistence (ADR-0019) are implemented and tested
 > (`crates/radar-workstation`, `crates/nexrad-decoder`) — see
-> `crates/radar-workstation/src/{assembly,state,pipeline.rs,config}`. `main.rs` consumes
-> the assembler's `SweepClosed`/`VolumeClosed` events end to end, through `AppState`,
-> today. The compute layer and render loop described below are still architecture, not
-> yet code.
+> `crates/radar-workstation/src/{assembly,compute,state,pipeline.rs,config}`. `main.rs`
+> runs the full poller → assembly → compute → applier quartet end to end, through
+> `AppState`, today. The render loop described below is still architecture, not yet
+> code — that is Stage 4.
 
 ---
 
@@ -228,31 +229,59 @@ Remaining target coverage (FR-ND-8):
 
 ---
 
-## Compute Layer (rayon)
+## Compute Layer
 
-When a new `VolumeScan` is decoded, it is handed to the compute layer. Product
-derivation runs in parallel across rayon's thread pool.
+**Implemented** (Stage 3) — `crates/radar-workstation/src/compute/`. A fourth pipeline
+stage, between assembly and the applier: `poller → assembly → compute → applier →
+AppState` (`pipeline::run_ingest_pipeline`). As each sweep closes
+(`AssemblyEvent::SweepClosed`), the compute task grids every in-scope product present on
+it (`compute::grid::grid_all_base_products`) on `tokio::task::spawn_blocking` — the
+runtime has two workers (S2-c), and awaiting the blocking job inline (rather than
+spawning and moving on) keeps at most one grid job running at a time, which is what
+keeps §3.6's "no rayon yet" decision honest. Gridded results are sent onward as
+`compute::StateUpdate` and are also what the compute task retains (as cheap `Arc`
+clones) for the accumulating volume's reflectivity, needed to derive Echo Tops/VIL when
+the volume closes `Complete`.
 
 ### Products Derived
 
-Confirmed v1.0 scope (REQUIREMENTS.md FR-RP-1/FR-RP-2):
-- **Base reflectivity** — all sweeps (color-mapped directly from decoded moment data)
-- **Base velocity** — all sweeps
-- **Spectrum width** — all sweeps
-- **Echo Tops** — derived from multi-sweep reflectivity volume
-- **VIL** — vertically integrated liquid, derived from reflectivity volume
+v1.0 scope, resolved 2026-08-05 (Q8, ADR-0020's §3.1 sketch; REQUIREMENTS.md
+FR-RP-1/2/3):
+- **Base reflectivity, base velocity, spectrum width** — all sweeps
+- **ZDR (differential reflectivity), CC (correlation coefficient)** — all sweeps
+  carrying them; decoded regardless per FR-ND-4, gridded identically to the base three
+  once gridding is generic across moments
+- **Echo Tops, VIL** — derived from the accumulating volume's retained reflectivity
+  grids at volume close (`compute::derived`)
 
-Open pending Q8/Q9, conservative default is deferred post-v1.0 (REQUIREMENTS.md
-FR-RP-3/4/5):
-- **Storm-relative velocity** — requires a storm motion vector input mechanism
-- **Dual-pol moments** — ZDR, CC, KDP (decoded regardless per FR-ND-4; the compute/
-  display pipeline for them is what's unresolved)
-- **Velocity dealiasing**
+Deferred post-v1.0 (Q8/Q9; REQUIREMENTS.md FR-RP-4/5):
+- **Storm-relative velocity** — needs a storm motion vector input mechanism that
+  doesn't exist before Stage 4's UI
+- **KDP, PHI, CFP** — KDP needs a real differentiation-over-range algorithm; PHI/CFP
+  are diagnostic quantities of low value to a general operator
+- **Velocity dealiasing** — deferred with fold indicators instead: range folding gets
+  its own palette entry, and the Nyquist velocity is carried on every velocity grid for
+  a future legend/status-bar readout
 
 ### Output
-Derived products are written as pre-computed, color-mapped RGBA textures ready for
-upload to the GPU. The render loop uploads these textures and draws them — it does
-not perform color mapping or product computation at render time.
+
+**Amended from the original RGBA sketch (ADR-0020, S3-a).** Each `(sweep, product)`
+becomes a `compute::grid::SweepGrid` — a single-channel 8-bit polar grid where the cell
+*is* the raw NEXRAD value (`0`=no-data, `1`=range-fold, `2..=255`=`(raw−offset)/scale`)
+— plus a `compute::palette::ColorLut`, a 256-entry RGBA table compiled once per product
+from a GRLevelX-format `.pal` file (`compute::palette`, ADR-0021; bundled defaults or a
+user override from `paths::data_dir()`). RGBA for the full seven-moment set exceeds the
+128 MB per-instance GPU budget (~200 MB); R8+LUT fits comfortably (~50 MB) — see
+ADR-0020's memory table. The render loop (Stage 4) uploads both and does one 1D LUT
+lookup per pixel in the fragment shader — it still performs no per-gate colour mapping
+or product computation at render time, which is the property this section's original
+RGBA wording was protecting.
+
+### Retention
+
+Once a sweep is gridded, its raw radials are released — `RadarState` holds grids, not
+`Sweep`s (ADR-0018's erratum). The last `Arc<Sweep>` anywhere in the process drops when
+the grid job's `spawn_blocking` closure returns.
 
 ---
 
@@ -272,22 +301,26 @@ construction rather than a rule to remember.
 
 ### Contents (of `RadarState`, the one locked structure)
 - The active site (`&'static Site`, from the bundled table — S2-W3)
-- Newest closed sweep per elevation number (`BTreeMap<u8, DisplaySweep>`), carried
-  across volume boundaries so a closing volume never blanks the display (ADR-0012)
-- The last successfully completed `VolumeScan` (FR-DA-5)
+- Newest closed sweep per elevation number, **as gridded products**
+  (`BTreeMap<u8, DisplaySweep>`, `DisplaySweep.grids: Vec<Arc<SweepGrid>>` — S3-g),
+  carried across volume boundaries so a closing volume never blanks the display
+  (ADR-0012)
+- Volume-derived products (Echo Tops, VIL), replaced wholesale per completed volume
+  (`BTreeMap<DisplayProduct, Arc<SweepGrid>>`)
+- Metadata for the last successfully completed volume (`VolumeSummary`, not the
+  `VolumeScan` itself — S3-g: its sweeps are already gridded and released) (FR-DA-5)
 - A `revision: u64` counter, incremented on every applied change, that the render loop
   will use (Stage 4) to skip GPU texture re-upload when unchanged (FR-DR-5)
 
-Derived product textures, the tile cache index, and placefile data are Stage 3/5/6
-concerns not yet designed in detail; ADR-0018 notes that adding them is expected to be
-additive to this structure, not a redesign of it. User settings and application status
-in the sense of "what the render loop currently has selected" are view state (above),
-not part of `RadarState`.
+The tile cache index and placefile data are Stage 5/6 concerns not yet designed in
+detail; ADR-0018 notes that adding them is expected to be additive to this structure,
+not a redesign of it. User settings and application status in the sense of "what the
+render loop currently has selected" are view state (above), not part of `RadarState`.
 
 ### Access Pattern
-- **Writer:** the data pipeline, through `AppState::apply_event` (assembly events) and
-  `AppState::report` (typed events, to both the stderr sink and the bounded in-memory
-  log)
+- **Writer:** the data pipeline, through `AppState::apply_event` (`compute::StateUpdate`,
+  Stage 3) and `AppState::report` (typed events, to both the stderr sink and the bounded
+  in-memory log)
 - **Reader:** the render loop (Stage 4), once per frame, through `AppState::snapshot()`
 - Write locks are held only long enough to apply one event. The render loop never
   blocks waiting for a long-running write, and a poisoned lock (a panic while holding

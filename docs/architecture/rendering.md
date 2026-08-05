@@ -111,16 +111,22 @@ Radar data is the most performance-critical rendering path. The approach:
 
 ### Texture-Based Rendering
 
-Derived products are pre-computed as RGBA textures by the compute layer (rayon) and
-uploaded to the GPU once per new scan. The render loop draws the radar texture as a
-full-screen quad, alpha-composited over the map layers below. <!-- corrected 2026-07-30:
-this previously said "clipped to the 230km radar range ring" — 230 km does not match any
-measured moment/tilt combination (see Polar Grid Representation below); the clip range is
-now an open question (Q17) rather than a fixed figure. -->
+<!-- corrected 2026-08-05 (ADR-0020, Stage 3, S3-a): this section previously said
+products are "pre-computed as RGBA textures." Measured against the 128 MB per-instance
+GPU budget (§4.1) for the full seven-moment v1.0 set, RGBA does not fit (~200 MB);
+R8 + a 256-entry palette LUT does (~50 MB). See ADR-0020 for the full arithmetic. -->
 
-This means **no per-frame color mapping.** Color mapping happens once in the compute
-layer when a new scan arrives, not every frame. The GPU simply draws a pre-colored
-texture. This is the primary reason the render loop is fast.
+Each `(sweep, product)` is gridded by the compute layer as a single-channel 8-bit
+texture (`compute::grid::SweepGrid`) — the grid cell *is* the raw NEXRAD value — plus a
+256-entry RGBA palette lookup table (`compute::palette::ColorLut`, one per product) that
+the fragment shader samples once per pixel. Both are uploaded to the GPU once per new
+scan; the render loop draws the radar texture as a full-screen quad, alpha-composited
+over the map layers below.
+
+This means **no per-frame color mapping.** Colour mapping happens once in the compute
+layer, at most 256 times per product per scan (`compute::palette::compile_lut`), not
+once per gate and not once per frame. The GPU's fragment shader does one 1D texture
+lookup per pixel; this is the primary reason the render loop is fast.
 
 ### Polar Grid Representation
 
@@ -170,13 +176,21 @@ KDOX VCP 35 volume in `downloads/KDOX_20260629_1811/`):
   super-resolution, code 2 is standard-resolution).
 
 FR-ND-3's requirement that the decoder support both variants is now verified against
-real data. What remains open — whether the compute layer's texture format is shared
-between the two resolutions (padding or upsampling the narrower one) or kept as two
-distinct formats — is recorded as the narrowed **Q17** in `docs/open-questions.md`.
+real data. **Q17 is resolved (2026-08-05, Stage 3, S3-d):** neither a shared format nor
+two per-resolution formats — each `SweepGrid` carries **its own native dimensions**
+(`azimuth_count`, `gate_count`, `first_gate_m`, `gate_width_m`), taken as shader
+uniforms, never padded, never upsampled. Once the representation is R8 + a 256-entry
+palette LUT (ADR-0020), the premise behind "one format vs. two" stops applying: the
+range dimension varies far more across measured tilts (688 to 1832 gates) than azimuth
+resolution does (360 vs 720), so no fixed format is efficient regardless of resolution,
+and a texture *array* — the one representation that would actually require uniform
+dimensions — isn't needed, since only one (product, sweep) pair is drawn at a time.
+Upsampling standard-resolution to super-resolution was rejected on a stronger ground
+than memory: it would fabricate radials the antenna never measured. Full rationale in
+[ADR-0020](../adr/0020-product-texture-representation.md).
 
-Whatever grid dimensions Q17 settles on, the polar grid is mapped to the azimuthal
-equidistant projection coordinate space by the vertex shader — that mechanism does not
-depend on the specific gate/azimuth resolution.
+The polar grid is mapped to the azimuthal equidistant projection coordinate space by the
+vertex shader — that mechanism does not depend on the specific gate/azimuth resolution.
 
 ### Transparency
 

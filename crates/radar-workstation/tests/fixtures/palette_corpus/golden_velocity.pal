@@ -1,0 +1,23 @@
+; Radial velocity (m/s) — NWS-style 16-step palette, ported verbatim from
+; utility/radar-viz/src/color_table.rs's nws_velocity(). Negative = toward
+; the radar, positive = away.
+Product: Velocity
+Units: m/s
+Step: 10
+SolidColor: -64   0   0 200
+SolidColor: -54   0  40 255
+SolidColor: -44   0 160 255
+SolidColor: -34   0 240 255
+SolidColor: -24   0 255 176
+SolidColor: -14   0 200  80
+SolidColor:  -4   0 100   0
+SolidColor:  -1 100 100 100
+SolidColor:   1 100 100   0
+SolidColor:   4 170 170   0
+SolidColor:  14 255 255   0
+SolidColor:  24 255 160   0
+SolidColor:  34 255  80   0
+SolidColor:  44 255   0   0
+SolidColor:  54 200   0   0
+RF: 160 160 160
+ND: 0 0 0 0

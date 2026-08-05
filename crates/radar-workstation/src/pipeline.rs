@@ -6,21 +6,23 @@
 //! **Supervision granularity.** The plan this module implements
 //! (`docs/plans/stage-2-make-the-application-exist.md` §4.3) describes a
 //! supervisor awaiting "each" task's `JoinHandle` independently. That is not
-//! implementable as written for this pipeline: the poller, assembly, and
-//! applier are connected by point-to-point `mpsc` channels, each end owned
-//! by value. If one task's future panics, tokio drops everything it owned
-//! during unwind — including its channel endpoint — which permanently
-//! closes that channel for the peer on the other end, whether or not that
-//! peer itself panicked. An independently-restarted task cannot be handed a
-//! replacement for a receiver or sender it never owned in the first place.
-//! So the poller/assembly/applier trio is supervised as **one unit**: a
-//! panic anywhere in it tears down and rebuilds all three together, with
-//! fresh channels and a fresh `S3Poller`/`VolumeAssembler`. This still
-//! satisfies every property S2-d asks for — a panic doesn't kill the
-//! process, it's reported as a typed event, backoff is capped and
-//! exponential, retries are indefinite — and "restarting from Idle costs at
-//! most one volume of continuity" (ADR-0012) holds exactly as before, since
-//! the whole trio re-enters `Idle` together.
+//! implementable as written for this pipeline: the poller, assembly,
+//! compute, and applier are connected by point-to-point `mpsc` channels,
+//! each end owned by value. If one task's future panics, tokio drops
+//! everything it owned during unwind — including its channel endpoint —
+//! which permanently closes that channel for the peer on the other end,
+//! whether or not that peer itself panicked. An independently-restarted
+//! task cannot be handed a replacement for a receiver or sender it never
+//! owned in the first place. So the poller/assembly/compute/applier quartet
+//! (Stage 3 adds the compute stage between assembly and the applier) is
+//! supervised as **one unit**: a panic anywhere in it tears down and
+//! rebuilds all four together, with fresh channels and a fresh
+//! `S3Poller`/`VolumeAssembler`. This still satisfies every property S2-d
+//! asks for — a panic doesn't kill the process, it's reported as a typed
+//! event, backoff is capped and exponential, retries are indefinite — and
+//! "restarting from Idle costs at most one volume of continuity"
+//! (ADR-0012) holds exactly as before, since the whole quartet re-enters
+//! `Idle` together.
 //!
 //! **`Handle`, not `Runtime`.** The plan sketches `Pipeline::spawn(rt:
 //! &Runtime, ...)`. This takes `&tokio::runtime::Handle` instead —
@@ -39,6 +41,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::assembly::{self, AssemblyConfig, AssemblyEvent};
+use crate::compute::{self, StateUpdate};
 use crate::event::{Event, TaskKind};
 use crate::ingest::s3_poll::{IngestStatus, S3Poller, BUCKET_HOST};
 use crate::ingest::ChunkEnvelope;
@@ -51,9 +54,14 @@ use crate::state::AppState;
 /// correct behavior (it delays the next poll rather than growing memory);
 /// do not "fix" it by unbounding this channel.
 const CHUNK_CHANNEL_CAPACITY: usize = 32;
-/// assembly → applier channel capacity. One volume produces ~14
+/// assembly → compute channel capacity. One volume produces ~14
 /// `SweepClosed` + 1 `VolumeClosed`; 64 is four volumes of headroom.
 const EVENT_CHANNEL_CAPACITY: usize = 64;
+/// compute → applier channel capacity. Same reasoning as
+/// `EVENT_CHANNEL_CAPACITY` — four volumes of headroom for `StateUpdate`,
+/// which is produced roughly one-for-one with the `AssemblyEvent`s that
+/// drive it.
+const COMPUTE_CHANNEL_CAPACITY: usize = 64;
 
 const BACKOFF_INITIAL_SECS: u64 = 1;
 const BACKOFF_CAP: Duration = Duration::from_secs(30);
@@ -144,9 +152,9 @@ where
     }
 }
 
-/// One applier task: applies each assembly event to `state` as it arrives.
-/// Exits when `rx` closes or `shutdown` fires.
-async fn apply_loop(mut rx: mpsc::Receiver<AssemblyEvent>, state: Arc<AppState>, mut shutdown: watch::Receiver<bool>) {
+/// One applier task: applies each compute-layer update to `state` as it
+/// arrives. Exits when `rx` closes or `shutdown` fires.
+async fn apply_loop(mut rx: mpsc::Receiver<StateUpdate>, state: Arc<AppState>, mut shutdown: watch::Receiver<bool>) {
     loop {
         tokio::select! {
             event = rx.recv() => {
@@ -159,14 +167,14 @@ async fn apply_loop(mut rx: mpsc::Receiver<AssemblyEvent>, state: Arc<AppState>,
 }
 
 /// Builds a fresh `S3Poller` and fresh channels, then runs the
-/// poller/assembly/applier trio to completion. Called once per attempt by
-/// `Pipeline::spawn`'s `supervise` factory — see this module's top-level
-/// doc comment for why the trio restarts together rather than
+/// poller/assembly/compute/applier quartet to completion. Called once per
+/// attempt by `Pipeline::spawn`'s `supervise` factory — see this module's
+/// top-level doc comment for why the quartet restarts together rather than
 /// independently. `status_tx` is a clone of the one sender created in
 /// `Pipeline::spawn` — see `S3Poller::new`'s doc comment for why every
 /// restart publishes into the same long-lived channel rather than a fresh
 /// one.
-async fn run_ingest_trio(
+async fn run_ingest_pipeline(
     site_id: String,
     state: Arc<AppState>,
     shutdown: watch::Receiver<bool>,
@@ -178,11 +186,13 @@ async fn run_ingest_trio(
     let poller = S3Poller::new(site_id, client, status_tx);
     let (chunk_tx, chunk_rx) = mpsc::channel::<ChunkEnvelope>(CHUNK_CHANNEL_CAPACITY);
     let (event_tx, event_rx) = mpsc::channel::<AssemblyEvent>(EVENT_CHANNEL_CAPACITY);
+    let (update_tx, update_rx) = mpsc::channel::<StateUpdate>(COMPUTE_CHANNEL_CAPACITY);
 
     tokio::join!(
         poller.run(chunk_tx, Arc::clone(&state), shutdown.clone(), poll_interval),
         assembly::run(chunk_rx, event_tx, AssemblyConfig::default(), shutdown.clone()),
-        apply_loop(event_rx, state, shutdown),
+        compute::compute_loop(event_rx, update_tx, Arc::clone(&state), shutdown.clone()),
+        apply_loop(update_rx, state, shutdown),
     );
 }
 
@@ -223,7 +233,7 @@ impl Pipeline {
             let factory_state = Arc::clone(&supervised_state);
             let factory_shutdown = supervised_shutdown.clone();
             supervise(TaskKind::IngestPipeline, &supervised_state, supervised_shutdown, move || {
-                run_ingest_trio(
+                run_ingest_pipeline(
                     site_id.clone(),
                     Arc::clone(&factory_state),
                     factory_shutdown.clone(),
@@ -239,23 +249,28 @@ impl Pipeline {
 
     /// Test seam (§4.5): skips `S3Poller` entirely, feeding chunks from
     /// `rx` (which the caller retains the paired `Sender` for) directly
-    /// into assembly. Runs assembly and the applier once, joined, with
-    /// their own shutdown arms — not wrapped in `supervise`, because `rx`
-    /// is a single-use resource (an `mpsc::Receiver` cannot be recreated
-    /// after a panic drops it, the same reason the production trio must
-    /// restart as a unit rather than independently). Panic-survival is
-    /// exercised generically instead, against `supervise` directly with a
-    /// synthetic repeatable task factory — see `tests::` below.
+    /// into assembly. Runs assembly, compute, and the applier once, joined,
+    /// with their own shutdown arms — not wrapped in `supervise`, because
+    /// `rx` is a single-use resource (an `mpsc::Receiver` cannot be
+    /// recreated after a panic drops it, the same reason the production
+    /// quartet must restart as a unit rather than independently).
+    /// Panic-survival is exercised generically instead, against `supervise`
+    /// directly with a synthetic repeatable task factory — see `tests::`
+    /// below.
     #[cfg(test)]
     fn spawn_from_chunks(rt: &Handle, rx: mpsc::Receiver<ChunkEnvelope>, state: Arc<AppState>) -> Self {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let applier_shutdown = shutdown_rx.clone();
+        let compute_state = Arc::clone(&state);
+        let compute_shutdown = shutdown_rx.clone();
 
         let handle = rt.spawn(async move {
             let (event_tx, event_rx) = mpsc::channel::<AssemblyEvent>(EVENT_CHANNEL_CAPACITY);
+            let (update_tx, update_rx) = mpsc::channel::<StateUpdate>(COMPUTE_CHANNEL_CAPACITY);
             tokio::join!(
                 assembly::run(rx, event_tx, AssemblyConfig::default(), shutdown_rx),
-                apply_loop(event_rx, state, applier_shutdown),
+                compute::compute_loop(event_rx, update_tx, compute_state, compute_shutdown),
+                apply_loop(update_rx, state, applier_shutdown),
             );
         });
 
