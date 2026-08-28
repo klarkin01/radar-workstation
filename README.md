@@ -7,25 +7,29 @@ same use case as [GR2Analyst](https://www.grlevelx.com/) (Windows-only, $250/lic
 
 ## Status
 
-**Stage 2 complete** (`docs/plans/stage-2-make-the-application-exist.md`).
+**Stage 3 complete** (`docs/plans/stage-3-compute-layer.md`).
 `cargo run --release -- KDOX` is a real, runnable program: it polls the live chunk
-stream, decodes and assembles volumes, and holds the current radar state in memory,
-printing state transitions to the terminal until you press Ctrl-D. It draws nothing yet
-— no window, no map, no radar image. Here is what exists and what doesn't:
+stream, decodes and assembles volumes, **grids every in-scope product for every sweep
+and derives Echo Tops/VIL for every completed volume**, and holds the current radar
+state in memory, printing state transitions — including per-product grid dimensions and
+fill fraction — to the terminal until you press Ctrl-D. It draws nothing yet — no
+window, no map, no radar image. Here is what exists and what doesn't:
 
 - **Implemented and tested:** the NEXRAD decoder (Message 31 parsing,
   `crates/nexrad-decoder`), the workspace-local HTTP/1.1 client
   (`crates/http-ingest`, [ADR-0014](docs/adr/0014-http-ingest-own-the-boundary.md)),
   the chunk ingest layer (S3 chunk-stream polling, chunk detection, BZ2
   decompression), the volume assembly state machine
-  ([ADR-0012](docs/adr/0012-volume-assembly-state-machine.md)), shared application
-  state ([ADR-0018](docs/adr/0018-shared-application-state.md)), the tokio
+  ([ADR-0012](docs/adr/0012-volume-assembly-state-machine.md)), the compute layer
+  (gridding, colour tables, Echo Tops/VIL —
+  [ADR-0020](docs/adr/0020-product-texture-representation.md),
+  [ADR-0021](docs/adr/0021-colour-table-format.md)), shared application state
+  ([ADR-0018](docs/adr/0018-shared-application-state.md)), the tokio
   runtime/task-supervision skeleton, the bundled WSR-88D site list, and configuration
   persistence ([ADR-0019](docs/adr/0019-config-format.md)) — all in
   `crates/radar-workstation`.
-- **Design-only, not yet code:** the compute layer and the render loop (egui/wgpu).
-  `main.rs`'s headless terminal loop is the placeholder Stage 4 replaces with real
-  rendering.
+- **Design-only, not yet code:** the render loop (egui/wgpu). `main.rs`'s headless
+  terminal loop is the placeholder Stage 4 replaces with real rendering.
 
 For something else you can run today, see `utility/` — `fetch-sample` and
 `decode-sample` (fetch and decode real chunk data from S3) and `radar-viz` (render a

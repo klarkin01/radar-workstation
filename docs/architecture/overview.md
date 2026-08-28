@@ -4,15 +4,17 @@
 entry point to the architecture directory. For the principles that govern every decision
 made here, see [PHILOSOPHY.md](../PHILOSOPHY.md).*
 
-> **Implementation status:** Stage 2 complete (`docs/plans/
-> stage-2-make-the-application-exist.md`). The NEXRAD decoder (Message 31), the
-> workspace-local HTTP/1.1 client (`crates/http-ingest`), the chunk ingest layer (S3
-> chunk-stream polling, chunk detection, BZ2 decompression), the volume assembly state
-> machine (ADR-0012), shared application state (ADR-0018), the runtime/supervision
-> skeleton (`pipeline.rs`), the bundled site list (`sites.rs`), and configuration
-> persistence (ADR-0019) are all implemented and tested — `cargo run --release -- KDOX`
-> is a real, runnable program. The compute layer and render loop described below are
-> still architecture, not yet code; `main.rs`'s headless placeholder loop is what Stage 4
+> **Implementation status:** Stage 3 complete (`docs/plans/
+> stage-3-compute-layer.md`). The NEXRAD decoder (Message 31), the workspace-local
+> HTTP/1.1 client (`crates/http-ingest`), the chunk ingest layer (S3 chunk-stream
+> polling, chunk detection, BZ2 decompression), the volume assembly state machine
+> (ADR-0012), the compute layer (gridding, colour tables, Echo Tops/VIL — ADR-0020,
+> ADR-0021), shared application state (ADR-0018), the runtime/supervision skeleton
+> (`pipeline.rs`), the bundled site list (`sites.rs`), and configuration persistence
+> (ADR-0019) are all implemented and tested — `cargo run --release -- KDOX` polls,
+> decodes, assembles, grids every in-scope product, and derives Echo Tops/VIL, all
+> visible in the headless output. The render loop described below is still
+> architecture, not yet code; `main.rs`'s headless placeholder loop is what Stage 4
 > replaces. See the root [README.md](../../README.md) for the full status statement.
 
 ---
@@ -72,7 +74,7 @@ application starts, runs, and exits cleanly as a normal user process.
 | GPU rendering | wgpu | Cross-platform Vulkan/OpenGL abstraction. Radar data rendered directly to GPU surface, bypassing egui's renderer. |
 | Async I/O | tokio | Non-blocking network I/O for radar data polling, tile fetching, and placefile retrieval. |
 | HTTP client | Custom HTTP/1.1 implementation (`crates/http-ingest`) | Workspace-local; no third-party HTTP client. Purpose-built for the S3 acquisition path, with a compile-time host allowlist. See ADR-0014. |
-| Data parallelism | rayon | CPU-bound product computation distributed across cores without blocking the render loop. |
+| Data parallelism | rayon (deferred pending measurement — see ADR-0005's erratum) | `tokio::task::spawn_blocking` runs gridding and derived-product computation off the async runtime's workers today; rayon is the next lever if a future workload crosses the measured trigger. |
 | Map vector data | Bundled shapefiles | Census TIGER/Line and Natural Earth data shipped with the binary. No runtime map API dependency. |
 | Map imagery | Pluggable XYZ tile providers | USGS National Map by default. Fetched on demand, cached to disk. Optional and toggleable. |
 | NEXRAD decoding | Custom implementation | Written against the NCEI Level II format specification. Owned entirely by this project. |
@@ -103,11 +105,20 @@ The NEXRAD acquisition path (chunk discovery and fetch) speaks HTTP through
 fuzz corpus and threat model (ADR-0014), not a general-purpose library shared with the
 tile or placefile paths. See [ADR-0014](../adr/0014-http-ingest-own-the-boundary.md).
 
-### Compute Layer (rayon)
-Receives decoded volume scans and derives products: Echo Tops, VIL, VILD, dual-pol
-products, and others. Work is distributed across CPU cores via rayon's thread pool.
-Results are written into shared application state when complete. Computation never
-blocks the UI or render loop.
+### Compute Layer
+**Implemented** (Stage 3, `crates/radar-workstation/src/compute/`). A fourth pipeline
+stage between assembly and the applier: grids every in-scope product on each closed
+sweep (reflectivity, velocity, spectrum width, ZDR, CC — `compute::grid`) and derives
+Echo Tops/VIL from the accumulating volume's reflectivity grids at volume close
+(`compute::derived`). Colour mapping is a 256-entry palette LUT compiled per product
+(`compute::palette`, GRLevelX `.pal` format, ADR-0021), not per-gate arithmetic
+(ADR-0020). Runs on `tokio::task::spawn_blocking`, not rayon, at this stage — gridding
+measured close to a `memcpy` (1.4 ms/sweep average), well under rayon's justification
+threshold; the derived-products pass measured above it, and is the recorded trigger to
+revisit (ADR-0005's erratum). Results are written into shared application state through
+the same applier the assembler used to write to directly. Computation never blocks the
+UI (which does not exist yet) or the poller — a live end-to-end test asserts
+`IngestStatus` stays `Polling` throughout.
 
 ### NEXRAD Decoder
 Parses raw NEXRAD Level II archive files into an internal volume scan representation.
@@ -118,8 +129,9 @@ correct.
 ### Shared Application State
 The single source of truth for radar data — **not** user settings or view state, which
 the render loop owns outright and never shares (see [ADR-0018](../adr/0018-shared-application-state.md),
-Q4's resolution). Holds the newest closed sweep per elevation, the last complete volume
-scan, and (from Stage 3 on) derived product textures. Written by the data pipeline and
+Q4's resolution). Holds the newest closed sweep per elevation **as gridded products**
+(not raw radials — released once gridded, S3-g), volume-derived products (Echo
+Tops/VIL), and metadata for the last complete volume. Written by the data pipeline and
 compute layer through a narrow apply/report API; read by the rendering subsystem every
 frame through a single `snapshot()` call that returns owned data. `Arc<AppState>`
 internally holds `RwLock<RadarState>` — one lock, scoped to radar data only, not an

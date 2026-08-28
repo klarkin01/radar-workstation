@@ -192,6 +192,23 @@ retires half of Q17 (`docs/open-questions.md`): standard-resolution gate geometr
 the azimuthal radial count differs (720 vs 360 radials per 360° sweep in the volumes
 measured). See `docs/architecture/rendering.md`'s Polar Grid Representation section.
 
+**Measured 2026-08-05 (Stage 3, S3-W1 §4.1): `az_angle` is the radial's bin *centre*,
+not its leading edge.** Measured directly against a full real KDOX volume
+(`downloads/KDOX_20260629_1811/`, not committed): for every radial on a 0.5°-spacing
+elevation, `(az_angle / 0.5) mod 1 ≈ 0.5` — e.g. consecutive angles `229.24896°,
+229.75159°, 230.24323°, 230.7486°, ...`, each sitting almost exactly half a bin above a
+multiple of the spacing, never *on* one. A leading-edge convention would put every
+measured angle at a whole multiple of the spacing instead (`229.0°, 229.5°, 230.0°,
+...`); the data does not show that. This settles the gridding convention
+`compute::grid::azimuth_slot` (`crates/radar-workstation/src/compute/grid.rs`) uses:
+`slot = floor(az_angle / spacing)`, not `round(az_angle / spacing)` — the latter would
+have silently rotated every image this application ever draws by a quarter of a bin
+(§4.1's stated risk; see also `docs/plans/stage-3-compute-layer.md` §11's Risks table).
+Cross-checked visually, not just by this measurement alone: `utility/radar-viz --path
+grid` (grid → LUT → PNG) and `--path radial` (the pre-existing nearest-radial → PPI
+path, unaffected by this convention) render the same real KDOX sweep pixel-for-pixel
+indistinguishably using this formula.
+
 #### Radial Status Codes (`radial_status`)
 
 | Code | Meaning                             | Notes                                          |
