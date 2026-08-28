@@ -14,6 +14,14 @@ allow = [
     "CDLA-Permissive-2.0",
     "Unicode-3.0",
     "bzip2-1.0.6",
+    # --- Stage 4 render stack (ADR-0022). Added one entry at a time per
+    # ADR-0022's process; each names a crate in the winit/wgpu/egui tree
+    # that requires it. All permissive; nothing copyleft beyond MPL-2.0
+    # appeared (that would have been an ADR-0009 question, not an edit).
+    "BSD-2-Clause",       # arrayref (via wgpu-hal), spirv
+    "Zlib",               # foldhash (via egui/ahash), tinyvec-macros already MIT
+    "OFL-1.1",            # epaint_default_fonts — bundled UI fonts (SIL Open Font License)
+    "Ubuntu-font-1.0",    # epaint_default_fonts — bundled Ubuntu font
 ]
 
 [bans]

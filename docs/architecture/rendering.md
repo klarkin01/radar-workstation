@@ -54,6 +54,42 @@ per frame is minimal.
 
 ---
 
+## GPU Adapter Selection
+
+*Added 2026-08-28, Stage 4 follow-up ([ADR-0024](../adr/0024-gpu-adapter-selection.md)).
+Supersedes S4-a's `PowerPreference::LowPower`.*
+
+The render loop must run on the GPU that **drives the display**. On a hybrid-GPU Linux
+box the lowest-power adapter is the integrated one, which frequently drives no connected
+output; a compositor that scans out only on the discrete GPU rejects the integrated
+adapter's swapchain dmabufs asynchronously, and the Wayland connection is torn down
+several frames after a "successful" init.
+
+So `render/gpu.rs` does not express a power preference. It enumerates every Vulkan/GL
+adapter, then `render/adapter.rs` **ranks** them: an adapter whose PCI address (or, on the
+GL backend, whose vendor/device id) matches a `connected` DRM connector discovered from
+`/sys/class/drm` wins; with no display information discoverable, a presentable discrete
+GPU is the tiebreak; a non-presentable adapter and (unless nothing else can present) a
+software rasteriser are excluded. Ranking is a prediction, so it is **verified by
+bring-up**: the first candidate that requests a device, configures the surface without a
+validation error, and yields one frame is kept. Exhausting the list is a clean
+`NoPresentableAdapter` error naming every adapter tried.
+
+A post-init presentation loss (the dmabuf case, which bring-up cannot catch) is turned
+into an accurate `PresentationLost` message — by a guard on the reconfigure path, and, as
+a fallback, by mapping any event-loop error that lands within 10 s of the first frame to
+the same cause. Never a bare `Exit Failure: 1`, and never a mid-session adapter switch.
+
+**Override.** `RADAR_GPU` bypasses ranking (not the bring-up check): a PCI address
+(`0000:01:00.0`), a case-insensitive adapter-name substring (`nvidia`), or `discrete` /
+`integrated`. An unmatched value lists the available adapters and exits non-zero.
+`WGPU_BACKEND` still pins the backend; nothing else in the environment affects selection.
+
+The startup line names the adapter and why it was chosen, e.g.
+`GPU: NVIDIA GeForce RTX 4070 SUPER (Vulkan, 0000:01:00.0) — matched connected display`.
+
+---
+
 ## Coordinate System
 
 All geospatial rendering uses a single coordinate space: **azimuthal equidistant
@@ -96,12 +132,18 @@ Layers are composited by wgpu in this order, back to front:
 | 3 | County boundaries | Bundled shapefile | Always visible. |
 | 4 | State / country boundaries | Bundled shapefile | Always visible. Slightly thicker line weight than counties. |
 | 5 | Major highways | Bundled shapefile | Toggleable. Shown at all zoom levels. |
-| 6 | Radar data | Derived product textures | The primary content. Alpha-composited over map layers. |
+| 6 | Radar data | Selected gridded product texture | The primary content. Alpha-composited over map layers. |
+| 6a | Reference geometry | Range rings, azimuth spokes, site marker (Stage 4) | `LineList` in world metres through the view uniform. Toggled by `R`. Chrome of the same kind as the radar image; drawn with it. Ring labels drawn by egui. |
 | 7 | Placefile overlays | Parsed placefile data | Drawn per-placefile in user-configured order. |
-| 8 | Radar site markers | Bundled site list | Small icon + ICAO label. Clickable for site selection. |
+| 8 | Radar site markers | Bundled site list | Small icon + ICAO label. Clickable for site selection (Stage 7). Stage 4 draws only the active site's marker, as part of layer 6a. |
 | 9 | City labels | Bundled label data | Appear above a zoom threshold only. |
 
 egui UI chrome is composited on top of all wgpu layers by the egui render pass.
+
+**Stage 4 status:** only layers 1, 6, 6a, and 8 (active-site marker) have a data source
+today. Layers 2–5, 7, and 9 are gated on Stages 5–6 (Q15, Q16, Q6). The two-pass frame
+(pass 1: clear + scene; pass 2: egui) does not change as those layers land — they slot
+into pass 1 in this order.
 
 ---
 
@@ -192,6 +234,31 @@ than memory: it would fabricate radials the antenna never measured. Full rationa
 The polar grid is mapped to the azimuthal equidistant projection coordinate space by the
 vertex shader — that mechanism does not depend on the specific gate/azimuth resolution.
 
+<!-- corrected 2026-08-28 (Stage 4, S4-b / ADR-0023): the mapping is done in the
+**fragment** shader, not the vertex shader. The radar pass draws one full-screen
+triangle; per covered pixel the fragment shader inverse-maps screen -> (ground range,
+azimuth), converts ground range to slant range with the 4/3-earth model
+(`compute::geometry::slant_range_and_height`'s closed form, skipped for the ground-range
+derived products), computes the gate index and the azimuth slot
+(`floor(az / spacing)`, matching `compute::grid::azimuth_slot`), does one `textureLoad`
+against the `R8Uint` grid and one lookup into a 256-entry palette LUT uniform. There is
+no mesh and no per-vertex projection; a pre-projected polar mesh was rejected because it
+would re-introduce per-sweep CPU tessellation and break FR-RP-7. See ADR-0023 for the
+rejected alternatives and their failure modes. -->
+
+### Frame pacing (Stage 4, S4-c / ADR-0022)
+
+FR-DR-5's "target 60 fps" protects two things: that *interaction* is smooth, and that a
+*new scan does not stutter*. Rendering 60 frames a second of an unchanged image in four
+processes for a multi-hour session serves neither the operator nor the machine. So the
+render loop is **redraw-on-demand plus a 2 Hz idle tick**: `ControlFlow::WaitUntil(now +
+500 ms)`, with a redraw requested on any input event, on resize, on egui's own repaint
+request (`viewport_output[..].repaint_delay`, honoured when shorter than the idle tick),
+and on an idle tick when `AppState::snapshot().revision` changed or the time-derived
+chrome text (data age) changed. `PresentMode::Fifo` (vsync) caps an interaction burst at
+the display rate. 60 fps under sustained pan/zoom and no stutter on scan arrival are met
+by measurement (plan §14), not by burning cycles when nothing is happening.
+
 ### Transparency
 
 Radar data below the minimum displayable threshold (typically 0 dBZ for reflectivity)
@@ -257,14 +324,15 @@ is never disrupted by data updates.
 
 These are design targets, not benchmarks. They should be validated during development.
 
-| Metric | Target |
-|---|---|
-| Frame rate (steady state) | 60 fps |
-| Frame rate (new scan upload) | No perceptible drop |
-| Time to first render after launch | < 2 seconds |
-| Time to display after site change | < 5 seconds on normal connection |
-| Memory per instance (steady state) | < 200MB |
-| GPU memory per instance | < 128MB |
+| Metric | Target | Stage 4 measurement |
+|---|---|---|
+| Frame rate (steady state / interaction) | 60 fps | Not measured on-device: the build environment is a nested compositor without Vulkan surface support (see plan §16). Offscreen render verified; on-screen frame timing is a gap for a real-display session. |
+| Frame rate (new scan upload) | No perceptible drop | `revision`-gated re-upload; `plan_sync` uploads only changed grids. Not timed on-device. |
+| Frame rate (idle) | ~2 fps by design (S4-c) | By construction: `ControlFlow::WaitUntil(now + 500 ms)`. |
+| Time to first render after launch | < 2 seconds | Not measured on-device. Palette load is < 50 ms (regression-guarded); pipeline compilation is the remaining cost. |
+| Memory per instance (steady state) | < 200 MB | Not measured on-device; Stage 3 headless was ~147 MB. |
+| GPU memory per instance | < 128 MB | Stage 3 measured 37.28 MB grids + 2.52 MB derived; the surface, LUT uniforms (4 KB each, ≤32), and egui atlas add little. Not measured on-device. |
+| Texture uploads across a product/sweep switch | 0 (FR-RP-7) | **0** — `plan_sync` unit tests assert an empty upload list for both. |
 
 ---
 

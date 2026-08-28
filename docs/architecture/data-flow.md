@@ -45,8 +45,11 @@ External Sources
 > (`crates/radar-workstation`, `crates/nexrad-decoder`) — see
 > `crates/radar-workstation/src/{assembly,compute,state,pipeline.rs,config}`. `main.rs`
 > runs the full poller → assembly → compute → applier quartet end to end, through
-> `AppState`, today. The render loop described below is still architecture, not yet
-> code — that is Stage 4.
+> `AppState`, today. **Stage 4 (2026-08-28):** the render loop described below is
+> implemented (`crates/radar-workstation/src/render/`, ADR-0022/ADR-0023). It reads
+> `AppState` once per frame through `snapshot()`, holds no lock, and owns view state
+> (`render::ViewState`) outright — never writing back. Map/tile/placefile layers are
+> still unbuilt.
 
 ---
 

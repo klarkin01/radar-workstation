@@ -211,6 +211,15 @@ impl EventLog {
         self.entries.len()
     }
 
+    /// The most recent `max` events, newest last, each formatted through
+    /// [`Event`]'s `Display` impl — `Event` is not `Clone`, and the status
+    /// bar (S4-W6 §9.1, NFR-ST-3) only ever needs the text. Formatting
+    /// happens while the caller holds `AppState`'s mutex; keep `max` small.
+    pub fn recent(&self, max: usize) -> Vec<(std::time::Instant, String)> {
+        let skip = self.entries.len().saturating_sub(max);
+        self.entries.iter().skip(skip).map(|(at, event)| (*at, event.to_string())).collect()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }

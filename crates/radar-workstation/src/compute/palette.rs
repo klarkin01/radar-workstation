@@ -58,6 +58,18 @@ impl Palette {
         !self.entries.is_empty()
     }
 
+    /// The first and last entry thresholds (S4-W6 §9.2): the physical-value
+    /// span the legend strip samples across. `None` when the palette has no
+    /// entries — `load_all` guarantees that never happens for a bundled or
+    /// well-formed user palette, but the accessor is honest about the empty
+    /// case rather than inventing a range.
+    pub fn threshold_range(&self) -> Option<(f32, f32)> {
+        match (self.entries.first(), self.entries.last()) {
+            (Some(first), Some(last)) => Some((first.threshold, last.threshold)),
+            _ => None,
+        }
+    }
+
     /// Colour for a physical value. Below the first threshold (or when the
     /// palette has no entries at all) is [`Self::no_data`] — FR-DR-4: below
     /// the minimum displayable threshold renders fully transparent by
@@ -380,6 +392,18 @@ mod tests {
         let text = "SolidColor: not-a-number 1 1 1\n";
         let (_palette, events) = parse(text, DisplayProduct::Reflectivity);
         assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    fn threshold_range_spans_first_to_last_entry() {
+        let text = "SolidColor: -32 0 0 0\nSolidColor: 0 128 128 128\nSolidColor: 75 255 255 255\n";
+        let (palette, _events) = parse(text, DisplayProduct::Reflectivity);
+        assert_eq!(palette.threshold_range(), Some((-32.0, 75.0)));
+    }
+
+    #[test]
+    fn threshold_range_of_an_empty_palette_is_none() {
+        assert_eq!(Palette::empty(DisplayProduct::Reflectivity).threshold_range(), None);
     }
 
     #[test]

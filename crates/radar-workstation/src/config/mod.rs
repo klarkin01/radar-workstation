@@ -18,6 +18,7 @@ mod save;
 use std::path::Path;
 use std::time::Duration;
 
+use crate::compute::DisplayProduct;
 use crate::event::Event;
 use crate::ingest::s3_poll;
 use crate::sites::{self, Site};
@@ -31,6 +32,17 @@ pub const POLL_INTERVAL_MAX: Duration = Duration::from_secs(60);
 
 const SITE_KEY: &str = "site";
 const POLL_INTERVAL_KEY: &str = "ingest.poll_interval_seconds";
+pub const WINDOW_WIDTH_KEY: &str = "window.width";
+pub const WINDOW_HEIGHT_KEY: &str = "window.height";
+pub const VIEW_PRODUCT_KEY: &str = "view.product";
+
+/// Window-geometry clamp bounds (S4-W7 §10). Out-of-range values fall back
+/// to the built-in default and report `ConfigValueInvalid` rather than
+/// being silently clamped — a saved geometry that doesn't fit the current
+/// display is an operator-visible surprise worth flagging, unlike the poll
+/// interval, which is clamped because any value in range is still safe.
+pub const WINDOW_WIDTH_RANGE: std::ops::RangeInclusive<u32> = 640..=7680;
+pub const WINDOW_HEIGHT_RANGE: std::ops::RangeInclusive<u32> = 480..=4320;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
@@ -40,11 +52,24 @@ pub struct Config {
     /// what the *file* said.
     pub site: Option<&'static Site>,
     pub poll_interval: Duration,
+    /// `None` when the file carried no valid `window.width` — the render
+    /// loop (S4-W1 §4.2) supplies its own 1280×800 default. Same for
+    /// `window_height` and `view_product`. Persisted back only on a clean
+    /// shutdown, and only when actually changed (§10).
+    pub window_width: Option<u32>,
+    pub window_height: Option<u32>,
+    pub view_product: Option<DisplayProduct>,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { site: None, poll_interval: s3_poll::DEFAULT_POLL_INTERVAL }
+        Self {
+            site: None,
+            poll_interval: s3_poll::DEFAULT_POLL_INTERVAL,
+            window_width: None,
+            window_height: None,
+            view_product: None,
+        }
     }
 }
 
@@ -99,11 +124,41 @@ fn apply_key(config: &mut Config, key: &str, value: String, events: &mut Vec<Eve
             }
             Err(_) => events.push(Event::ConfigValueInvalid { key: key.to_string(), value }),
         },
+        WINDOW_WIDTH_KEY => {
+            config.window_width = parse_dimension(key, &value, WINDOW_WIDTH_RANGE, events);
+        }
+        WINDOW_HEIGHT_KEY => {
+            config.window_height = parse_dimension(key, &value, WINDOW_HEIGHT_RANGE, events);
+        }
+        VIEW_PRODUCT_KEY => match DisplayProduct::parse(&value) {
+            Some(product) => config.view_product = Some(product),
+            None => events.push(Event::ConfigValueInvalid { key: key.to_string(), value }),
+        },
         // Unrecognized but syntactically valid keys are ignored, not
         // reported: they may be a newer version's setting this binary
         // doesn't know about yet (NFR-P-1's multi-instance, multi-version
         // file sharing), and `save` already preserves them untouched.
         _ => {}
+    }
+}
+
+/// A window dimension: parsed as `u32`, accepted only within `range`.
+/// Anything else (non-numeric, or numeric but out of range) is `None` plus
+/// one `ConfigValueInvalid`, so the render loop falls back to its own
+/// default — §10's "out of range → default + `ConfigValueInvalid`", not a
+/// silent clamp.
+fn parse_dimension(
+    key: &str,
+    value: &str,
+    range: std::ops::RangeInclusive<u32>,
+    events: &mut Vec<Event>,
+) -> Option<u32> {
+    match value.parse::<u32>() {
+        Ok(n) if range.contains(&n) => Some(n),
+        _ => {
+            events.push(Event::ConfigValueInvalid { key: key.to_string(), value: value.to_string() });
+            None
+        }
     }
 }
 
@@ -202,6 +257,50 @@ mod tests {
         let (config, events) = load(&path);
         assert_eq!(config, Config::default());
         assert!(matches!(events.as_slice(), [Event::ConfigUnreadable { .. }]));
+    }
+
+    #[test]
+    fn window_geometry_and_product_load_when_valid() {
+        let path = temp_config_path("view-keys-valid");
+        std::fs::write(&path, "window.width = 1600\nwindow.height = 900\nview.product = vel\n").unwrap();
+
+        let (config, events) = load(&path);
+        assert!(events.is_empty(), "{events:?}");
+        assert_eq!(config.window_width, Some(1600));
+        assert_eq!(config.window_height, Some(900));
+        assert_eq!(config.view_product, Some(DisplayProduct::Velocity));
+    }
+
+    #[test]
+    fn out_of_range_window_dimension_falls_back_to_none_and_is_reported() {
+        let path = temp_config_path("window-out-of-range");
+        std::fs::write(&path, "window.width = 100\nwindow.height = 999999\n").unwrap();
+
+        let (config, events) = load(&path);
+        assert_eq!(config.window_width, None);
+        assert_eq!(config.window_height, None);
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|e| matches!(e, Event::ConfigValueInvalid { .. })));
+    }
+
+    #[test]
+    fn unknown_view_product_falls_back_to_none_and_is_reported() {
+        let path = temp_config_path("bad-view-product");
+        std::fs::write(&path, "view.product = sleet\n").unwrap();
+
+        let (config, events) = load(&path);
+        assert_eq!(config.view_product, None);
+        assert!(matches!(events.as_slice(), [Event::ConfigValueInvalid { key, .. }] if key == VIEW_PRODUCT_KEY));
+    }
+
+    #[test]
+    fn non_numeric_window_dimension_is_reported() {
+        let path = temp_config_path("non-numeric-window");
+        std::fs::write(&path, "window.width = wide\n").unwrap();
+
+        let (config, events) = load(&path);
+        assert_eq!(config.window_width, None);
+        assert!(matches!(events.as_slice(), [Event::ConfigValueInvalid { .. }]));
     }
 
     #[test]

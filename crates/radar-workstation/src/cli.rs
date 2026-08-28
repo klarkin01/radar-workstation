@@ -11,6 +11,10 @@ use radar_workstation::sites::{self, Site};
 pub struct Args {
     pub site: Option<String>,
     pub config_path: Option<PathBuf>,
+    /// Run the Stage 2 headless loop instead of the render loop (S4-e).
+    /// The only way to run the pipeline where there is no display or GPU —
+    /// a server, a container, CI. `tests/pipeline_live.rs` depends on it.
+    pub headless: bool,
 }
 
 pub enum ParseOutcome {
@@ -33,12 +37,14 @@ where
 
     let mut site = None;
     let mut config_path = None;
+    let mut headless = false;
 
     while let Some(arg) = iter.next() {
         let arg_str = arg.to_string_lossy().into_owned();
         match arg_str.as_str() {
             "--help" | "-h" => return ParseOutcome::Help,
             "--version" | "-V" => return ParseOutcome::Version,
+            "--headless" => headless = true,
             "--config" => match iter.next() {
                 Some(path) => config_path = Some(PathBuf::from(path)),
                 None => return ParseOutcome::Error("--config requires a PATH argument".to_string()),
@@ -53,7 +59,7 @@ where
         }
     }
 
-    ParseOutcome::Args(Args { site, config_path })
+    ParseOutcome::Args(Args { site, config_path, headless })
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -81,18 +87,20 @@ pub fn resolve_site(
 }
 
 pub fn print_usage() {
-    eprintln!("usage: radar-workstation [SITE] [--config PATH] [--help] [--version]");
+    eprintln!("usage: radar-workstation [SITE] [--config PATH] [--headless] [--help] [--version]");
     eprintln!("example site IDs: KDOX, KTLH, KABR, KAMA");
 }
 
 pub fn print_help() {
     println!("radar-workstation — single-site NEXRAD Level II radar analysis");
     println!();
-    println!("usage: radar-workstation [SITE] [--config PATH] [--help] [--version]");
+    println!("usage: radar-workstation [SITE] [--config PATH] [--headless] [--help] [--version]");
     println!();
     println!("  SITE            ICAO site identifier (e.g. KDOX). Overrides the");
     println!("                  configured default site for this run only.");
     println!("  --config PATH   Use PATH instead of the default config file location.");
+    println!("  --headless      Run the pipeline with no window (for a server, a");
+    println!("                  container, or CI); print state transitions to stdout.");
     println!("  --help, -h      Print this message and exit.");
     println!("  --version, -V   Print the version and exit.");
 }
@@ -154,6 +162,18 @@ mod tests {
     fn version_flag_short_circuits() {
         assert!(matches!(parse_args(&["--version"]), ParseOutcome::Version));
         assert!(matches!(parse_args(&["-V"]), ParseOutcome::Version));
+    }
+
+    #[test]
+    fn headless_flag_is_recognized_and_off_by_default() {
+        match parse_args(&["KDOX"]) {
+            ParseOutcome::Args(args) => assert!(!args.headless),
+            _ => panic!("expected Args"),
+        }
+        match parse_args(&["KDOX", "--headless"]) {
+            ParseOutcome::Args(args) => assert!(args.headless),
+            _ => panic!("expected Args"),
+        }
     }
 
     #[test]
