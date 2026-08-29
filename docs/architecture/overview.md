@@ -13,9 +13,14 @@ made here, see [PHILOSOPHY.md](../PHILOSOPHY.md).*
 > (`pipeline.rs`), the bundled site list (`sites.rs`), and configuration persistence
 > (ADR-0019) are all implemented and tested — `cargo run --release -- KDOX` polls,
 > decodes, assembles, grids every in-scope product, and derives Echo Tops/VIL, all
-> visible in the headless output. The render loop described below is still
-> architecture, not yet code; `main.rs`'s headless placeholder loop is what Stage 4
-> replaces. See the root [README.md](../../README.md) for the full status statement.
+> visible in the headless output. **Stage 4 (2026-08-28):** the render loop described
+> below is now implemented (winit + wgpu + egui, ADR-0022/ADR-0023,
+> `crates/radar-workstation/src/render/`) — `cargo run --release -- KDOX` opens a window
+> and draws the radar. `--headless` runs the terminal loop above instead. View state
+> (pan, zoom, active product/sweep) is genuinely owned by `render::ViewState` and never
+> enters `AppState`. Map underlays, tiles, and placefiles (layers 2–5, 7, 9) remain
+> unbuilt — Stages 5–6. See the root [README.md](../../README.md) for the full status
+> statement.
 
 ---
 

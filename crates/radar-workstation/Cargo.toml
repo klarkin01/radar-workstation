@@ -13,5 +13,23 @@ bytes = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util"] }
 quick-xml = "0.41"
 
+# Stage 4 render stack (ADR-0022). Own the event loop, surface, and swapchain
+# directly — winit drives the window, wgpu owns device/queue/surface,
+# egui-winit translates input, egui-wgpu renders egui into our surface. Not
+# eframe: rendering.md describes egui and wgpu sharing a window but not a
+# pipeline, which eframe inverts. Versions pinned per ADR-0022's table: the
+# egui crates are released together at one version, and wgpu/winit are the
+# exact versions egui-wgpu 0.36 / egui-winit 0.36 depend on.
+egui = "=0.36.1"
+egui-wgpu = "=0.36.1"
+egui-winit = { version = "=0.36.1", default-features = false, features = ["links", "wayland", "x11"] }
+wgpu = { version = "=30.0.1", default-features = false, features = ["wgsl", "vulkan", "gles"] }
+# default-features = false drops winit's `wayland-csd-adwaita` fallback
+# decoration path, which pulls the unmaintained `ttf-parser` (RUSTSEC-2026-0192)
+# via `sctk-adwaita`. The compositor draws our decorations; we do not need
+# egui-drawn client-side decorations. x11 + wayland + the dlopen loaders are
+# what a Linux-only target (BC-1, deny.toml `[graph].targets`) actually uses.
+winit = { version = "=0.30.13", default-features = false, features = ["x11", "wayland", "wayland-dlopen", "rwh_06"] }
+
 [dev-dependencies]
 fuzz-support = { path = "../fuzz-support" }

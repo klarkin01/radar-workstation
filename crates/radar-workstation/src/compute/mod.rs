@@ -34,7 +34,7 @@ pub use grid::SweepGrid;
 /// `nexrad_decoder::ProductKind` because it also covers products the
 /// decoder never sees (Echo Tops, VIL) and excludes the moments Q8
 /// deferred (PHI, CFP).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DisplayProduct {
     Reflectivity,
     Velocity,
@@ -77,6 +77,15 @@ impl DisplayProduct {
     /// volume-derived product (Echo Tops, VIL) that has no source moment.
     pub fn source_moment(self) -> Option<ProductKind> {
         Self::BASE.iter().find(|(p, _)| *p == self).map(|(_, k)| *k)
+    }
+
+    /// Inverse of the [`std::fmt::Display`] impl (S4-W7 §10): parses the
+    /// user-facing short name back to a product. Round-trips over
+    /// [`Self::ALL`] — the `config` `view.product` key and any future
+    /// CLI/flag use this rather than inventing a second name set, which
+    /// would violate DRY and drift.
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.to_string() == s)
     }
 }
 
@@ -257,5 +266,25 @@ async fn handle_event(
             tx.send(StateUpdate::VolumeClosed { summary }).await.is_ok()
         }
         other => tx.send(StateUpdate::Info(other)).await.is_ok(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DisplayProduct;
+
+    #[test]
+    fn display_product_parse_round_trips_over_all() {
+        for product in DisplayProduct::ALL {
+            let name = product.to_string();
+            assert_eq!(DisplayProduct::parse(&name), Some(product), "{name} must round-trip");
+        }
+    }
+
+    #[test]
+    fn display_product_parse_rejects_unknown() {
+        assert_eq!(DisplayProduct::parse("bogus"), None);
+        assert_eq!(DisplayProduct::parse(""), None);
+        assert_eq!(DisplayProduct::parse("REF"), None, "parse is case-sensitive on the canonical short name");
     }
 }

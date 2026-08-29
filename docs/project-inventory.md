@@ -11,13 +11,18 @@ This is an inventory, not a plan. It records what exists, what does not, and the
 which the missing work should be taken up. It does not decide any open question, propose a
 design, or estimate effort in hours.
 
-> **Superseded for current state, 2026-08-05:** Stages 2 and 3 (items 6–13 below) are
-> complete — see `docs/plans/stage-2-make-the-application-exist.md` §12 and
-> `docs/plans/stage-3-compute-layer.md` §15 for what was built and measured. This
-> document's numbers (test counts, LOC, open-question counts) reflect the `668b1ca`
-> snapshot and are not re-audited here; each plan's own Results section is the current
-> source of truth for its stage, the same relationship `dependency-inventory.md` has to
-> its own remediation plan.
+> **Superseded for current state, 2026-08-28:** Stages 2, 3, and 4 (items 6–18 below) are
+> complete — see `docs/plans/stage-2-make-the-application-exist.md` §12,
+> `docs/plans/stage-3-compute-layer.md` §15, and
+> `docs/plans/stage-4-first-pixels.md` §16 for what was built and measured. Stage 4 put
+> the radar image on screen: a winit/wgpu/egui render loop (ADR-0022, ADR-0023) drawing
+> the selected gridded product in azimuthal-equidistant projection over range rings and a
+> site marker, with keyboard product/sweep switching, a cursor readout, a colour legend,
+> and a status bar. `--headless` runs the Stage 2 loop. Map underlays, tiles, and
+> placefiles (Stages 5–6) remain unbuilt. This document's numbers (test counts, LOC,
+> package counts, open-question counts) reflect the `668b1ca` snapshot and are not
+> re-audited here; each plan's own Results section is the current source of truth for its
+> stage, the same relationship `dependency-inventory.md` has to its own remediation plan.
 
 ---
 

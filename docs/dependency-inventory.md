@@ -549,3 +549,56 @@ apples-to-apples.
 Stale `target/release/build/aws-lc-sys-*` directories remain on disk from before the
 refactor. They are build cache, not graph members — `cargo clean` removes them, and
 `Cargo.lock` confirms the dependency is gone.
+
+---
+
+## Addendum — Stage 4 render stack (2026-08-28)
+
+Written against the post-Stage-4 tree. ADR-0022 is the decision record; this is the
+dependency-posture accounting the plan (§1, §12) requires be kept here rather than only
+in the ADR.
+
+**Five direct dependencies added** to `crates/radar-workstation`: `winit =0.30.13`,
+`wgpu =30.0.1`, `egui =0.36.1`, `egui-wgpu =0.36.1`, `egui-winit =0.36.1`. Versions are
+pinned with `=` and matched to `egui-wgpu`/`egui-winit`'s own manifests, not guessed
+(ADR-0022's table). `winit` and `wgpu` carry `default-features = false` with an explicit
+feature list — see below.
+
+| Metric | Before (Stage 3) | After (Stage 4) |
+|---|---|---|
+| `Cargo.lock` package count | 67 | 337 |
+| Release binary size (bytes) | 2,964,688 | 17,546,712 |
+| Crates with a duplicate version | 2 (getrandom, windows-sys — both assessed benign) | 8: `getrandom`, `hashbrown`, `linux-raw-sys`, `rustc-hash`, `rustix`, `syn`, `thiserror`(+`-impl`) |
+| `cargo audit` | clean | clean |
+| `cargo deny check` | clean | clean (licence allowlist +4) |
+| `unsafe` in first-party code | 0 | 0 (`render/` included, tests included) |
+
+**This is the largest single dependency step the project will take** (roughly 5×). It is
+recorded as a decision (NFR-SEC-2), not absorbed silently. The plan estimated
+~230–260 packages; the real figure is 337, driven mostly by `naga` (the WGSL compiler),
+`wgpu-hal`'s backend crates, and egui's text stack (`skrifa`, `harfrust`, `epaint`,
+`vello_cpu`).
+
+**Licence allowlist expansion** (`deny.toml`), one entry at a time, each commented with
+the requiring crate: `BSD-2-Clause` (arrayref, via wgpu-hal), `Zlib` (foldhash, via
+egui/ahash), `OFL-1.1` + `Ubuntu-font-1.0` (`epaint_default_fonts` — egui's bundled UI
+fonts). All permissive. **Nothing copyleft beyond `MPL-2.0` appeared** — had it, ADR-0009
+says stop and treat it as an open-source-scope question, not a `deny.toml` edit.
+
+**`ttf-parser` (RUSTSEC-2026-0192, "unmaintained")** would have entered the tree via
+`winit`'s default `wayland-csd-adwaita` feature → `sctk-adwaita` → `ab_glyph` →
+`owned_ttf_parser`. `winit` is added with that feature omitted (the compositor draws our
+window decorations; we do not need egui-drawn client-side ones), so the advisory does
+**not** appear. `cargo audit` and `cargo deny check advisories` are both clean.
+
+**Duplicate versions** (`[bans].multiple-versions = "warn"`, unchanged): the 8 duplicated
+crates are proc-macro / `no_std`-helper splits deep in the build graph
+(`syn` 1↔2, `thiserror` 1↔2, `rustix`/`linux-raw-sys` old↔new, `hashbrown` 0.16↔0.17,
+`rustc-hash` 1↔2, `getrandom` 0.2/0.3/0.4). None is runtime-code divergence in the
+application's own path. Assessed benign, consistent with §6's posture; not skipped in
+`deny.toml`.
+
+**Binary size** (+14.6 MB) is dominated by egui's bundled fonts (~1–2 MB compressed,
+larger uncompressed in the binary) and the naga/wgpu code. The fonts stay for Stage 4 —
+the status bar, legend, and cursor readout need real text. Font trimming (a reduced glyph
+set, or a smaller face) is a Stage 8 packaging lever, not a Stage 4 optimisation.

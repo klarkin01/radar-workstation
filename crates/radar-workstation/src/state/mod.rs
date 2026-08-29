@@ -233,6 +233,14 @@ impl AppState {
         self.events.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(event);
     }
 
+    /// The most recent `max` reported events as formatted strings, newest
+    /// last (S4-W6 §9.1). This is the reader [`EventLog`] was written for —
+    /// NFR-ST-3's status bar. Briefly takes the event mutex; `max` is
+    /// expected to be a handful.
+    pub fn recent_events(&self, max: usize) -> Vec<(Instant, String)> {
+        self.events.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).recent(max)
+    }
+
     #[cfg(test)]
     pub(crate) fn event_log_len(&self) -> usize {
         self.events.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).len()
@@ -298,5 +306,17 @@ mod tests {
         assert_eq!(state.event_log_len(), 0);
         state.report(Event::UnrecognizedKeySuffix { key: "KDOX/166/x".to_string() });
         assert_eq!(state.event_log_len(), 1);
+    }
+
+    #[test]
+    fn recent_events_returns_the_newest_formatted_last_and_bounded_by_max() {
+        let state = app_state();
+        for n in 0..5 {
+            state.report(Event::ConfigLineUnparseable { line: n });
+        }
+        let recent = state.recent_events(3);
+        assert_eq!(recent.len(), 3, "capped at max");
+        assert!(recent.last().unwrap().1.contains("line 4"), "newest event is last: {:?}", recent.last());
+        assert!(recent.first().unwrap().1.contains("line 2"), "oldest of the window is first");
     }
 }

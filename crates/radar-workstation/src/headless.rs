@@ -1,10 +1,14 @@
-//! Stage 2's placeholder for the render loop (S2-W2 §4.1). Blocks the main
-//! thread, printing a line whenever shared state changes, until stdin
-//! reaches EOF — the only clean shutdown trigger available before there is
-//! a window to close (S2-i: real signal handling is deferred to Stage 4's
-//! window-close event, which supersedes this module rather than extending
-//! it). `main.rs` replaces exactly the one call into this module with the
-//! winit/egui event loop; nothing else about `main`'s shape changes.
+//! The headless run mode (`--headless`). Blocks the main thread, printing a
+//! line whenever shared state changes, until stdin reaches EOF.
+//!
+//! **Stage 4 (S4-e, 2026-08-28):** this is no longer a placeholder. `main`
+//! branches once — `if args.headless { headless::run(&state) } else {
+//! render::run(...) }` — and this path is the *supported* way to run the
+//! pipeline where there is no display or GPU: a server, a container, CI.
+//! `tests/pipeline_live.rs` depends on it. The Stage 2 note about deferring
+//! signal handling to a window-close event still holds for the render path;
+//! here, stdin EOF (Ctrl-D, or an immediate close when stdin isn't a live
+//! terminal) remains the clean shutdown trigger.
 
 use std::fmt::Write as _;
 use std::io::BufRead;
