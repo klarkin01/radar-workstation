@@ -110,22 +110,24 @@ aware of or blocked by pipeline activity.
 ### NEXRAD Polling Task
 
 The chunk bucket keys objects as `SITE/<volume-sequence>/<timestamp>-<n>-<kind>`, where
-`<volume-sequence>` is an unpadded, monotonically increasing per-site integer that does
-not sort lexically in numeric order (`"78"` sorts after `"709"`). The poller therefore
-tracks position as a volume-sequence number rather than a flat key scan; see
-`crates/radar-workstation/src/ingest/s3_poll.rs` (`S3Poller::poll_once`) for the
+`<volume-sequence>` is an unpadded per-site **cyclic counter over 1–999** — it rolls
+`999 → 1` (observed 2026-09-03) and is *not* monotonically increasing, and it also does
+not sort lexically in numeric order (`"78"` sorts after `"709"`). The poller tracks
+position as a `VolumeSeq` (`crates/radar-workstation/src/ingest/volume_seq.rs`), which
+carries no `Ord`; ordering across a possibly-wrapped listing comes from `VolumeWindow`.
+See `crates/radar-workstation/src/ingest/s3_poll.rs` (`S3Poller::poll_once`) for the
 authoritative implementation.
 
 ```
 1. On startup, resolve the selected radar site identifier (e.g. KTLX) and list the site
    prefix with delimiter=/ (list_volume_folders) to enumerate volume-sequence directories
    as CommonPrefixes, parsed numerically
-2. Anchor cold start one behind the newest known volume (cold_start_baseline), so the
-   first poll fetches the current volume rather than replaying the full 24-hour
-   retention window
-3. Each poll, list the single volume-sequence directory last_completed_volume + 1 via
-   ListObjectsV2, using start-after within that directory only — fixed-width
-   <timestamp>-<n>-<kind> filenames make lexical order chronological there
+2. Anchor cold start to the newest retained volume (cold_start_target, wrap-aware via
+   VolumeWindow), so the first poll fetches the current volume rather than replaying the
+   full retention window (observed ~48 h, not contractual)
+3. Each poll, list the single volume-sequence directory `target` via ListObjectsV2, using
+   start-after within that directory only — fixed-width <timestamp>-<n>-<kind> filenames
+   make lexical order chronological there
 4. Classify each new key by its -S / -I / -E suffix and fetch chunk bodies sequentially
    (ADR-0014: the client holds one keepalive connection, no connection pool)
 5. Decompress each chunk (strip the volume header for -S; BZ2-decompress the block(s))
@@ -133,8 +135,8 @@ authoritative implementation.
 7. Feed the decoded radials to the volume assembly state machine (ADR-0012), which
    accumulates them into the in-progress VolumeScan and signals the compute layer as
    each sweep closes
-8. On seeing an -E chunk, advance to the next volume-sequence directory for the
-   following poll
+8. On seeing an -E chunk, advance `target` to the next volume-sequence directory
+   (successor function, rolls 999 → 1) for the following poll
 9. Sleep for the configured polling interval (implementation default: 5 seconds)
 10. Repeat from step 3
 ```
@@ -144,7 +146,10 @@ appears — an RDA restart that skips sequence numbers, observed live (79→90, 
 195→268) — the poller no longer stalls waiting on a directory that will never exist. It
 tracks empty polls since the last key seen for the current target; past a threshold
 (~60s) with no key ever seen, it re-lists the bucket's volume folders and re-anchors
-forward if a genuine gap exists. A volume that produced real data but then stalls mid-
+forward *in time* if a genuine gap exists — "forward in time" rather than "forward
+numerically" because across the 999 → 1 wrap the live volume is numerically smaller, so
+the comparison is `VolumeWindow::is_after` (position in the retained arc), not `>`. A
+volume that produced real data but then stalls mid-
 volume (past a longer, ~5 minute threshold) is abandoned and the poller advances to the
 next one, leaving the assembly layer's own watchdog to mark that volume `TimedOut`. See
 `S3Poller::apply_recovery` / `next_target` in `s3_poll.rs`.

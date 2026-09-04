@@ -13,14 +13,26 @@ use radar_workstation::ingest::s3_poll::{IngestState, IngestStatus};
 use radar_workstation::sites::Site;
 use radar_workstation::state::StateSnapshot;
 
+use radar_workstation::time::{format_utc, unix_secs_from_nexrad, utc_from_nexrad};
+use radar_workstation::vcp;
+
 use super::labels::PlacedLabel;
-use super::time::{format_utc, utc_from_nexrad};
 use super::view::{self, ViewState};
 use super::reference;
 
 /// Accent colour for states that want the operator's eye (a stall, an
 /// active error). Everything else is greyscale.
 const ACCENT: egui::Color32 = egui::Color32::from_rgb(255, 176, 64);
+
+/// Identity of the sweep actually on screen — the only honest source for a
+/// data-age readout (plan §1.4). Both fields come from the same
+/// `DisplaySweep`, in one `find`, so the identity and its VCP cannot drift
+/// apart.
+#[derive(Debug, Clone, Copy)]
+pub struct DisplayedScan {
+    pub volume: VolumeId,
+    pub vcp_number: u16,
+}
 
 pub struct ChromeInput<'a> {
     pub site: &'static Site,
@@ -31,13 +43,17 @@ pub struct ChromeInput<'a> {
     /// selection is *not* rewritten.
     pub selected_grid: Option<&'a SweepGrid>,
     pub selected_elevation_deg: Option<f32>,
-    pub displayed_volume: Option<VolumeId>,
+    pub displayed_scan: Option<DisplayedScan>,
     pub palette: Option<&'a Palette>,
     /// Cursor position in world metres, when the pointer is over the map.
     pub cursor_world: Option<(f64, f64)>,
     pub recent_event: Option<String>,
     pub show_help: bool,
+    /// Monotonic clock, for poll health. Must not become wall-clock-sensitive.
     pub now: Instant,
+    /// Wall-clock UTC seconds since the Unix epoch, for the data-age readout.
+    /// A pre-epoch clock maps to `0`.
+    pub now_unix: i64,
     /// Physical viewport size, for placing range-ring labels in screen space.
     pub viewport: (f32, f32),
     /// This frame's declutter-selected city/site labels (§9.3), already in
@@ -82,6 +98,36 @@ pub fn sample_at(grid: &SweepGrid, ground_m: f64, az_deg: f64) -> CursorSample {
 
 fn age_secs(from: Option<Instant>, now: Instant) -> Option<u64> {
     from.map(|t| now.saturating_duration_since(t).as_secs())
+}
+
+/// Age of the data on screen, in seconds of wall-clock UTC. `None` when
+/// nothing is displayed. A volume timestamped in the future (clock skew, or a
+/// corrupt header) clamps to 0 rather than reading as negative.
+fn data_age_secs(displayed: Option<DisplayedScan>, now_unix: i64) -> Option<i64> {
+    displayed.map(|scan| {
+        let scan_unix = unix_secs_from_nexrad(scan.volume.julian_date, scan.volume.scan_time_ms);
+        (now_unix - scan_unix).max(0)
+    })
+}
+
+/// "42s", "7m 12s", "21h 03m" — coarser as the number gets larger, because at
+/// 21 hours the seconds are noise.
+fn format_age(secs: i64) -> String {
+    let secs = secs.max(0);
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
+/// Past two nominal VCP cycles the display is no longer current in any
+/// operationally useful sense (plan §2.6).
+fn age_is_alarming(secs: i64, vcp_number: u16) -> bool {
+    let limit = 2 * vcp::nominal_volume_duration(vcp_number).as_secs() as i64;
+    secs > limit
 }
 
 fn ingest_label(status: &IngestStatus) -> (String, bool) {
@@ -175,14 +221,32 @@ fn status_bar(root: &mut egui::Ui, input: &ChromeInput) {
             }
             ui.separator();
 
-            if let Some(vid) = input.displayed_volume {
-                ui.label(format_utc(utc_from_nexrad(vid.julian_date, vid.scan_time_ms)));
-                ui.separator();
+            // Data age — now minus the *displayed scan's own* scan time, the
+            // one honest freshness number (plan §1.4).
+            match (input.displayed_scan, data_age_secs(input.displayed_scan, input.now_unix)) {
+                (Some(scan), Some(age)) => {
+                    ui.label(format_utc(utc_from_nexrad(
+                        scan.volume.julian_date,
+                        scan.volume.scan_time_ms,
+                    )));
+                    ui.separator();
+                    let text = format!("age {}", format_age(age));
+                    if age_is_alarming(age, scan.vcp_number) {
+                        ui.colored_label(ACCENT, text);
+                    } else {
+                        ui.label(text);
+                    }
+                }
+                _ => {
+                    ui.label("no data yet");
+                }
             }
+            ui.separator();
 
+            // Poll health — kept, but no longer the freshness number.
             match age_secs(input.snapshot.ingest.last_success, input.now) {
-                Some(secs) => ui.label(format!("updated {secs}s ago")),
-                None => ui.label("no data yet"),
+                Some(secs) => ui.label(format!("poll {secs}s ago")),
+                None => ui.label("poll: none yet"),
             };
             ui.separator();
 
@@ -381,5 +445,53 @@ mod tests {
     #[test]
     fn age_secs_is_none_before_the_first_success() {
         assert_eq!(age_secs(None, Instant::now()), None);
+    }
+
+    fn scan(julian_date: u16, scan_time_ms: u32, vcp_number: u16) -> DisplayedScan {
+        DisplayedScan { volume: VolumeId { julian_date, scan_time_ms }, vcp_number }
+    }
+
+    #[test]
+    fn data_age_is_measured_from_the_displayed_scan_not_the_last_poll() {
+        // Parent §1.4: a volume scanned 2026-09-03T03:08Z, read
+        // 2026-09-04T00:55Z. The poll readout would still say ~3 s; the honest
+        // number is ~21 h, and it alarms.
+        let now_unix = 20_700 * 86_400 + (55 * 60); // 2026-09-04T00:55:00Z
+        let displayed = scan(20_700, 3 * 3_600_000 + 8 * 60_000, 35); // 2026-09-03T03:08Z
+        let age = data_age_secs(Some(displayed), now_unix).unwrap();
+        assert!((78_000..79_000).contains(&age), "expected ~21.8 h, got {age}s");
+        assert!(age_is_alarming(age, displayed.vcp_number));
+    }
+
+    #[test]
+    fn data_age_of_a_future_timestamped_volume_clamps_to_zero() {
+        let now_unix = 20_700 * 86_400;
+        let displayed = scan(20_701, 0, 35); // a full day in the future
+        assert_eq!(data_age_secs(Some(displayed), now_unix), Some(0));
+    }
+
+    #[test]
+    fn data_age_is_none_when_no_scan_is_displayed() {
+        assert_eq!(data_age_secs(None, 20_700 * 86_400), None);
+    }
+
+    #[test]
+    fn age_is_alarming_past_two_nominal_vcp_cycles() {
+        // VCP 35: nominal cycle 7 min, so the alarm threshold is 14 min.
+        assert!(age_is_alarming(14 * 60 + 1, 35));
+    }
+
+    #[test]
+    fn age_is_not_alarming_within_one_cycle() {
+        assert!(!age_is_alarming(6 * 60, 35));
+        assert!(!age_is_alarming(13 * 60, 35));
+    }
+
+    #[test]
+    fn format_age_switches_units_at_the_right_magnitudes() {
+        assert_eq!(format_age(42), "42s");
+        assert_eq!(format_age(432), "7m 12s");
+        assert_eq!(format_age(21 * 3600 + 3 * 60 + 40), "21h 03m");
+        assert_eq!(format_age(-5), "0s");
     }
 }

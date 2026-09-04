@@ -1,4 +1,5 @@
 pub mod s3_poll;
+pub mod volume_seq;
 
 use bytes::Bytes;
 

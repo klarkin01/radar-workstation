@@ -8,6 +8,7 @@
 
 use crate::compute::DisplayProduct;
 use crate::ingest::s3_poll::PollError;
+use crate::ingest::volume_seq::VolumeSeq;
 
 /// Which supervised unit an event pertains to (S2-W2 §4.3). One variant
 /// today: the poller/assembly/applier trio is supervised together, not
@@ -32,8 +33,13 @@ pub enum Event {
     PollFailed(PollError),
     UnrecognizedKeySuffix { key: String },
     UnrecognizedVolumeFolder { entry: String },
-    ReAnchored { from_volume: u64, to_volume: u64, empty_polls: u32 },
-    AdvancedPastStalledVolume { from_volume: u64, to_volume: u64, empty_polls: u32 },
+    ReAnchored { from_volume: VolumeSeq, to_volume: VolumeSeq, empty_polls: u32 },
+    AdvancedPastStalledVolume { from_volume: VolumeSeq, to_volume: VolumeSeq, empty_polls: u32 },
+    /// The retained volume-sequence folders did not contain a gap large
+    /// enough to identify the retention boundary confidently, so "newest"
+    /// was resolved from a smaller gap than the bucket's observed behaviour
+    /// predicts. Reported, not fatal — the poller still picks deterministically.
+    VolumeSequenceOrderAmbiguous { largest_gap: u32, folder_count: usize },
     /// Mirrors `assembly::AssemblyEvent::LateRadialsDiscarded` — reported by
     /// `AppState::apply_event` (S2-W1/W2), not by the pure `state::apply`.
     LateRadialsDiscarded { elevation_number: u8, count: usize },
@@ -121,6 +127,11 @@ impl std::fmt::Display for Event {
                 f,
                 "advanced past stalled volume {from_volume} to {to_volume} after \
                  {empty_polls} empty polls (assembly watchdog will mark it TimedOut)"
+            ),
+            Self::VolumeSequenceOrderAmbiguous { largest_gap, folder_count } => write!(
+                f,
+                "volume-sequence folders ({folder_count}) had no gap wide enough (largest {largest_gap}) \
+                 to identify the retention boundary confidently; newest volume resolved from a smaller gap"
             ),
             Self::LateRadialsDiscarded { elevation_number, count } => write!(
                 f,
@@ -253,7 +264,11 @@ mod tests {
 
     #[test]
     fn display_formats_are_human_readable() {
-        let event = Event::ReAnchored { from_volume: 79, to_volume: 165, empty_polls: 12 };
+        let event = Event::ReAnchored {
+            from_volume: VolumeSeq::new(79).unwrap(),
+            to_volume: VolumeSeq::new(165).unwrap(),
+            empty_polls: 12,
+        };
         let text = event.to_string();
         assert!(text.contains("79"));
         assert!(text.contains("165"));

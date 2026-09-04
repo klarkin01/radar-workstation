@@ -23,13 +23,12 @@ mod offscreen;
 pub mod overlay;
 pub mod radar;
 pub mod reference;
-pub mod time;
 pub mod ui;
 pub mod view;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -313,11 +312,7 @@ impl App {
         let site = self.site;
         let cursor_pos = self.cursor_pos;
         let recent = state.recent_events(1).pop().map(|(_, s)| s);
-        let displayed_volume = snapshot
-            .sweeps
-            .iter()
-            .find(|s| s.elevation_number == view.elevation_number)
-            .map(|s| s.volume);
+        let displayed_scan = self.displayed_scan(&snapshot);
         let palette = self.palettes.get(&view.product);
 
         // City/site labels (§9.2): the declutter pass is recomputed only
@@ -404,12 +399,13 @@ impl App {
             view: &view,
             selected_grid: selected_grid.as_deref(),
             selected_elevation_deg: selected_deg,
-            displayed_volume,
+            displayed_scan,
             palette,
             cursor_world,
             recent_event: recent,
             show_help,
             now: Instant::now(),
+            now_unix: now_unix(),
             viewport: vp,
             placed_labels: &self.placed_labels,
         };
@@ -509,14 +505,41 @@ impl App {
         self.next_deadline = Instant::now() + egui_delay.min(IDLE_TICK);
     }
 
-    /// The time-derived chrome text, compared frame to frame so the data-age
-    /// readout ticks even when `revision` is unchanged (§5).
-    fn chrome_age_text(&self, snapshot: &StateSnapshot) -> String {
-        match snapshot.ingest.last_success {
-            Some(t) => format!("{}", Instant::now().saturating_duration_since(t).as_secs()),
-            None => "none".to_string(),
-        }
+    /// Identity of the sweep currently on screen, for the data-age readout
+    /// (plan §1.4). The `find` is the same one `resolve_selection` uses; the
+    /// VCP comes from the same `DisplaySweep` so the two cannot drift apart.
+    fn displayed_scan(&self, snapshot: &StateSnapshot) -> Option<ui::DisplayedScan> {
+        snapshot
+            .sweeps
+            .iter()
+            .find(|s| s.elevation_number == self.view.elevation_number)
+            .map(|s| ui::DisplayedScan { volume: s.volume, vcp_number: s.vcp_number })
     }
+
+    /// The time-derived chrome text, compared frame to frame so the data-age
+    /// and poll-health readouts tick even when `revision` is unchanged (§5).
+    fn chrome_age_text(&self, snapshot: &StateSnapshot) -> String {
+        let poll = match snapshot.ingest.last_success {
+            Some(t) => Instant::now().saturating_duration_since(t).as_secs() as i64,
+            None => -1,
+        };
+        let data = match self.displayed_scan(snapshot) {
+            Some(scan) => {
+                now_unix()
+                    - radar_workstation::time::unix_secs_from_nexrad(
+                        scan.volume.julian_date,
+                        scan.volume.scan_time_ms,
+                    )
+            }
+            None => -1,
+        };
+        format!("{poll}/{data}")
+    }
+}
+
+/// Wall-clock UTC seconds since the Unix epoch; a pre-epoch clock maps to `0`.
+fn now_unix() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
 impl ApplicationHandler for App {

@@ -368,8 +368,10 @@ not a hygiene or dependency-shape issue.
 anchor, and ADR-0014 Erratum item 6 asserted the same layout for the archive-bucket
 comparison. The real `unidata-nexrad-level2-chunks` layout, confirmed by direct bucket
 inspection, is `SITE/<volume-sequence>/<timestamp>-<n>-<kind>`, where the volume-sequence
-directory is an **unpadded** monotonically increasing integer — lexically, `"78"` sorts
-after `"709"`. A live measurement against the unfixed code returned 32,524 keys (a near-
+directory is an **unpadded** integer — lexically, `"78"` sorts after `"709"`. (Re-measured
+2026-09-04: the counter is a **cyclic 1–999 counter**, not monotonically increasing; see
+ADR-0011's erratum and `crates/radar-workstation/src/ingest/volume_seq.rs`.) A live
+measurement against the unfixed code returned 32,524 keys (a near-
 complete day's retention) instead of a small hour-boundary backlog, because the
 constructed anchor matched no real prefix.
 

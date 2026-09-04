@@ -340,8 +340,8 @@ greedy collision cull, not by a fixed zoom threshold — labels appear as screen
 up. The pass:
 
 - is **pure** — `(labels, &ViewState, viewport) -> Vec<PlacedLabel>` — and unit-tested
-  without a window, the pattern `view.rs`, `input.rs`, `adapter.rs` and `time.rs` already
-  establish;
+  without a window, the pattern `view.rs`, `input.rs` and `adapter.rs` already establish
+  (`time.rs` moved library-side in Stage 6a Part A);
 - is **render-loop owned**, alongside `ViewState`, and never enters `AppState` (ADR-0018).
   FR-NI-4's spatial-stability guarantee covers it: a new scan, a product switch, or a
   sweep switch must not change which labels are placed;

@@ -12,9 +12,9 @@ utilities in `utility/nexrad-inspect/`.*
 | Type | Source | Contains | Latency | Retention |
 |---|---|---|---|---|
 | Volume file | `unidata-nexrad-level2` | Complete volume scan | ~5 min after scan completes | Permanent archive |
-| Start chunk (`-S`) | `unidata-nexrad-level2-chunks` | Volume metadata | Seconds after scan begins | 24 hours |
-| Intermediate chunk (`-I`) | `unidata-nexrad-level2-chunks` | Radial data (~100°) | Seconds after antenna passes | 24 hours |
-| End chunk (`-E`) | `unidata-nexrad-level2-chunks` | Final radial data | Seconds after scan completes | 24 hours |
+| Start chunk (`-S`) | `unidata-nexrad-level2-chunks` | Volume metadata | Seconds after scan begins | ~48 h (observed, not contractual) |
+| Intermediate chunk (`-I`) | `unidata-nexrad-level2-chunks` | Radial data (~100°) | Seconds after antenna passes | ~48 h (observed, not contractual) |
+| End chunk (`-E`) | `unidata-nexrad-level2-chunks` | Final radial data | Seconds after scan completes | ~48 h (observed, not contractual) |
 
 ---
 

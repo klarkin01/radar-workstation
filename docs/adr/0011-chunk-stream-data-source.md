@@ -102,3 +102,19 @@ chunk retention window.
 operates on decompressed Message 31 byte streams regardless of how those bytes arrived. The chunk
 format complexity is entirely contained in the data acquisition layer. The decoder sees
 the same input whether the source was a chunk or an assembled volume file.
+
+## Erratum (added 2026-09-03, Stage 6a Part A)
+
+Two "Context" / "Consequences" claims about the chunk bucket were corrected by direct
+measurement (`docs/plans/stage-6a-time-handling.md` §1; `crates/radar-workstation/src/ingest/volume_seq.rs`).
+The decision — target the chunk stream as the primary source — is unaffected.
+
+- **Retention is ~48 h, not 24 h.** `KDOX/749/` was still serving 2026-09-02T00:05Z
+  objects at 2026-09-04T00:55Z. Neither figure is a documented contract; treat retention
+  as observed behaviour that could change.
+- **The `<volume-sequence>` counter is cyclic over 1–999, not monotonic.** It rolls
+  `999 → 1` (observed at ~2026-09-03T03:13Z for `KDOX`), and objects from before a roll
+  are still listed after it, so a listing can hold both sides of the wrap at once. Code
+  that picks the newest volume must be wrap-aware; a numeric `max()` anchors to a
+  pre-wrap volume and cannot recover. The "switch data sources based on the retention
+  window" consequence still stands — only the window's size was wrong.
