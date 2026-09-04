@@ -64,9 +64,16 @@ pub fn draw_overlay(
         let pixels: Vec<(i32, i32)> = part
             .iter()
             .map(|&(lon, lat)| {
-                let (x_km, y_km) = az_eq_project(site_lat, site_lon, lat, lon);
-                let px = (cx + x_km * pixels_per_km).round() as i32;
-                let py = (cy - y_km * pixels_per_km).round() as i32;
+                // The production az-eq projection (compute::geometry,
+                // S5-c/ADR-0025 §4 erratum) — this used to be a private
+                // copy here; deleting it and calling the production
+                // function is what makes ADR-0025 §4's DRY claim true.
+                // Metres -> km at this call site, since radar-viz's raster
+                // math is in km/f32.
+                let (x_m, y_m) = radar_workstation::compute::geometry::az_eq_project(site_lat, site_lon, lat, lon);
+                let (x_km, y_km) = (x_m / 1000.0, y_m / 1000.0);
+                let px = (cx + x_km as f32 * pixels_per_km).round() as i32;
+                let py = (cy - y_km as f32 * pixels_per_km).round() as i32;
                 (px, py)
             })
             .collect();
@@ -75,23 +82,6 @@ pub fn draw_overlay(
             draw_line(img, seg[0].0, seg[0].1, seg[1].0, seg[1].1, size, color);
         }
     }
-}
-
-/// Azimuthal equidistant projection centered on the radar site.
-/// Returns (x_km, y_km): east-positive, north-positive.
-/// This is the same projection used by the main application's coordinate system.
-fn az_eq_project(site_lat: f64, site_lon: f64, lat: f64, lon: f64) -> (f32, f32) {
-    const R: f64 = 6371.0;
-    let (lat, lon) = (lat.to_radians(), lon.to_radians());
-    let (lat0, lon0) = (site_lat.to_radians(), site_lon.to_radians());
-    let cos_c = (lat0.sin() * lat.sin()
-        + lat0.cos() * lat.cos() * (lon - lon0).cos())
-        .clamp(-1.0, 1.0);
-    let c = cos_c.acos();
-    let k = if c < 1e-10 { 1.0 } else { c / c.sin() };
-    let x = k * lat.cos() * (lon - lon0).sin();
-    let y = k * (lat0.cos() * lat.sin() - lat0.sin() * lat.cos() * (lon - lon0).cos());
-    ((x * R) as f32, (y * R) as f32)
 }
 
 /// Bresenham line draw with per-pixel bounds clipping.

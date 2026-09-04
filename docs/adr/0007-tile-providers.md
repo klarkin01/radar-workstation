@@ -1,7 +1,14 @@
 # ADR-0007: Pluggable XYZ Tile Providers for Background Imagery
 
 ## Status
-Accepted
+Accepted — **implementation deferred to post-v1.0** (2026-08-28).
+
+The decision below stands as written and is not superseded or reopened. What changed is
+timing: [ADR-0027](0027-tile-image-decoding.md) defers the tile subsystem out of v1.0,
+because decoding tile bodies requires a new untrusted-input parser on a network path in
+service of a layer this ADR itself describes as optional and off by default. v1.0 ships a
+vector-only basemap ([ADR-0025](0025-bundled-overlay-geometry.md)). No tile-fetching
+code exists, and none is stubbed — see ADR-0027 §3.
 
 ## Context
 GR2Analyst provides satellite/terrain background imagery that activates at closer zoom

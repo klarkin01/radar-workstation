@@ -50,14 +50,23 @@ site. The user must see the new site's data within the time target defined in Se
 successfully fetched scan must remain displayed. The status bar must indicate the error
 condition and the age of the displayed data.
 
-**FR-DA-6.** **[OPEN — Q16]** The application must fetch map imagery tiles via HTTPS
-from the configured XYZ tile provider. Tile fetching must not block the render loop —
-missing tiles render as transparent until delivered. As stated, this requirement is
-**currently unimplementable against the accepted ADR set**: no client in the workspace
-can fetch from an arbitrary, user-configured host — `http-ingest`'s compile-time host
-allowlist makes that an explicit non-goal (ADR-0014). Resolving Q16 (which HTTP client
-serves tile fetching) is a precondition for this requirement, not an implementation
-detail of it.
+**FR-DA-6.** **[DEFERRED — post-v1.0, ADR-0027]** The application must fetch map imagery
+tiles via HTTPS from the configured XYZ tile provider. Tile fetching must not block the
+render loop — missing tiles render as transparent until delivered.
+
+<!-- corrected 2026-08-28 (ADR-0026, resolving Q16): this requirement previously carried
+an [OPEN — Q16] marker and the note that it was "currently unimplementable against the
+accepted ADR set." It is now implementable. `crates/tile-fetch` (`TileClient`) fetches
+from the user-configured host over the shared `http-ingest` engine; `crates/s3-fetch`
+keeps the radar path's allowlist, strengthened from a string match to a `Bucket` enum.
+HTTPS only, no redirects ever, `ETag`/`If-None-Match` for cache revalidation, N=4
+independent fetch workers. -->
+
+<!-- deferred 2026-08-28 (ADR-0027, resolving Q18): the tile subsystem is out of v1.0.
+This requirement is unchanged and unsuperseded; it is simply not in the v1.0 scope
+boundary. No tile-fetching code exists and none is stubbed (ADR-0027 §3). The transport
+design (ADR-0026) and the codec answer (ADR-0027 §2) are both recorded for when it
+returns. -->
 
 **FR-DA-7.** The application must fetch placefile data via HTTP or HTTPS from
 user-configured URLs, on a per-placefile polling interval.
@@ -196,36 +205,75 @@ sweep, scan timestamp, polling status, and any active error conditions.
 
 ### 2.5 Map Underlays
 
-**FR-MU-1.** **[OPEN — Q15]** County boundaries, state and country boundaries, and major
-highways must be sourced from bundled Census TIGER/Line and Natural Earth shapefiles.
-These require no network connection and must be available immediately at startup.
-Whether a 0.x single-maintainer shapefile parser is on the application's startup path at
-all, or geometry is instead pre-projected into a flat bundled format at build time, is
-unresolved — see Q15.
+**FR-MU-1.** County boundaries, state and country boundaries, and major highways must be
+derived from Natural Earth and Census TIGER/Line data and bundled with the binary. These
+require no network connection and must be available immediately at startup. <!-- amended
+2026-08-28 (ADR-0025, resolving Q15): the shipped form is a flat baked bundle
+(`include_bytes!`), not shapefiles parsed at startup — no shapefile or DBF parser is in
+the production graph. Counties come from Natural Earth 10m rather than TIGER (TIGER
+county geometry carries far more vertices than a 230 km PPI resolves); TIGER supplies
+Primary Roads only. --> <!-- amended 2026-09-02
+([ADR-0029](adr/0029-primary-roads-simplification.md), resolving Q20): the TIGER Primary
+Roads layer is simplified at bake time (Douglas–Peucker, ε = 30 m) — 30 m is half a pixel
+at `view::MIN_M_PER_PX` and 8.3× finer than a 250 m radar gate, against a source carrying a
+vertex every 87.7 m. "Bundled with the binary" and "available immediately at startup" are
+unchanged. Stated coverage limit: TIGER is a United States product, so 13 of the 163
+bundled sites — the five overseas DoD sites, roadless interior Alaska, outer Hawaii — draw
+no highways at all. Layer 5 is toggleable and every other overlay layer is global, so those
+sites degrade rather than break; no non-public-domain global road source is adopted to
+close the gap. -->
 
-**FR-MU-2.** **[OPEN — Q15]** All vector overlay geometry must be pre-projected into
-azimuthal equidistant coordinates at load time. The GPU receives already-projected
-geometry — no projection happens per frame. Q15's resolution changes *when* "load time"
-means: build-time pre-projection would mean geometry ships already projected, with no
-projection step at application load at all.
+**FR-MU-2.** All vector overlay geometry must be projected into azimuthal equidistant
+coordinates once, at site load, and uploaded to the GPU as static geometry. The GPU
+receives already-projected geometry — no projection happens per frame. <!-- amended
+2026-08-28 (ADR-0025, resolving Q15): this previously said "pre-projected at load time"
+with build-time pre-projection as an open alternative. Build-time projection is
+impossible — azimuthal equidistant is centred on the active site, and the site is a
+runtime choice (FR-SS-2) — so the bundle ships geographic coordinates and the projection
+happens per site change (~13 ms measured). The per-frame guarantee is unchanged. -->
 
 **FR-MU-3.** NEXRAD site locations must be sourced from a bundled site list derived
 from the NOAA site registry. No network connection is required to populate the site
 list.
 
-**FR-MU-4.** **[OPEN — Q16]** The default map imagery tile provider must be the USGS
-National Map (publicly accessible, no authentication). The tile provider URL must be
-user-configurable to any XYZ-scheme HTTPS tile source. As stated, the second sentence is
-**currently unimplementable against the accepted ADR set** — same gap as FR-DA-6: no
-client in the workspace can fetch from an arbitrary host. See Q16.
+**FR-MU-4.** **[DEFERRED — post-v1.0, ADR-0027]** The default map imagery tile provider
+must be the USGS National Map (publicly accessible, no authentication). The tile provider
+URL must be user-configurable to any XYZ-scheme HTTPS tile source.
 
-**FR-MU-5.** Fetched map tiles must be cached to disk using an LRU eviction policy.
-The cache must be stored in the XDG cache directory by default. **[OPEN — Q7]** Maximum
-cache size and whether it is configurable are unresolved.
+<!-- corrected 2026-08-28 (ADR-0026, resolving Q16): [OPEN — Q16] marker removed; see
+FR-DA-6. Two clarifications the ADR adds. (1) "no authentication" is now enforced in
+code, not merely a property of the default provider — `TileClient` sends no
+`Authorization` header and no API key, and a keyed provider reopens ADR-0026. (2) "any
+XYZ-scheme HTTPS tile source" excludes any provider that requires redirect following;
+redirects are permanently rejected, because following one means connecting to a host
+chosen by a remote server rather than by the user (BC-1). A non-443 port is permitted. -->
 
-**FR-MU-6.** Each running instance maintains its own independent tile cache. **[OPEN —
-Q5]** Whether instances may optionally share a single cache (to avoid redundant downloads
-when monitoring geographically proximate sites) is unresolved.
+**FR-MU-5.** **[DEFERRED — post-v1.0, ADR-0027]** Fetched map tiles must be cached to
+disk using an LRU eviction policy. The cache must be stored in the XDG cache directory by
+default. Maximum cache size and whether it is configurable return with the subsystem
+(Q7, closed by deferral).
+
+**FR-MU-6.** **[DEFERRED — post-v1.0, ADR-0027]** Each running instance maintains its own
+independent tile cache. Whether instances may optionally share a single cache returns
+with the subsystem (Q5,
+closed by deferral — with no tile cache in v1.0 there is no candidate shared resource, and
+BC-4 already requires that instances never communicate).
+
+**FR-MU-7.** City labels (compositing layer 9) must be drawn from bundled label data,
+selected by a screen-space declutter pass so that labels never overlap each other or the
+UI chrome. No network connection is required. <!-- added 2026-08-30
+([ADR-0028](adr/0028-city-labels.md), resolving Q19). City labels previously appeared
+only in FR-DR-3's compositing list and in rendering.md's layer table, with no functional
+requirement and — until ADR-0028 — no data source at all. -->
+
+The v1.0 source is Natural Earth 10m `populated_places`: public domain, global, ~27 KiB
+of bundle. It is **explicitly provisional and known-sparse** — 19 labels inside a KDOX
+230 km PPI and 2 inside 100 km, measured. v1.0 names major population centres, not every
+settlement; that is the design, not a defect. The runtime representation is
+source-agnostic by construction (`{ lon, lat, rank, name }`, with `rank` normalised at
+bake time), so adopting a denser source is a bundle regeneration rather than a redesign.
+The declutter pass is render-loop owned and never enters `AppState` (ADR-0018); FR-NI-4's
+spatial-stability guarantee covers label selection as it covers the view transform.
 
 ---
 
@@ -304,7 +352,10 @@ installation.
 
 **FR-CP-1.** User configuration (active site, color table selections, placefile URLs
 and polling intervals, tile provider URL, toggleable layer states) must persist across
-application restarts.
+application restarts. <!-- amended 2026-09-02 (Stage 5, `docs/plans/stage-5-map-underlays.md`):
+"toggleable layer states" is now realized — `view.highways` (layer 5) and `view.reference`
+(range rings/spokes) round-trip through `config::load`/`save`, the same line-preserving,
+atomic, one-key-per-line pattern `view.product` already used. -->
 
 **FR-CP-2.** Configuration must be stored in a plain-text, human-readable format in
 the XDG config directory. The user must be able to edit configuration directly without
@@ -477,8 +528,10 @@ the authoritative definition of "done" for v1.0.
 - Derived products: Echo Tops, VIL
 - Full sweep set access and sweep switching
 - Bundled vector map overlays: counties, states, country boundaries, major highways
-- Pluggable XYZ map imagery tile provider (USGS default)
-- On-disk tile cache
+  (resolved 2026-08-28, Q15 — build-time baked bundle, see FR-MU-1/FR-MU-2 and ADR-0025)
+- Bundled city labels with screen-space decluttering (resolved 2026-08-30, Q19 — Natural
+  Earth 10m `populated_places`, provisional and known-sparse; see FR-MU-7 and
+  [ADR-0028](adr/0028-city-labels.md))
 - GRLevelX placefile support (minimum viable subset — FR-PF-3)
 - User-configurable placefile URLs with polling
 - Keyboard-driven product, sweep, and navigation controls
@@ -490,6 +543,14 @@ the authoritative definition of "done" for v1.0.
 
 ### Explicitly Deferred (Post-v1.0)
 
+- Pluggable XYZ map imagery tile provider (USGS default) and the on-disk tile cache
+  (deferred 2026-08-28, Q18 — see FR-DA-6, FR-MU-4/5/6 and
+  [ADR-0027](adr/0027-tile-image-decoding.md)). v1.0 ships a **vector-only basemap**:
+  counties, states, coastline, and primary roads from the ADR-0025 bundle, with
+  compositing layer 2 unpopulated. ADR-0007 and ADR-0026 stand as written, unimplemented.
+- A denser city-label source than Natural Earth 10m (resolved 2026-08-30, Q19 — the
+  candidates and their costs are measured and recorded in
+  [ADR-0028](adr/0028-city-labels.md); the swap is a bundle regeneration, not a redesign)
 - KDP, PHI, CFP in the display pipeline (Q8 — see FR-RP-3; ZDR/CC are in scope)
 - Storm-relative velocity (Q8 — see FR-RP-4)
 - Velocity dealiasing (Q9 — see FR-RP-5; resolved as deferred, with fold indicators)
@@ -524,15 +585,20 @@ of the relevant subsystem begins.
 | ID | Requirement | Blocked On |
 |---|---|---|
 | FR-DA-8 | Fallback NEXRAD data source behavior | Q14 |
-| FR-MU-5 | Tile cache maximum size and configurability | Q7 |
-| FR-MU-6 | Cross-instance tile cache sharing | Q5 |
 | FR-PF-4 | Full placefile feature scope for v1.0 | Q6 |
 | PL-3 | Distribution mechanism | Q12 |
 | PL-4 | Minimum system requirements | Q13 |
-| FR-MU-1 | Shapefile parser on the startup path, or build-time pre-projection | Q15 |
-| FR-MU-2 | When vector overlay projection happens | Q15 |
-| FR-DA-6 | HTTP client for arbitrary-host tile fetching (currently unimplementable) | Q16 |
-| FR-MU-4 | User-configurable tile provider URL (currently unimplementable) | Q16 |
+
+<!-- corrected 2026-08-28 (ADR-0026): FR-DA-6 and FR-MU-4 were blocked on Q16 (the HTTP
+client). Q16 is resolved and both requirements lose their [OPEN] markers above. They were
+re-listed here against Q18, raised by ADR-0026: fetching a tile is settled, decoding one
+is not, and neither requirement is user-visible until it is.
+
+superseded 2026-08-28 (ADR-0027, resolving Q18): Q18 is closed and Q5 and Q7 with it, so
+all four tile rows (FR-DA-6, FR-MU-4, FR-MU-5, FR-MU-6) leave this table. They are not
+open requirements pending an answer — they are deferred requirements outside the v1.0
+scope boundary, marked [DEFERRED — post-v1.0, ADR-0027] in place above and listed under
+§6 Explicitly Deferred. -->
 
 When an open question is resolved, update the corresponding requirement here, remove
 the **[OPEN]** marker, and close the question in open-questions.md. If the resolution

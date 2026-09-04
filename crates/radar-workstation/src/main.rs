@@ -129,8 +129,18 @@ fn run_render(
 
     let initial_size = (cfg.window_width.unwrap_or(DEFAULT_W), cfg.window_height.unwrap_or(DEFAULT_H));
     let initial_product = cfg.view_product.unwrap_or(DisplayProduct::Reflectivity);
+    let initial_show_highways = cfg.show_highways.unwrap_or(true);
+    let initial_show_reference = cfg.show_reference.unwrap_or(true);
 
-    let persisted = match render::run(state, site, handle, initial_size, initial_product) {
+    let persisted = match render::run(
+        state,
+        site,
+        handle,
+        initial_size,
+        initial_product,
+        initial_show_highways,
+        initial_show_reference,
+    ) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("radar-workstation: {e}");
@@ -157,6 +167,12 @@ fn run_render(
         }
         if cfg.view_product != Some(persisted.product) {
             changes.push((config::VIEW_PRODUCT_KEY.to_string(), persisted.product.to_string()));
+        }
+        if cfg.show_highways != Some(persisted.show_highways) {
+            changes.push((config::VIEW_HIGHWAYS_KEY.to_string(), persisted.show_highways.to_string()));
+        }
+        if cfg.show_reference != Some(persisted.show_reference) {
+            changes.push((config::VIEW_REFERENCE_KEY.to_string(), persisted.show_reference.to_string()));
         }
         if !changes.is_empty() {
             if let Some(parent) = path.parent() {

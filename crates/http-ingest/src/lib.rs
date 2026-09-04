@@ -19,13 +19,13 @@ use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
 
 use connection::{Attempt, Connection};
-use host::Host;
 
 pub use config::{ClientConfig, Limits, Timeouts};
 pub use error::{Error, Phase};
+pub use host::Bucket;
 
-pub struct Client {
-    host: Host,
+pub struct S3Client {
+    host: &'static str,
     /// Shared across reconnects so rustls' session cache survives a dropped
     /// connection — the whole mechanism behind session resumption.
     tls: Arc<rustls::ClientConfig>,
@@ -33,14 +33,16 @@ pub struct Client {
     conn: Option<Connection<TlsStream<TcpStream>>>,
 }
 
-impl Client {
-    pub fn new(host: &str) -> Result<Self, Error> {
-        Self::with_config(host, ClientConfig::default())
+impl S3Client {
+    /// Infallible: `Bucket` is a closed set of two compile-time-constant
+    /// hostnames, so there is nothing left to validate at construction
+    /// (ADR-0026 §2).
+    pub fn new(bucket: Bucket) -> Self {
+        Self::with_config(bucket, ClientConfig::default())
     }
 
-    pub fn with_config(host: &str, cfg: ClientConfig) -> Result<Self, Error> {
-        let host = Host::parse(host)?;
-        Ok(Self { host, tls: tls::build_config(), cfg, conn: None })
+    pub fn with_config(bucket: Bucket, cfg: ClientConfig) -> Self {
+        Self { host: bucket.host(), tls: tls::build_config(), cfg, conn: None }
     }
 
     pub async fn list_prefix(
@@ -60,11 +62,11 @@ impl Client {
     }
 
     async fn send(&mut self, path_and_query: &str) -> Result<Bytes, Error> {
-        let req = request::format_request(self.host.as_str(), path_and_query);
+        let req = request::format_request(self.host, path_and_query);
 
         let reused = self.conn.is_some();
         if self.conn.is_none() {
-            self.conn = Some(Connection::connect(&self.host, &self.tls, &self.cfg).await?);
+            self.conn = Some(Connection::connect(self.host, &self.tls, &self.cfg).await?);
         }
 
         match self.attempt(&req).await {
@@ -76,7 +78,7 @@ impl Client {
             // reused connection closing before any response byte means the
             // server never processed the request, so this cannot double-deliver.
             Attempt::ClosedEmpty if reused => {
-                self.conn = Some(Connection::connect(&self.host, &self.tls, &self.cfg).await?);
+                self.conn = Some(Connection::connect(self.host, &self.tls, &self.cfg).await?);
                 match self.attempt(&req).await {
                     Attempt::Success(bytes) => Ok(bytes),
                     Attempt::Failed(e) => Err(e),

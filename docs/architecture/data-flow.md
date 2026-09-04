@@ -48,8 +48,8 @@ External Sources
 > `AppState`, today. **Stage 4 (2026-08-28):** the render loop described below is
 > implemented (`crates/radar-workstation/src/render/`, ADR-0022/ADR-0023). It reads
 > `AppState` once per frame through `snapshot()`, holds no lock, and owns view state
-> (`render::ViewState`) outright — never writing back. Map/tile/placefile layers are
-> still unbuilt.
+> (`render::ViewState`) outright — never writing back. Map and placefile layers are still
+> unbuilt (Stages 5–6); the tile layer is deferred out of v1.0 (ADR-0027).
 
 ---
 
@@ -74,10 +74,23 @@ External Sources
   [nexrad-binary-format.md](nexrad-binary-format.md) and ADR-0011/ADR-0012.
 
 ### Map Imagery Tiles — Background Terrain/Satellite
+
+**Deferred to post-v1.0 ([ADR-0027](../adr/0027-tile-image-decoding.md)).** No
+tile-fetching code exists and none is stubbed; v1.0 ships a vector-only basemap and
+compositing layer 2 is unpopulated. The design below stands as written for when the
+subsystem returns — it is recorded, not implemented.
+
 - **Source:** Pluggable XYZ tile provider (USGS National Map by default)
-- **Access:** Public, no authentication required for USGS
-- **Protocol:** HTTPS
-- **Format:** PNG tiles, standard XYZ/TMS scheme
+- **Access:** Public, no authentication. `TileClient` sends no `Authorization` header
+  and no API key — enforced in code, not assumed of the default provider (ADR-0026)
+- **Protocol:** HTTPS only, HTTP/1.1, no redirects ever, `ETag`/`If-None-Match` for
+  revalidation. Transport is `crates/tile-fetch` over the `http-ingest` engine (ADR-0026)
+- **Format:** standard XYZ/TMS scheme. Both JPEG and PNG must be decoded — format is a
+  **per-tile** property, not a per-provider one: four of five USGS services serve both
+  from one URL template (measured 2026-08-28, ADR-0027 Measurement 1), so dispatch is on
+  magic bytes, never `Content-Type`. Q18 is closed: take `png` + `jpeg-decoder`, gate on
+  declared dimensions at the header before allocating, and contain panics with
+  `catch_unwind` on `spawn_blocking` (ADR-0027 §2)
 - **Caching:** Tiles written to on-disk LRU cache on first fetch
 
 ### Placefiles — Warnings, Storm Reports, Overlays
@@ -166,6 +179,8 @@ time from poller start to first `SweepClosed` (against FR-DA-3's 30-60s target).
 
 ### Tile Fetching Task
 
+**Post-v1.0** — deferred with the subsystem (ADR-0027). Recorded, not implemented.
+
 ```
 1. Render loop signals required tile coordinates (z/x/y) not present in cache
 2. Tile task receives coordinates via channel
@@ -177,6 +192,12 @@ time from poller start to first `SweepClosed` (against FR-DA-3's 30-60s target).
 
 Tile fetching is fire-and-forget from the render loop's perspective. Missing tiles
 render as transparent until delivered. The display never waits on a tile fetch.
+
+Step 4 runs on N independent `TileClient`s (N = 4 by default), each owning one engine
+owning one connection — concurrency comes from task count, not from a connection pool,
+which preserves ADR-0014's "no pool" decision literally. A tile failure produces a
+missing tile and a status-bar line and nothing else: no shared connection state, no
+shared error values, and no shared task supervision with the radar path (ADR-0026).
 
 ### Placefile Polling Task
 

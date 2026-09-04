@@ -15,47 +15,11 @@ None outstanding.
 
 ## Architecture — Resolve Before the Relevant Subsystem
 
-**Q5: How are multiple instances coordinated, if at all?**
-Each instance is designed to be fully independent. Is there any case where instances
-should share resources — for example, a shared on-disk tile cache to avoid redundant
-downloads when multiple instances are monitoring sites in the same geographic area?
-If yes, this requires a cache access coordination mechanism. If no, document explicitly.
-
 **Q6: What is the placefile format support scope?**
 GRLevelX placefile format support is planned. How complete does this implementation need
 to be at v1.0? The format has a broad feature set. Define a minimum viable subset that
 covers the most widely used placefiles (warnings, storm reports, METARs, lightning) and
 defer less common features.
-
-**Q7: How is the disk tile cache managed?**
-Tile caching requires a cache eviction policy, a maximum size, and a directory location.
-Define: default cache location (XDG cache dir convention on Linux), maximum cache size
-(configurable?), eviction policy (LRU by last access time is standard), and whether
-cache is shared across instances or per-instance.
-
-**Q15: How is shapefile geometry loaded for production overlays?**
-ADR-0006 designates `shapefile`, `geo`, and `lyon` for production overlay loading. That
-puts a 0.x single-maintainer binary parser (plus `dbase` 0.5 and `time` 0.3) on a startup
-path that must not panic, per Principle 2 (Stability as Ethics). The alternative: since
-ADR-0006 already pre-projects overlays at load time, pre-project them at **build** time
-into a flat bundled format the app `mmap`s — removing `shapefile`, `dbase`, `time`, and
-`geo` from the shipped binary, eliminating a class of startup panic, and helping the
-< 2 s first-render target. Resolving this means either accepting those dependencies under
-a recorded rationale or superseding ADR-0006's parser clause. **Blocks:** overlay loading
-implementation. Analysis: `docs/dependency-inventory.md` E-07.
-
-**Q16: What HTTP client serves ADR-0007's tile providers?**
-ADR-0007 requires a user-supplied URL template against an **arbitrary** host, which in
-practice means redirect following, `ETag` / `If-None-Match` for the disk cache, and
-possibly HTTP/2. ADR-0014 lists all of those as explicit non-goals of `http-ingest` and
-says a need like this is "a signal to reopen this ADR, not to grow the crate." Three
-options, assessed in `docs/dependency-inventory.md`: generalize `http-ingest`; add a
-second, separate client crate scoped as best-effort and structurally unable to affect the
-radar path; or reintroduce a third-party client for tiles only. The inventory recommends
-the second option and rates the third worst. The answer determines whether
-`http-ingest`'s compile-time host allowlist is a permanent asset or a temporary one, so it
-must be settled **before** any tile code is written, and recorded in its own ADR.
-**Blocks:** the entire tile subsystem. Analysis: `docs/dependency-inventory.md` E-09.
 
 ---
 
@@ -179,3 +143,220 @@ efficient regardless of the resolution question, and a texture array (the one
 representation actually requiring uniform dimensions) is unnecessary since only one
 (product, sweep) pair is drawn at a time. Full rationale in
 [ADR-0020](adr/0020-product-texture-representation.md).
+
+**Q15: How is shapefile geometry loaded for production overlays?** — Resolved
+2026-08-28 (before Stage 5): it is not loaded at runtime at all. A dev-only generator
+(`utility/map-bake/`) bakes the geometry at build time into one flat little-endian blob
+of `i32` coordinates in units of 1e-7 degrees, which the binary `include_bytes!`s; the
+runtime projects it into azimuthal equidistant coordinates once per site load. This
+removes `shapefile`, `dbase`, `time`, `geo`, and `lyon` from the production graph — five
+crates, zero added — and removes the startup parse step entirely, which is the same
+reasoning that moved the site list to a generated `const` table in the ADR-0006 erratum.
+
+The question as posed contained an error worth recording: "pre-project at **build**
+time" is impossible, because azimuthal equidistant is centred on the active site and the
+site is a runtime choice (FR-SS-2). The bundle ships *geographic* coordinates. Measuring
+the projection is what settled the question — 2,000,000 points in 57.4 ms single-threaded
+(~29 ns/point), and only 446,219 points survive bake-time filtering to within 700 km of a
+bundled site, so a site change costs ~13 ms off-thread. Projection was never the cost;
+parsing and DBF attribute filtering were, and both moved to build time.
+
+Sources decided alongside: Natural Earth 10m for counties (a deliberate departure from
+FR-MU-1's TIGER wording — TIGER county geometry carries far more vertices than a 230 km
+PPI resolves), states/provinces, and coastline; TIGER/Line **Primary Roads** only for
+highways. The generated bundle is committed; the source shapefiles are not, with
+verified SHA-256 digests and a committed manifest standing in for diff review. `lyon` is
+not adopted — layers 3–5 are strokes, not fills. Full rationale, bundle format, and
+measurements in [ADR-0025](adr/0025-bundled-overlay-geometry.md). `REQUIREMENTS.md`
+FR-MU-1 and FR-MU-2 lose their `[OPEN]` markers and are amended;
+`dependency-inventory.md` E-07 is closed by this.
+
+**Q16: What HTTP client serves ADR-0007's tile providers?** — Resolved 2026-08-28
+(before Stage 5): neither of the two clients the question assumed. `http-ingest` splits
+by layer into one HTTP/1.1 **engine** plus two sibling policy crates that depend on it —
+`s3-fetch` (`S3Client`, the radar path) and `tile-fetch` (`TileClient`, the basemap
+path). One framing implementation, one fuzz corpus, zero new dependencies, ~300 lines of
+new code. The seam this splits on already existed inside the crate:
+`http-ingest/src/lib.rs` was always a thin S3 policy layer over a generic engine.
+
+`dependency-inventory.md` E-09 recommended a second, independent client crate. That
+reached the right goal — structural isolation of the tile path — by a mechanism that
+would have duplicated ~1,065 lines of `connection.rs` + `response.rs` and the 31-file
+fuzz corpus, concentrating divergence risk on the workspace's most security-sensitive
+code and contradicting `CLAUDE.md`'s DRY instruction. The layer split gets the same
+isolation for a quarter of the code.
+
+Three of the question's four premises did not survive measurement (2026-08-28, `curl
+--http1.1` against `basemap.nationalmap.gov`, `tile.openstreetmap.org`, and
+`server.arcgisonline.com`): HTTP/2 is not required (all three serve HTTP/1.1 keep-alive
+with `Content-Length`), redirects were not observed on any of them (`num_redirects=0`),
+and `ETag`/`If-None-Match` is nearly free because `response.rs` already frames 304 as
+bodiless. The question also **omitted** the one requirement that genuinely strained
+ADR-0014 — concurrency, since a viewport is 20–40 tiles and ADR-0014 chose a single
+connection with no pool. That is solved by N independent `TileClient`s as N worker tasks,
+which preserves "no connection pool" literally.
+
+The invariant identified as the real one: BC-1's property is not "the host is a
+compile-time constant" but *"every destination host traces to an explicit, auditable,
+user-controlled decision — never to data received over the network."* A tile URL in the
+config file satisfies it; a redirect does not. **Redirect following is therefore rejected
+permanently, not deferred** — a provider that requires it is a reason to configure a
+different provider. The radar path's guarantee gets *stronger*: `Host::parse(&str)` is
+replaced by `S3Client::new(bucket: Bucket)`, a two-variant enum, so no string reaches
+host selection and no `S3Client` method accepts a hostname at all.
+
+Full rationale, the engine/policy API sketch, the sub-decision table (scheme, port,
+limits, timeouts, concurrency, failure posture, no auth headers), and the rejected
+alternatives in [ADR-0026](adr/0026-tile-http-boundary.md). ADR-0014 gains an erratum;
+its scope-boundary list is amended, not discarded. `REQUIREMENTS.md` FR-DA-6 and FR-MU-4
+lose their `[OPEN]` markers; `dependency-inventory.md` E-09 is closed by this. ADR-0026
+raises **Q18** (tile image decoding) in the process — the transport question is settled,
+the codec question is not.
+
+**Q18: What decodes tile image bodies?** — Resolved 2026-08-28 (before Stage 5), and it
+resolved the scope rather than the codec: **the tile subsystem is deferred to post-v1.0**
+and v1.0 ships a vector-only basemap. Recorded in
+[ADR-0027](adr/0027-tile-image-decoding.md).
+
+The question's first candidate answer — own a minimal PNG decoder and restrict v1.0 to
+PNG providers — turned out not to exist as an option. Four of the five USGS National Map
+services serve **both** JPEG and PNG from a single URL template, interleaved by tile and
+not only for blank tiles, so no configuration of the ADR-0007 default yields PNG only and
+format cannot be pinned anywhere but per response.
+
+The measurement that decided the ownership question cut the opposite way from how it
+first looked. All 56 JPEGs sampled are one profile — SOF0 baseline, 8-bit, 3 components,
+4:4:4, no restart markers, single scan, no progressive anywhere — which makes an owned
+decoder only ~600 lines. But that profile is the setting of a cache built years ago by an
+agency that never promised it. ADR-0008 can own the NEXRAD decoder because ICD 2620002
+*is* a contract; a provider's encoder settings are a private implementation detail, and a
+decoder scoped to them takes a silent dependency on someone else's unstated
+configuration. **Specified-and-stable versus observed-and-unpromised** is the asymmetry
+that keeps ADR-0008's reasoning from extending to tile codecs, and it is the first thing
+to re-read if this is revisited.
+
+Neither cost nor containment turned out to be the hard part. Decoding is 0.32 ms per tile
+(mean, 73 tiles), so ~13 ms for a 40-tile viewport, off-thread. The decompression-bomb
+bound is trivial because a tile has exactly one legal size: gating on declared dimensions
+at the header rejects a 545-byte PNG claiming 30000×30000 (3.4 GB decoded) before any
+allocation.
+
+So the deferral is not a dodge of a hard problem — ADR-0027 §2 records the complete
+answer (`png` 0.18 + `jpeg-decoder` 0.3, magic-byte dispatch, dimension gate,
+`catch_unwind` on `spawn_blocking`, no `zlib-rs`) for when the subsystem is built. It is a
+scope decision: the tile layer is the one v1.0 item whose cost is a new untrusted-input
+parser on a network path and whose benefit is an optional, off-by-default raster layer
+beneath a vector reference map that ADR-0025 already made complete. `REQUIREMENTS.md` §6
+moves map imagery and the tile cache to Explicitly Deferred; FR-DA-6, FR-MU-4, FR-MU-5,
+and FR-MU-6 are marked deferred. ADR-0007 and ADR-0026 stand as written, unimplemented;
+**no stub is written** (ADR-0027 §3), and the corpus behind these measurements is
+kept at `crates/radar-workstation/tests/fixtures/tiles/`.
+
+**Q19: What is the source and bundle representation for city labels (layer 9)?** —
+Resolved 2026-08-30 (before Stage 5). Recorded in
+[ADR-0028](adr/0028-city-labels.md). The question asked four things together; **three of
+the four collapsed under measurement, and the fourth — the source — is the one whose
+presumed answer the numbers contradict.**
+
+Natural Earth 10m `populated_places` was named as the obvious candidate, "consistent with
+ADR-0025's other three Natural Earth layers." Measured against the committed 163-site
+table, it yields **19 labels inside a KDOX 230 km PPI and 2 inside 100 km** (KTLX 16/4,
+KLOT 28/8, KGLD 7/1). It is a small-scale *world* cartography set, and the consistency
+argument is precisely what makes the wrong answer look obvious. The two denser
+alternatives were measured too: Census Gazetteer places (32,329 records; KDOX 1,991/312)
+is public domain but US-only — it blanks LPLA, PGUA, RKJK, RKSG and RODN entirely, strips
+28–56% of labels from border sites (KATX 56%, KBUF 54%, KCXX 45%), and has no honest
+ranking field, since joining `sub-est2024` reaches 60.2% of rows and **0.0% of CDPs**.
+GeoNames `cities1000` (170,860 records; KDOX 1,742/148) is the best data and global, but
+CC BY 4.0 — the only non-public-domain data that would enter the binary, inside the
+approval surface Principle 4 protects.
+
+**Natural Earth is chosen for v1.0 and recorded as explicitly provisional**, because the
+plumbing is worth more than the source right now: layer 9 has never existed in any form,
+and a working bake → bundle → project → select → draw path turns a denser source into a
+regeneration rather than a project. The mechanism that guarantees that is **rank
+normalisation at bake time** — the runtime sees exactly `{ lon, lat, rank, name }` and
+nothing source-specific, so swapping sources changes the generator and the bundle, not
+the format or the runtime.
+
+The other three sub-questions:
+
+- **The format extension is not a version bump.** ADR-0025 is accepted but
+  *unimplemented* — no `utility/map-bake/`, no `overlay/` module, no blob in the tree — so
+  labels are designed into version 1. A label index and a UTF-8 string table are added,
+  spending the header's `reserved u32`. This narrows ADR-0025 §3's element-counts-only
+  invariant to the geometry sections; a string table needs byte offsets, and the property
+  that matters (a checked `slice::get` range, never a panic) is preserved. A fixed-width
+  name field would have kept the invariant literally and was rejected because it fits
+  Natural Earth's 25-byte maximum and truncates Census (57) and GeoNames (97) — encoding
+  the provisional source into the format.
+- **The renderer question had no architectural weight.** Compositing layers **1–8 are all
+  wgpu** and layer 10 is egui, so egui's lowest order *is* slot 9 — no ordering violation
+  and no second egui pass. `render/ui.rs::ring_labels` already draws world-projected text
+  this way. Measured at the pinned egui 0.36.1: 500 labels cost **0.108 ms** and panning
+  costs the same as static, because the galley cache keys on text, not position.
+- **The zoom-threshold policy is subsumed** by a screen-space, rank-ordered greedy
+  declutter pass, which is needed regardless: it self-limits output to ~250–360 labels
+  independent of source density (measured at KDOX against the dense source: 2,997
+  candidates → 254 placed at 230 km). The pass is pure, render-loop owned, never in
+  `AppState` (ADR-0018), and covered by FR-NI-4's spatial-stability test.
+
+Two costs accepted and recorded rather than discovered later: the v1.0 basemap names
+major population centres, not every settlement (so two labels inside 100 km is the
+design, not a bug); and at this density the declutter pass will essentially never reject
+a candidate, so it **must be unit-tested with synthetic dense input** or it compiles
+without ever being exercised.
+
+`REQUIREMENTS.md` gains **FR-MU-7** — before this, city labels appeared only in FR-DR-3's
+compositing list and had no functional requirement at all, so the requirement set and the
+compositing order disagreed. ADR-0025 is amended (§1 source row, §2 filter counts, §3
+format, §4 runtime path), not superseded.
+
+**Q7: How is the disk tile cache managed?** — Closed 2026-08-28 by deferral: there is no
+tile cache in v1.0 ([ADR-0027](adr/0027-tile-image-decoding.md)). Cache location, maximum
+size, and eviction policy return unanswered with the tile subsystem, and are to be decided
+with it rather than in advance. FR-MU-5 is marked deferred.
+
+**Q5: How are multiple instances coordinated, if at all?** — Closed 2026-08-28. The
+answer for v1.0 is **not at all**, which BC-4 already required ("running instances must
+never communicate with each other"); this question existed because a shared on-disk tile
+cache was the one plausible exception, and with tiles deferred
+([ADR-0027](adr/0027-tile-image-decoding.md)) there is no candidate shared resource left.
+Every other resource is already per-instance by construction: config and palettes are
+read-only, and the overlay bundle is shared as read-only pages of the executable, not as
+coordinated state (ADR-0025). The shared-cache case returns with the tile subsystem.
+FR-MU-6 is marked deferred.
+
+**Q20: Does TIGER Primary Roads need a bake-time simplification tolerance?** — Resolved
+2026-09-02 (Stage 5). **Yes: Douglas–Peucker at ε = 30 m**, recorded in
+[ADR-0029](adr/0029-primary-roads-simplification.md), which amends ADR-0025 §2 (the layer
+was unmeasured there) and §6 (the manifest field the tolerance fills).
+
+The measurement is the answer. TIGER Primary Roads is **3,589,114 points across 17,500
+parts — 8.0× the three Natural Earth layers combined** — at a mean vertex spacing of
+87.7 m over 313,078 km of road, and the 700 km site-footprint filter keeps **100%** of it,
+because the road network and the radar network cover the same ground. Unsimplified that is
+29.13 MB of bundle and **57.29 MB of GPU buffers — 45% of the 128 MB per-instance target
+before a single radar texture**. At ε = 30 m it is 281,401 points, 2.67 MB, and 4.36 MB of
+GPU: *smaller than the three layers it joins*, bringing the whole basemap to 6.41 MB of
+bundle, 11.46 MB of GPU, a 21.1 ms per-site projection, and a ~24 MB binary.
+
+Two corrections to this question as it was originally posed, both recorded in ADR-0029
+because they outlast the number: (1) "justified against what a 230 km PPI resolves" is the
+wrong yardstick — `view::MIN_M_PER_PX = 60.0` lets the user zoom 7× past the default view,
+and 30 m is half a pixel there; (2) the more durable bound is that **the map is context for
+a 250 m radar gate**, so 30 m is already 8.3× finer than the data it sits under. Projection
+cost, which ADR-0025 implied would be the problem, is **not** a constraint at any tolerance:
+117 ms unsimplified against a 5 s site-change budget.
+
+`MIN_M_PER_PX` is deliberately **not** made load-bearing — ADR-0029 §2. The tolerance is a
+calibration, not a contract; if that constant is ever lowered and the roads look faceted,
+the repair is a bundle regeneration with a smaller ε, not a design change.
+
+Two things recorded rather than left to be discovered: **13 of 163 sites have no
+primary-road geometry within 230 km** (the five overseas DoD sites, roadless interior
+Alaska, outer Hawaii) — TIGER is a US product with no public-domain global counterpart, and
+layer 5 is toggleable, so this degrades rather than breaks; and dropping sub-kilometre
+ramp/connector parts is worthless for bytes (0.7% of points) but may be worth doing for
+**visual clutter**, which is deliberately deferred until layer 5 has been drawn and looked
+at rather than raised as a new numbered question.

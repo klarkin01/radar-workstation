@@ -10,7 +10,7 @@ pub enum Error {
     Http { status: u16 },
     Timeout { phase: Phase },
     /// The peer closed a keepalive connection. Distinguished from `Connect` so
-    /// callers can decide whether a retry is safe (see `Client`'s retry rule).
+    /// callers can decide whether a retry is safe (see `S3Client`'s retry rule).
     Closed,
     BodyTooLarge { len: u64, limit: u64 },
     /// Rejected before any bytes were sent — e.g. CR/LF in a key.

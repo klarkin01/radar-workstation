@@ -13,7 +13,10 @@ const RING_MAX_KM: f32 = 300.0;
 pub const EMPHASIS_RING_KM: f32 = 230.0;
 const SPOKE_STEP_DEG: f32 = 30.0;
 const SPOKE_INNER_KM: f32 = 50.0;
-const MARKER_ARM_KM: f32 = 4.0;
+/// World km for a site-marker cross's arm. `pub(super)` so `render::overlay`
+/// draws non-active site markers as the same symbol at a different emphasis
+/// (§8) without a second copy of the constant (DRY).
+pub(super) const MARKER_ARM_KM: f32 = 4.0;
 const RING_SEGMENTS: usize = 240;
 
 const RING_COLOR: [f32; 4] = [0.52, 0.54, 0.60, 0.45];

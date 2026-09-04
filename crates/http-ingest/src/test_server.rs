@@ -1,5 +1,5 @@
 //! `#[cfg(test)]`-only scripted plaintext TCP server (D-d). Never compiled
-//! into a release build; `Client` never speaks plaintext.
+//! into a release build; `S3Client` never speaks plaintext.
 
 #![cfg(test)]
 

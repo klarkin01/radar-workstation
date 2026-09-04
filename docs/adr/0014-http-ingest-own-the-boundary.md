@@ -226,3 +226,39 @@ reflect. Recorded here so the ADR and the shipped code agree.
    trust boundary as the existing `list-type=2` query — this is an additional optional
    query parameter, not a new capability, so it does not reopen the "no connection pool" /
    scope-boundary decisions above.
+
+## Erratum (added by ADR-0026, 2026-08-28)
+
+10. **The "Scope boundaries" section is amended, not discarded.** That section says any
+    future need for one of its non-goals is *"a signal to reopen this ADR, not to grow the
+    crate."* Q16 was exactly that signal, and
+    [ADR-0026](0026-tile-http-boundary.md) is the reopening. Three of the listed non-goals
+    change status at the workspace level:
+
+    - *"Arbitrary URL parsing"* — still true of `http-ingest` itself, which validates
+      hostname **syntax** only. Which hosts are permissible is now the caller's policy.
+      `url` and `idna` remain absent from the graph; `tile-fetch` hand-rolls an
+      ASCII-only URL template parser, so D-07 stays resolved.
+    - *"Serving as a general-purpose HTTP client for other crates in the workspace"* — no
+      longer holds. `http-ingest` becomes the shared HTTP/1.1 **engine** for two sibling
+      policy crates, `s3-fetch` and `tile-fetch`. This was chosen over duplicating
+      `connection.rs` + `response.rs` (~1,065 lines) and the fuzz corpus into a second
+      client, which is what `dependency-inventory.md` E-09 had recommended.
+    - *"Redirect following"* — unchanged and now **permanent**, promoted from an omission
+      to a decision on BC-1 grounds. See ADR-0026 §4.
+
+    HTTP/2, HTTP/3, cookies, proxies, request bodies, multipart, and HTTP-layer
+    compression remain non-goals, unchanged.
+
+11. **Two behaviours move out of the engine into the policy crates.** The compile-time
+    host allowlist (`src/host.rs`) moves to `s3-fetch`, where it becomes a `Bucket` enum —
+    a stronger statement than the current string match, since no hostname string reaches
+    host selection at all. The `is_2xx` gate at `connection.rs:124` also moves out, so the
+    engine returns the status and each policy crate decides; this is what makes `304 Not
+    Modified` usable by `tile-fetch` without touching the response parser, which already
+    frames 304 correctly (`response.rs:140`).
+
+12. **The `tls12` decision (above) is reinforced by the tile path.** Its rationale — an
+    operator on an arbitrary network, possibly behind a TLS-inspecting middlebox — applies
+    with more force to user-configured tile hosts than to two known S3 endpoints. Keeping
+    `tls12` is now load-bearing for a second reason.

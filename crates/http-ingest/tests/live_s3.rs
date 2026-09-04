@@ -8,10 +8,7 @@
 //! so these tests check only transport-level properties: non-empty XML with
 //! at least one key, non-empty object bytes, and successful keepalive reuse.
 
-use http_ingest::Client;
-
-const CHUNKS_HOST: &str = "unidata-nexrad-level2-chunks.s3.amazonaws.com";
-const ARCHIVE_HOST: &str = "unidata-nexrad-level2.s3.amazonaws.com";
+use http_ingest::{Bucket, S3Client};
 
 /// Minimal, allocation-light scrape for a single `<Tag>value</Tag>` — good
 /// enough for a live test that doesn't want an XML parser dependency.
@@ -27,7 +24,7 @@ fn first_tag(xml: &[u8], tag: &str) -> Option<String> {
 #[tokio::test]
 #[ignore]
 async fn list_prefix_against_chunks_bucket_returns_at_least_one_key() {
-    let mut client = Client::new(CHUNKS_HOST).unwrap();
+    let mut client = S3Client::new(Bucket::Chunks);
     let body = client.list_prefix("KDOX/", None, None, None).await.unwrap();
     assert!(first_tag(&body, "Key").is_some(), "expected at least one <Key> in {body:?}");
 }
@@ -35,7 +32,7 @@ async fn list_prefix_against_chunks_bucket_returns_at_least_one_key() {
 #[tokio::test]
 #[ignore]
 async fn get_object_on_first_listed_key_returns_bytes() {
-    let mut client = Client::new(CHUNKS_HOST).unwrap();
+    let mut client = S3Client::new(Bucket::Chunks);
     let listing = client.list_prefix("KDOX/", None, None, None).await.unwrap();
     let key = first_tag(&listing, "Key").expect("listing should contain at least one key");
 
@@ -46,7 +43,7 @@ async fn get_object_on_first_listed_key_returns_bytes() {
 #[tokio::test]
 #[ignore]
 async fn two_sequential_get_object_calls_succeed_over_one_connection() {
-    let mut client = Client::new(CHUNKS_HOST).unwrap();
+    let mut client = S3Client::new(Bucket::Chunks);
     let listing = client.list_prefix("KDOX/", None, None, None).await.unwrap();
     let key = first_tag(&listing, "Key").expect("listing should contain at least one key");
 
@@ -61,7 +58,7 @@ async fn two_sequential_get_object_calls_succeed_over_one_connection() {
 #[tokio::test]
 #[ignore]
 async fn list_prefix_with_continuation_token_from_a_truncated_page_succeeds() {
-    let mut client = Client::new(CHUNKS_HOST).unwrap();
+    let mut client = S3Client::new(Bucket::Chunks);
     let first_page = client.list_prefix("KDOX/", None, None, None).await.unwrap();
 
     let is_truncated = first_tag(&first_page, "IsTruncated").as_deref() == Some("true");
@@ -83,7 +80,7 @@ async fn list_prefix_with_delimiter_groups_by_common_prefix() {
     // `delimiter=/` groups keys by that first path segment into
     // `<CommonPrefixes>`, which is what `S3Poller::list_volume_folders`
     // relies on to enumerate volumes without paging through every chunk.
-    let mut client = Client::new(CHUNKS_HOST).unwrap();
+    let mut client = S3Client::new(Bucket::Chunks);
     let body = client.list_prefix("KDOX/", None, None, Some("/")).await.unwrap();
     let text = std::str::from_utf8(&body).unwrap();
     assert!(text.contains("<CommonPrefixes>"), "expected CommonPrefixes grouping in {text}");
@@ -97,7 +94,7 @@ async fn archive_bucket_answers_both_request_shapes() {
     // of the chunks bucket's site-then-volume layout — confirmed live
     // (2026-07-29). Worth carrying forward to whatever `ChunkSource`
     // eventually consumes this bucket (ADR-0014 open question 2).
-    let mut client = Client::new(ARCHIVE_HOST).unwrap();
+    let mut client = S3Client::new(Bucket::Archive);
     let listing = client.list_prefix("2026/07/29/KDOX/", None, None, None).await.unwrap();
     let key = first_tag(&listing, "Key").expect("archive listing should contain at least one key");
 

@@ -2,7 +2,7 @@ use crate::data_acquisition::AcquisitionError;
 
 /// Splits a `https://<host>/<key>` sample URL into its host and key.
 /// Only syntax is validated here — host allowlist validation is delegated to
-/// `http_ingest::Client::new`, not duplicated.
+/// `http_ingest::Bucket::from_host`, not duplicated.
 pub fn split_s3_url(url: &str) -> Result<(&str, &str), AcquisitionError> {
     let rest = match url.strip_prefix("https://") {
         Some(rest) => rest,
@@ -73,7 +73,7 @@ mod tests {
 
     #[test]
     fn does_not_itself_reject_a_non_allowlisted_host() {
-        // Syntax only — allowlist enforcement happens in Client::new.
+        // Syntax only — allowlist enforcement happens in Bucket::from_host.
         let (host, key) = split_s3_url("https://evil.com/key").unwrap();
         assert_eq!(host, "evil.com");
         assert_eq!(key, "key");

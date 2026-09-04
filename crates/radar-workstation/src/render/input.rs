@@ -33,6 +33,8 @@ pub enum Action {
     ZoomOut,
     ResetView,
     ToggleReference,
+    /// Layer 5 (primary roads), FR-DR-3 (S5-f).
+    ToggleHighways,
     ToggleHelp,
     Quit,
 }
@@ -65,6 +67,7 @@ pub fn action_for_key(code: KeyCode, ctrl: bool) -> Option<Action> {
         KeyCode::Minus | KeyCode::NumpadSubtract => Some(Action::ZoomOut),
         KeyCode::Home => Some(Action::ResetView),
         KeyCode::KeyR => Some(Action::ToggleReference),
+        KeyCode::KeyH => Some(Action::ToggleHighways),
         KeyCode::F1 => Some(Action::ToggleHelp),
         _ => None,
     }
@@ -107,6 +110,7 @@ mod tests {
         assert_eq!(action_for_key(KeyCode::Minus, false), Some(Action::ZoomOut));
         assert_eq!(action_for_key(KeyCode::Home, false), Some(Action::ResetView));
         assert_eq!(action_for_key(KeyCode::KeyR, false), Some(Action::ToggleReference));
+        assert_eq!(action_for_key(KeyCode::KeyH, false), Some(Action::ToggleHighways));
         assert_eq!(action_for_key(KeyCode::F1, false), Some(Action::ToggleHelp));
         assert_eq!(action_for_char("?"), Some(Action::ToggleHelp));
     }

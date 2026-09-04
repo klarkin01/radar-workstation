@@ -40,7 +40,11 @@ fn map_client_error(error: http_ingest::Error) -> AcquisitionError {
 pub async fn download_sample(url: &str, output_path: &Path) -> Result<PathBuf, AcquisitionError> {
     let (host, key) = split_s3_url(url)?;
 
-    let mut client = http_ingest::Client::new(host).map_err(map_client_error)?;
+    // `Bucket` is a closed set of the two ADR-0011 hosts; a developer-supplied
+    // URL pointing anywhere else is rejected here, the one place in the tree
+    // that still maps an arbitrary hostname onto it (ADR-0026 §2's status note).
+    let bucket = http_ingest::Bucket::from_host(host).ok_or_else(|| AcquisitionError::NotAllowed(host.to_string()))?;
+    let mut client = http_ingest::S3Client::new(bucket);
     let body = client.get_object(key).await.map_err(map_client_error)?;
 
     if body.is_empty() {

@@ -4,6 +4,7 @@ pub mod compute;
 pub mod config;
 pub mod event;
 pub mod ingest;
+pub mod overlay;
 pub mod paths;
 pub mod pipeline;
 pub mod sites;

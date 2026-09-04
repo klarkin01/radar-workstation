@@ -13,6 +13,7 @@ use radar_workstation::ingest::s3_poll::{IngestState, IngestStatus};
 use radar_workstation::sites::Site;
 use radar_workstation::state::StateSnapshot;
 
+use super::labels::PlacedLabel;
 use super::time::{format_utc, utc_from_nexrad};
 use super::view::{self, ViewState};
 use super::reference;
@@ -39,6 +40,10 @@ pub struct ChromeInput<'a> {
     pub now: Instant,
     /// Physical viewport size, for placing range-ring labels in screen space.
     pub viewport: (f32, f32),
+    /// This frame's declutter-selected city/site labels (§9.3), already in
+    /// screen space — computed once per `redraw` by
+    /// `render::labels::select`, not here.
+    pub placed_labels: &'a [PlacedLabel],
 }
 
 /// What the grid holds under the cursor (§9.3). The two sentinels ADR-0020
@@ -97,6 +102,10 @@ pub fn draw(ui: &mut egui::Ui, input: &ChromeInput) {
     if input.view.show_reference {
         ring_labels(&ctx, input);
     }
+    // City/site labels (layer 9, §9.3): no toggle, unlike range rings — a
+    // site marker has no way to be read without its identifier, and FR-DR-3
+    // only marks layer 5 (highways) toggleable.
+    city_labels(&ctx, input.placed_labels);
     if input.snapshot.sweeps.is_empty() {
         loading_indicator(&ctx, input);
     } else {
@@ -125,6 +134,27 @@ fn ring_labels(ctx: &egui::Context, input: &ChromeInput) {
             egui::FontId::proportional(11.0),
             color,
         );
+    }
+}
+
+/// City names and radar site identifiers (layer 9, §9.3), already placed in
+/// screen space by `render::labels::select`. Two `painter.text` calls per
+/// label — a near-black copy offset by `(1, 1)` under the light text — so a
+/// name stays legible over saturated reflectivity. That doubles ADR-0028
+/// Measurement 3's per-label cost (500 labels: 0.108 ms -> ~0.22 ms against
+/// a 16.7 ms frame budget), a trade worth stating here so a later reader
+/// does not "simplify" the shadow away.
+fn city_labels(ctx: &egui::Context, placed: &[PlacedLabel]) {
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("city_labels")));
+    let shadow = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 190);
+    let text_color = egui::Color32::from_rgba_unmultiplied(215, 220, 230, 235);
+    let font = egui::FontId::proportional(12.0);
+    for label in placed {
+        // The same left-bottom anchor at `point + (5, -3)` that
+        // `render::labels::candidate_box` reserved screen space for.
+        let pos = egui::pos2(label.screen.0 + 5.0, label.screen.1 - 3.0);
+        painter.text(pos + egui::vec2(1.0, 1.0), egui::Align2::LEFT_BOTTOM, label.text, font.clone(), shadow);
+        painter.text(pos, egui::Align2::LEFT_BOTTOM, label.text, font.clone(), text_color);
     }
 }
 
@@ -285,6 +315,7 @@ fn help_overlay(ctx: &egui::Context) {
                 ("Left-drag", "pan"),
                 ("Home", "reset view (selection kept)"),
                 ("R", "toggle range rings / spokes"),
+                ("H", "toggle highways"),
                 ("F1 or ?", "toggle this overlay"),
                 ("Ctrl+Q", "quit"),
             ] {

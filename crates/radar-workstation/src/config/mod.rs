@@ -35,6 +35,11 @@ const POLL_INTERVAL_KEY: &str = "ingest.poll_interval_seconds";
 pub const WINDOW_WIDTH_KEY: &str = "window.width";
 pub const WINDOW_HEIGHT_KEY: &str = "window.height";
 pub const VIEW_PRODUCT_KEY: &str = "view.product";
+/// FR-DR-3/FR-CP-1 (S5-f): layer 5 (primary roads) and the reference
+/// geometry (range rings/spokes) toggles, persisted the same one-line way
+/// `view.product` already is.
+pub const VIEW_HIGHWAYS_KEY: &str = "view.highways";
+pub const VIEW_REFERENCE_KEY: &str = "view.reference";
 
 /// Window-geometry clamp bounds (S4-W7 §10). Out-of-range values fall back
 /// to the built-in default and report `ConfigValueInvalid` rather than
@@ -59,6 +64,10 @@ pub struct Config {
     pub window_width: Option<u32>,
     pub window_height: Option<u32>,
     pub view_product: Option<DisplayProduct>,
+    /// `None` when the file carried no valid `view.highways`/`view.reference`
+    /// — the render loop supplies its own default (`true`, both — S5-f).
+    pub show_highways: Option<bool>,
+    pub show_reference: Option<bool>,
 }
 
 impl Default for Config {
@@ -69,6 +78,8 @@ impl Default for Config {
             window_width: None,
             window_height: None,
             view_product: None,
+            show_highways: None,
+            show_reference: None,
         }
     }
 }
@@ -134,6 +145,8 @@ fn apply_key(config: &mut Config, key: &str, value: String, events: &mut Vec<Eve
             Some(product) => config.view_product = Some(product),
             None => events.push(Event::ConfigValueInvalid { key: key.to_string(), value }),
         },
+        VIEW_HIGHWAYS_KEY => config.show_highways = parse_bool(key, &value, events),
+        VIEW_REFERENCE_KEY => config.show_reference = parse_bool(key, &value, events),
         // Unrecognized but syntactically valid keys are ignored, not
         // reported: they may be a newer version's setting this binary
         // doesn't know about yet (NFR-P-1's multi-instance, multi-version
@@ -155,6 +168,20 @@ fn parse_dimension(
 ) -> Option<u32> {
     match value.parse::<u32>() {
         Ok(n) if range.contains(&n) => Some(n),
+        _ => {
+            events.push(Event::ConfigValueInvalid { key: key.to_string(), value: value.to_string() });
+            None
+        }
+    }
+}
+
+/// A `true`/`false` value, case-insensitive. Anything else is `None` plus
+/// one `ConfigValueInvalid`, the same "out of range -> default + event"
+/// shape `parse_dimension` follows (§10).
+fn parse_bool(key: &str, value: &str, events: &mut Vec<Event>) -> Option<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "true" => Some(true),
+        "false" => Some(false),
         _ => {
             events.push(Event::ConfigValueInvalid { key: key.to_string(), value: value.to_string() });
             None
@@ -291,6 +318,27 @@ mod tests {
         let (config, events) = load(&path);
         assert_eq!(config.view_product, None);
         assert!(matches!(events.as_slice(), [Event::ConfigValueInvalid { key, .. }] if key == VIEW_PRODUCT_KEY));
+    }
+
+    #[test]
+    fn highways_and_reference_toggles_load_when_valid_case_insensitively() {
+        let path = temp_config_path("view-toggles-valid");
+        std::fs::write(&path, "view.highways = FALSE\nview.reference = true\n").unwrap();
+
+        let (config, events) = load(&path);
+        assert!(events.is_empty(), "{events:?}");
+        assert_eq!(config.show_highways, Some(false));
+        assert_eq!(config.show_reference, Some(true));
+    }
+
+    #[test]
+    fn invalid_toggle_value_falls_back_to_none_and_is_reported() {
+        let path = temp_config_path("view-toggles-invalid");
+        std::fs::write(&path, "view.highways = maybe\n").unwrap();
+
+        let (config, events) = load(&path);
+        assert_eq!(config.show_highways, None);
+        assert!(matches!(events.as_slice(), [Event::ConfigValueInvalid { key, .. }] if key == VIEW_HIGHWAYS_KEY));
     }
 
     #[test]

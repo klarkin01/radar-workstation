@@ -17,6 +17,10 @@
 pub mod adapter;
 pub mod gpu;
 pub mod input;
+pub mod labels;
+#[cfg(test)]
+mod offscreen;
+pub mod overlay;
 pub mod radar;
 pub mod reference;
 pub mod time;
@@ -36,6 +40,7 @@ use winit::window::{Window, WindowId};
 
 use radar_workstation::compute::palette::{self, Palette};
 use radar_workstation::compute::{DisplayProduct, SweepGrid};
+use radar_workstation::event::Event;
 use radar_workstation::sites::Site;
 use radar_workstation::state::{AppState, StateSnapshot};
 
@@ -43,6 +48,8 @@ use self::gpu::Gpu;
 use self::input::Action;
 
 pub use self::gpu::RenderError;
+use self::labels::PlacedLabel;
+use self::overlay::OverlayRenderer;
 use self::radar::RadarRenderer;
 use self::reference::ReferenceRenderer;
 use self::view::ViewState;
@@ -58,6 +65,8 @@ pub struct PersistedView {
     pub width: u32,
     pub height: u32,
     pub product: DisplayProduct,
+    pub show_highways: bool,
+    pub show_reference: bool,
 }
 
 /// Run the render loop until the window closes or `Ctrl+Q`. Returns the
@@ -71,6 +80,8 @@ pub fn run(
     runtime: tokio::runtime::Handle,
     initial_size: (u32, u32),
     initial_product: DisplayProduct,
+    initial_show_highways: bool,
+    initial_show_reference: bool,
 ) -> Result<PersistedView, RenderError> {
     let event_loop = EventLoop::new().map_err(|e| RenderError::EventLoop(e.to_string()))?;
     event_loop.set_control_flow(ControlFlow::Wait);
@@ -79,6 +90,10 @@ pub fn run(
     for event in palette_events {
         state.report(event);
     }
+
+    let mut view = ViewState::initial((initial_size.0 as f32, initial_size.1 as f32), initial_product);
+    view.show_highways = initial_show_highways;
+    view.show_reference = initial_show_reference;
 
     let mut app = App {
         state,
@@ -92,7 +107,8 @@ pub fn run(
         egui_renderer: None,
         radar: None,
         reference: None,
-        view: ViewState::initial((initial_size.0 as f32, initial_size.1 as f32), initial_product),
+        overlay: None,
+        view,
         initial_size,
         last_uploaded_revision: None,
         last_drawn_revision: None,
@@ -104,6 +120,8 @@ pub fn run(
         first_frame_at: None,
         reconfigure_count: 0,
         fatal_error: None,
+        placed_labels: Vec::new(),
+        labels_cache_key: None,
     };
 
     let loop_result = event_loop.run_app(&mut app);
@@ -140,7 +158,13 @@ pub fn run(
     }
 
     let size = app.window.as_ref().map(|w| w.inner_size()).unwrap_or(PhysicalSize::new(initial_size.0, initial_size.1));
-    Ok(PersistedView { width: size.width, height: size.height, product: app.view.product })
+    Ok(PersistedView {
+        width: size.width,
+        height: size.height,
+        product: app.view.product,
+        show_highways: app.view.show_highways,
+        show_reference: app.view.show_reference,
+    })
 }
 
 struct App {
@@ -155,6 +179,10 @@ struct App {
     egui_renderer: Option<egui_wgpu::Renderer>,
     radar: Option<RadarRenderer>,
     reference: Option<ReferenceRenderer>,
+    /// `None` when the compiled-in overlay bundle failed validation
+    /// (reported once via `Event::OverlayBundleInvalid`) — the application
+    /// draws no map underlay and keeps running (§5.2).
+    overlay: Option<OverlayRenderer>,
     view: ViewState,
     initial_size: (u32, u32),
     last_uploaded_revision: Option<u64>,
@@ -173,6 +201,21 @@ struct App {
     /// A fatal error raised from inside the event loop — `run` returns it
     /// after `run_app` unwinds (§S5, §4.4).
     fatal_error: Option<RenderError>,
+    /// The current frame's declutter-selected labels (site ICAO + city
+    /// names, §9). Recomputed only when `labels_cache_key` changes (§9.2).
+    placed_labels: Vec<PlacedLabel>,
+    labels_cache_key: Option<LabelsCacheKey>,
+}
+
+/// Exact-bits memoisation key for the label declutter pass (§9.2):
+/// `(center_m, m_per_px, viewport, avail)`. Compared by `f64`/`f32::to_bits`
+/// rather than a tolerance, so the cache can never be subtly stale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LabelsCacheKey {
+    center_m: (u64, u64),
+    m_per_px: u64,
+    viewport: (u32, u32),
+    avail: [u32; 4],
 }
 
 /// The late-failure guard's thresholds (§4.4).
@@ -202,6 +245,7 @@ impl App {
             Action::ZoomOut => view::zoom_about(&mut self.view, vp.0 / 2.0, vp.1 / 2.0, input::ZOOM_OUT_FACTOR, vp),
             Action::ResetView => self.view.reset_navigation(vp),
             Action::ToggleReference => self.view.show_reference = !self.view.show_reference,
+            Action::ToggleHighways => self.view.show_highways = !self.view.show_highways,
             Action::ToggleHelp => self.show_help = !self.show_help,
             Action::Quit => event_loop.exit(),
         }
@@ -264,6 +308,7 @@ impl App {
         let window = self.window.clone().unwrap();
         let egui_ctx = self.egui_ctx.clone();
         let view = self.view;
+        let vp = self.viewport();
         let show_help = self.show_help;
         let site = self.site;
         let cursor_pos = self.cursor_pos;
@@ -275,11 +320,32 @@ impl App {
             .map(|s| s.volume);
         let palette = self.palettes.get(&view.product);
 
+        // City/site labels (§9.2): the declutter pass is recomputed only
+        // when its memoisation key changes, so a steady-state frame (no
+        // pan/zoom/resize) costs nothing here. `avail` reserves the legend
+        // and status-bar strips so a label never lands under either.
+        const STATUS_BAR_HEIGHT_PX: f32 = 28.0;
+        const LEGEND_WIDTH_PX: f32 = 84.0;
+        let avail = [0.0, 0.0, vp.0 - LEGEND_WIDTH_PX, vp.1 - STATUS_BAR_HEIGHT_PX];
+        let labels_cache_key = LabelsCacheKey {
+            center_m: (view.center_m.0.to_bits(), view.center_m.1.to_bits()),
+            m_per_px: view.m_per_px.to_bits(),
+            viewport: (vp.0.to_bits(), vp.1.to_bits()),
+            avail: [avail[0].to_bits(), avail[1].to_bits(), avail[2].to_bits(), avail[3].to_bits()],
+        };
+        if self.labels_cache_key != Some(labels_cache_key) {
+            let candidates: &[labels::LabelCandidate] =
+                self.overlay.as_ref().map(|o| o.label_candidates()).unwrap_or(&[]);
+            self.placed_labels = labels::select(candidates, &view, vp, avail);
+            self.labels_cache_key = Some(labels_cache_key);
+        }
+
         let gpu = self.gpu.as_mut().unwrap();
         let egui_state = self.egui_state.as_mut().unwrap();
         let egui_renderer = self.egui_renderer.as_mut().unwrap();
         let radar = self.radar.as_mut().unwrap();
         let reference = self.reference.as_ref().unwrap();
+        let overlay = self.overlay.as_ref();
 
         if self.last_uploaded_revision != Some(snapshot.revision) {
             for event in radar.sync(&gpu.device, &gpu.queue, &snapshot, &self.palettes) {
@@ -326,7 +392,6 @@ impl App {
         };
         let target_view = surface_texture.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let vp = (gpu.config.width as f32, gpu.config.height as f32);
         let pixels_per_point = window.scale_factor() as f32;
 
         // --- egui frame ---
@@ -346,6 +411,7 @@ impl App {
             show_help,
             now: Instant::now(),
             viewport: vp,
+            placed_labels: &self.placed_labels,
         };
         let full_output = egui_ctx.run_ui(raw_input, |ui| ui::draw(ui, &chrome));
         egui_state.handle_platform_output(&window, full_output.platform_output);
@@ -365,7 +431,9 @@ impl App {
         };
         egui_renderer.update_buffers(&gpu.device, &gpu.queue, &mut encoder, &tris, &screen_desc);
 
-        // Pass 1: clear to background, radar (layer 6), reference (layer 8-ish).
+        // Pass 1: clear to background, overlay (layers 3-5), radar (layer 6),
+        // reference (range rings/active marker, layer 8-ish), site markers
+        // (layer 8, S5-W5 §8).
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("scene"),
@@ -381,11 +449,20 @@ impl App {
                 multiview_mask: None,
             });
             let camera = view::Camera::from_view(&view, vp);
+            // Layers 3-5: map underlay, under the radar (S5-W4 §7).
+            if let Some(overlay) = overlay {
+                overlay.draw(&gpu.queue, &mut pass, camera, view.show_highways);
+            }
             if let Some(grid) = selected_grid.as_deref() {
                 radar.draw(&gpu.device, &gpu.queue, &mut pass, grid, camera);
             }
             if view.show_reference {
                 reference.draw(&gpu.queue, &mut pass, camera);
+            }
+            // Layer 8: every other bundled site, after the radar and the
+            // active site's own marker (S5-W5 §8).
+            if let Some(overlay) = overlay {
+                overlay.draw_site_markers(&gpu.queue, &mut pass, camera);
             }
         }
 
@@ -519,12 +596,42 @@ impl ApplicationHandler for App {
         let radar = RadarRenderer::new(&gpu.device, gpu.config.format, gpu.surface_is_srgb, gpu.max_texture_dimension);
         let reference = ReferenceRenderer::new(&gpu.device, gpu.config.format);
 
+        // Map underlay (S5-e): the projection runs once, synchronously,
+        // here — the site is fixed for this process's lifetime, so there is
+        // exactly one projection ever. `projected` is consumed by
+        // `OverlayRenderer::new` (buffer creation) and dropped at the end
+        // of this scope; nothing reachable from `redraw` holds a `Bundle`.
+        let overlay = match radar_workstation::overlay::bundled() {
+            Some(bundle) => {
+                let (projected, events) = radar_workstation::overlay::project(bundle, self.site);
+                for event in events {
+                    self.state.report(event);
+                }
+                let renderer = OverlayRenderer::new(&gpu.device, gpu.config.format, &projected, self.site);
+                eprintln!(
+                    "[radar-workstation] overlay: {} vertices, {} indices, {} labels, {} GPU bytes",
+                    projected.vertices.len(),
+                    projected.indices.len(),
+                    projected.labels.len(),
+                    renderer.buffer_bytes(),
+                );
+                Some(renderer)
+            }
+            None => {
+                self.state.report(Event::OverlayBundleInvalid {
+                    reason: "compiled-in bundle failed structural validation",
+                });
+                None
+            }
+        };
+
         self.window = Some(window.clone());
         self.gpu = Some(gpu);
         self.egui_state = Some(egui_state);
         self.egui_renderer = Some(egui_renderer);
         self.radar = Some(radar);
         self.reference = Some(reference);
+        self.overlay = overlay;
         window.request_redraw();
     }
 
@@ -654,6 +761,7 @@ mod tests {
     use radar_workstation::ingest::s3_poll::IngestStatus;
     use radar_workstation::state::{AppState, VolumeSummary};
 
+    use super::labels;
     use super::view::ViewState;
 
     fn grid(product: DisplayProduct, el: u8) -> Arc<SweepGrid> {
@@ -676,6 +784,10 @@ mod tests {
     /// FR-NI-4 / S4-g: no sequence of state updates can move the view. The
     /// guarantee is structural — nothing wires `ViewState` to `AppState` —
     /// and this test is the boundary marker for the next contributor.
+    /// Extended per §9.4 (ADR-0028 §5): the same guarantee for the label
+    /// declutter pass, rather than a second standalone test — a new scan, a
+    /// product switch, or a sweep switch must not change which labels are
+    /// placed.
     #[tokio::test]
     async fn view_state_is_unchanged_by_any_sequence_of_state_updates() {
         let (_tx, rx) = watch::channel(IngestStatus::default());
@@ -688,6 +800,13 @@ mod tests {
         view.elevation_number = 5;
         view.show_reference = false;
         let before = view;
+
+        let candidates = [
+            labels::LabelCandidate { world: [0.0, 0.0], rank: 0, text: "KDOX" },
+            labels::LabelCandidate { world: [40_000.0, 15_000.0], rank: 1, text: "Dover" },
+        ];
+        let avail = [0.0, 0.0, 1280.0, 780.0];
+        let labels_before = labels::select(&candidates, &before, (1280.0, 800.0), avail);
 
         let vol = VolumeId { julian_date: 20_000, scan_time_ms: 1 };
         for el in [1u8, 2, 3, 6] {
@@ -737,5 +856,7 @@ mod tests {
         state.apply_event(StateUpdate::Info(AssemblyEvent::MissingStartChunk), Instant::now());
 
         assert_eq!(view, before, "no state update may perturb ViewState");
+        let labels_after = labels::select(&candidates, &view, (1280.0, 800.0), avail);
+        assert_eq!(labels_after, labels_before, "no state update may perturb the placed-label set");
     }
 }

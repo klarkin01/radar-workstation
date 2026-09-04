@@ -61,6 +61,10 @@ pub struct ViewState {
     /// first sweep arrives and sets the default (§3.8).
     pub elevation_number: u8,
     pub show_reference: bool,
+    /// Layer 5 (primary roads) toggle (FR-DR-3, S5-f). Unlike
+    /// `show_reference`, this has no effect on the reference geometry pass
+    /// — it gates `render::overlay::OverlayRenderer::draw`'s roads layer.
+    pub show_highways: bool,
 }
 
 impl ViewState {
@@ -73,6 +77,7 @@ impl ViewState {
             product,
             elevation_number: 0,
             show_reference: true,
+            show_highways: true,
         }
     }
 

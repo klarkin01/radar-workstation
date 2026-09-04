@@ -36,6 +36,37 @@ pub fn slant_range_and_height(ground_m: f64, elev_deg: f64) -> (f64, f64) {
     (r, h)
 }
 
+/// Azimuthal equidistant projection centred on `(site_lat, site_lon)`.
+/// Returns metres east (`+x`) and north (`+y`) of the site — the same world
+/// frame `render::view` and `render::reference` use (S5-c, ADR-0025 §4
+/// erratum: this is the *first* production az-eq implementation, not a
+/// second one — see the erratum for why the ADR's original "shared with the
+/// radar path" premise was wrong).
+///
+/// The antipodal singularity (`k = c / sin(c)` diverges as `c → π`) is
+/// guarded: `c` is clamped just short of `π`, producing a finite, far-
+/// off-screen coordinate rather than a `NaN` that would poison a vertex
+/// buffer. No bundled site currently has overlay geometry near its
+/// antipode, but the overlay bundle is global (it keeps geometry within
+/// 700 km of Kadena, Lajes and Guam among others), so the guard is not
+/// theoretical — Stability as Ethics applies to arithmetic the same way it
+/// applies to parsing.
+pub fn az_eq_project(site_lat: f64, site_lon: f64, lat: f64, lon: f64) -> (f64, f64) {
+    // Just short of pi: sin(c) stays representable, so k = c / sin(c) comes
+    // out large but finite instead of dividing by (near) zero.
+    const MAX_CENTRAL_ANGLE: f64 = std::f64::consts::PI - 1e-9;
+
+    let (lat_r, lon_r) = (lat.to_radians(), lon.to_radians());
+    let (lat0, lon0) = (site_lat.to_radians(), site_lon.to_radians());
+    let dlon = lon_r - lon0;
+    let cos_c = (lat0.sin() * lat_r.sin() + lat0.cos() * lat_r.cos() * dlon.cos()).clamp(-1.0, 1.0);
+    let c = cos_c.acos().min(MAX_CENTRAL_ANGLE);
+    let k = if c < 1e-10 { 1.0 } else { c / c.sin() };
+    let x = k * lat_r.cos() * dlon.sin();
+    let y = k * (lat0.cos() * lat_r.sin() - lat0.sin() * lat_r.cos() * dlon.cos());
+    (x * EARTH_RADIUS_M, y * EARTH_RADIUS_M)
+}
+
 /// Forward direction: ground range and height for a target at slant range
 /// `slant_m` on a beam at elevation `elev_deg`. The standard
 /// Doviak-and-Zrnic slant-range-to-height/ground-range equations, inverse
@@ -91,5 +122,54 @@ mod tests {
         let (r, h) = slant_range_and_height(0.0, 0.5);
         assert!(r.abs() < 1.0, "r={r}");
         assert!(h.abs() < 1.0, "h={h}");
+    }
+
+    // --- az_eq_project (S5-c) ---
+
+    const KDOX_LAT: f64 = 38.8258;
+    const KDOX_LON: f64 = -75.4401;
+
+    #[test]
+    fn projects_the_site_itself_to_the_origin() {
+        let (x, y) = az_eq_project(KDOX_LAT, KDOX_LON, KDOX_LAT, KDOX_LON);
+        assert!(x.abs() < 1e-6 && y.abs() < 1e-6, "site should project to (0,0), got ({x},{y})");
+    }
+
+    #[test]
+    fn north_east_south_west_have_the_expected_signs() {
+        let d = 1.0; // one degree, comfortably away from the antipode
+        // Off-axis drift is expected away from the equator (a constant-
+        // latitude arc isn't a great-circle radius from the site), so the
+        // cross-axis bound is generous — only the dominant-axis sign and
+        // rough magnitude matter here.
+        let (x_n, y_n) = az_eq_project(KDOX_LAT, KDOX_LON, KDOX_LAT + d, KDOX_LON);
+        assert!(y_n > 0.0 && x_n.abs() < 1_000.0, "north: ({x_n},{y_n})");
+
+        let (x_e, y_e) = az_eq_project(KDOX_LAT, KDOX_LON, KDOX_LAT, KDOX_LON + d);
+        assert!(x_e > 0.0 && y_e.abs() < 1_000.0, "east: ({x_e},{y_e})");
+
+        let (x_s, y_s) = az_eq_project(KDOX_LAT, KDOX_LON, KDOX_LAT - d, KDOX_LON);
+        assert!(y_s < 0.0, "south: ({x_s},{y_s})");
+
+        let (x_w, y_w) = az_eq_project(KDOX_LAT, KDOX_LON, KDOX_LAT, KDOX_LON - d);
+        assert!(x_w < 0.0, "west: ({x_w},{y_w})");
+    }
+
+    #[test]
+    fn distance_from_the_site_matches_great_circle_within_a_metre_at_500_km() {
+        // Az-eq is distance-preserving along radii from the projection
+        // centre — an exact property of the projection, not a tolerance
+        // fudge for a particular point. Due north at 500 km: the target
+        // latitude is site_lat + 500_000 / EARTH_RADIUS_M radians.
+        let target_lat = KDOX_LAT + (500_000.0 / EARTH_RADIUS_M).to_degrees();
+        let (x, y) = az_eq_project(KDOX_LAT, KDOX_LON, target_lat, KDOX_LON);
+        let dist = (x * x + y * y).sqrt();
+        assert!((dist - 500_000.0).abs() < 1.0, "expected ~500000 m, got {dist} m");
+    }
+
+    #[test]
+    fn antipodal_input_is_finite() {
+        let (x, y) = az_eq_project(KDOX_LAT, KDOX_LON, -KDOX_LAT, KDOX_LON + 180.0);
+        assert!(x.is_finite() && y.is_finite(), "antipodal projection must be finite, got ({x},{y})");
     }
 }
