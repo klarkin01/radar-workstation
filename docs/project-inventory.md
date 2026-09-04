@@ -11,18 +11,22 @@ This is an inventory, not a plan. It records what exists, what does not, and the
 which the missing work should be taken up. It does not decide any open question, propose a
 design, or estimate effort in hours.
 
-> **Superseded for current state, 2026-08-28:** Stages 2, 3, and 4 (items 6–18 below) are
-> complete — see `docs/plans/stage-2-make-the-application-exist.md` §12,
-> `docs/plans/stage-3-compute-layer.md` §15, and
-> `docs/plans/stage-4-first-pixels.md` §16 for what was built and measured. Stage 4 put
+> **Superseded for current state, 2026-09-02:** Stages 2, 3, 4, and 5 (items 6–22 below)
+> are complete — see `docs/plans/stage-2-make-the-application-exist.md` §12,
+> `docs/plans/stage-3-compute-layer.md` §15, `docs/plans/stage-4-first-pixels.md` §16, and
+> `docs/plans/stage-5-map-underlays.md` §18 for what was built and measured. Stage 4 put
 > the radar image on screen: a winit/wgpu/egui render loop (ADR-0022, ADR-0023) drawing
 > the selected gridded product in azimuthal-equidistant projection over range rings and a
 > site marker, with keyboard product/sweep switching, a cursor readout, a colour legend,
-> and a status bar. `--headless` runs the Stage 2 loop. Map underlays, tiles, and
-> placefiles (Stages 5–6) remain unbuilt. This document's numbers (test counts, LOC,
-> package counts, open-question counts) reflect the `668b1ca` snapshot and are not
-> re-audited here; each plan's own Results section is the current source of truth for its
-> stage, the same relationship `dependency-inventory.md` has to its own remediation plan.
+> and a status bar. Stage 5 put the map underneath it: county, state/country, coastline,
+> and primary-road geometry (ADR-0025, ADR-0029), every other bundled site's marker and
+> declutter-selected city/site labels (ADR-0028), all baked into the binary with no
+> runtime parser and no network, plus `S3Client::new(bucket: Bucket)` from ADR-0026 §2.
+> `--headless` runs the Stage 2 loop. Tiles and placefiles (Stage 6, and tiles post-v1.0
+> per ADR-0027) remain unbuilt. This document's numbers (test counts, LOC, package counts,
+> open-question counts) reflect the `668b1ca` snapshot and are not re-audited here; each
+> plan's own Results section is the current source of truth for its stage, the same
+> relationship `dependency-inventory.md` has to its own remediation plan.
 
 ---
 
@@ -150,7 +154,8 @@ Every item below is designed in `docs/` and has zero implementation.
   closure, late-data discard, watchdog timeout, `Superseded` / `TimedOut` closure
 - Site-change cancellation and state clearing (FR-DA-4)
 - Chunk-stream → assembled-volume failover (FR-DA-8, blocked on Q14)
-- Placefile fetching (FR-DA-7) and tile fetching (FR-DA-6, blocked on Q16)
+- Placefile fetching (FR-DA-7) and tile fetching (FR-DA-6, blocked on Q16 — *Q16 resolved
+  by ADR-0026; tile fetching subsequently deferred out of v1.0 by ADR-0027*)
 
 **Compute layer** — nothing exists
 - rayon parallel product derivation; Echo Tops; VIL
@@ -170,7 +175,8 @@ Every item below is designed in `docs/` and has zero implementation.
 **Map underlays** — nothing exists in production (POC only in `radar-viz`)
 - County / state / country / highway geometry loading and pre-projection (blocked on Q15)
 - Bundled NEXRAD site list (FR-MU-3, FR-SS-1) — not blocked on anything
-- Tile subsystem and LRU disk cache (blocked on Q16, Q7, Q5)
+- Tile subsystem and LRU disk cache (blocked on Q16, Q7, Q5 — *all three closed; the
+  subsystem is deferred to post-v1.0, ADR-0027*)
 
 **Placefiles** — nothing exists
 - GRLevelX parser, polling, ordering, toggling (scope blocked on Q6)
@@ -199,11 +205,14 @@ Six of the twelve open questions gate work that cannot sensibly start without th
 | **Q9** — velocity dealiasing | Compute layer, velocity product | Algorithmically the largest single unknown |
 | **Q17** — texture grid dimensions | Compute layer texture generation | Half-answerable today; standard-res geometry unmeasurable from current fixtures |
 | **Q11** — color table format | Compute layer color mapping, bundled defaults | GRLevelX-compatible is the strong preference |
-| **Q15** — shapefile parser on the startup path | Map overlay loading | May supersede ADR-0006's parser clause |
-| **Q16** — HTTP client for tiles | The **entire** tile subsystem | FR-DA-6 and FR-MU-4 are currently *unimplementable* against the accepted ADR set. Needs its own ADR. |
+| ~~**Q15**~~ — shapefile parser on the startup path | Map overlay loading | **Resolved 2026-08-28** — build-time bake, no runtime parser ([ADR-0025](adr/0025-bundled-overlay-geometry.md)). Superseded ADR-0006's parser clause. |
+| ~~**Q16**~~ — HTTP client for tiles | The **entire** tile subsystem | **Resolved 2026-08-28** — one HTTP/1.1 engine, two policy crates ([ADR-0026](adr/0026-tile-http-boundary.md)). FR-DA-6 and FR-MU-4 lose their `[OPEN]` markers; `dependency-inventory.md` E-09 closed. |
+| ~~**Q18**~~ — tile image decoding | The tile subsystem, jointly with Q5 and Q7 | **Resolved 2026-08-28** — by deferring the subsystem, not by choosing a codec ([ADR-0027](adr/0027-tile-image-decoding.md)). v1.0 ships a vector-only basemap; the codec answer is recorded for when it returns. |
 | Q14 | Data-source failover | Secondary; the primary path works |
 | Q6 | Placefile scope | Answer before writing the parser |
-| Q5, Q7 | Tile cache sharing and sizing | Answer with Q16 |
+| ~~Q5, Q7~~ | Tile cache sharing and sizing | **Closed 2026-08-28 by deferral** — no tile cache in v1.0 (ADR-0027). Q5's general answer is BC-4's: instances never coordinate. |
+| ~~**Q19**~~ — city label source and bundle representation | Compositing layer 9 | **Resolved 2026-08-30** — Natural Earth 10m `populated_places`, provisional and known-sparse (19 labels in a KDOX 230 km PPI); a bundle label index + UTF-8 string table at format version 1; a screen-space declutter pass; drawn by egui at `Order::Background` ([ADR-0028](adr/0028-city-labels.md)). Adds FR-MU-7. |
+| ~~**Q20**~~ — TIGER Primary Roads simplification | Nothing hard; it gated no other work | **Resolved 2026-09-02** — Douglas–Peucker at ε = 30 m ([ADR-0029](adr/0029-primary-roads-simplification.md)). The layer measured **3,589,114 points, 8.0× the other three combined**, and the 700 km filter keeps 100% of it; unsimplified it is 57.29 MB of GPU buffers against a 128 MB target. At ε = 30 m it is smaller than the three layers it joins. |
 | Q12, Q13 | Distribution and minimum requirements | Answer before first release, not before |
 
 ---
@@ -273,29 +282,81 @@ half the requirements cannot be validated until something renders.
 *At the end of Stage 4 the application is usable for its core purpose. Everything after
 this point is context around the radar image.*
 
-### Stage 5 — Map underlays
-19. **Answer Q15**, then implement vector overlay loading and pre-projection (FR-MU-1,
+### Stage 5 — Map underlays (overlay-only; no blocking questions remain) — **complete,
+see `docs/plans/stage-5-map-underlays.md` §18**
+
+<!-- Q19 resolved 2026-08-30 (ADR-0028) — layer 9 now has a source, a bundle
+representation, and a renderer. Q20 resolved 2026-09-02 (ADR-0029) — it gated nothing,
+and was answered by measurement before Stage 5's overlay code was written rather than
+after, so the tolerance is a generator constant from the start and not a re-bake. -->
+19. **SEE ADR 0025-bundled-overlay-geometry.md, and the answer for Q15**, then implement vector overlay loading and pre-projection (FR-MU-1,
     FR-MU-2) and layers 3–5 and 8–9 of the compositing order.
-20. **Answer Q16 and record it as an ADR**, then implement the tile subsystem and the LRU
-    disk cache (FR-MU-4, FR-MU-5), answering Q5 and Q7 alongside it.
+20. **`S3Client::new(bucket: Bucket)`** — replace `Host::parse(&str)` with the
+    two-variant enum inside the existing `http-ingest`, so no string reaches host
+    selection and the radar path's host guarantee becomes compiler-checked. This is the
+    one part of [ADR-0026](adr/0026-tile-http-boundary.md) taken up now; the engine/policy
+    crate split is deferred with the tile subsystem, because its motivation was hosting
+    `tile-fetch` (ADR-0027 §4). A few hours, no new crates.
+21. **~~Answer [Q19](open-questions.md)~~ (city labels, layer 9) — RESOLVED 2026-08-30,
+    [ADR-0028](adr/0028-city-labels.md).** Implement against that ADR: the label sections
+    of the bundle format (ADR-0025 §3), the bake-time filter and rank normalisation, the
+    screen-space declutter pass, and the egui draw. Must land before item 19's layer-9
+    portion; item 19's layers 3–5 and 8 are independent of it.
+22. **~~Answer [Q20](open-questions.md)~~ (TIGER Primary Roads simplification) —
+    RESOLVED 2026-09-02, [ADR-0029](adr/0029-primary-roads-simplification.md).** The
+    measurement was run ahead of the overlay code rather than after it, so ε = 30 m is a
+    generator constant from the first bake and not a later re-bake. Implement against that
+    ADR: Douglas–Peucker at 30 m applied to the primary-roads layer only, endpoints
+    preserved, the three Natural Earth layers left at native density, and
+    `simplification: douglas-peucker, epsilon 30 m` recorded in `bundle.manifest.txt`
+    (ADR-0025 §6). Roughly 30 lines of dev-only Python in `utility/map-bake/`; no
+    dependency delta.
+
+    **Then look at the drawn layer.** Sub-kilometre ramp and connector parts are 15% of
+    parts but 0.7% of points — worthless to prune for bytes, possibly worth pruning for
+    clutter, and unanswerable until layer 5 is on screen. Deliberately *not* a new
+    numbered question (ADR-0029 §3): it gates nothing and its answer is a generator filter
+    plus a regeneration.
+
+<!-- amended 2026-08-30 (ADR-0028, resolving Q19): item 21 previously bundled Q19 and Q20
+into one entry. They share only an origin (both raised by ADR-0027) — one is a label
+subsystem, the other a road-geometry measurement — so they are split here. Item 21's
+original text also restated two premises that did not survive measurement, and they are
+recorded because the failure mode matters more than the correction. (1) "labels need a
+format extension **and a version bump**": ADR-0025 is accepted but unimplemented, so
+labels are designed into version 1 and there is nothing to migrate. (2) layer 9 "below
+layer 10 in the compositing order but drawn by the layer-10 renderer" was read as an
+ordering conflict; it is not one, because compositing layers 1–8 are all wgpu and layer
+10 is egui, so egui's lowest order *is* slot 9 — as `render/ui.rs::ring_labels` already
+demonstrates. Both premises were plausible from the documents and wrong against the code.
+The thing item 21 did *not* name — a screen-space declutter pass, which is the one piece
+of genuinely new architecture — is now the bulk of the work. -->
+
+*Tiles are no longer part of Stage 5.* Items 20–22 **of the pre-ADR-0027 sequence** —
+tile transport, the Q18 codec decision, and the tile subsystem with its LRU cache — are
+deferred to post-v1.0 by [ADR-0027](adr/0027-tile-image-decoding.md), which closes Q18,
+Q5, and Q7. (Those numbers have since been reused by the current list above; the
+deferred items are identified by name, not by number.) v1.0's basemap is vector-only. ADR-0007 and ADR-0026 stand as written and
+unimplemented; ADR-0027 §2 records the codec answer, and the corpus its measurements were
+taken against lives at `crates/radar-workstation/tests/fixtures/tiles/`.
 
 ### Stage 6 — Placefiles
-21. **Answer Q6**, then implement the GRLevelX parser, per-placefile polling, ordering,
+23. **Answer Q6**, then implement the GRLevelX parser, per-placefile polling, ordering,
     toggling, and fetch-failure tolerance (FR-PF-1…6).
 
 ### Stage 7 — Site switching and multi-instance
-22. **Runtime site change** (FR-DA-4, FR-SS-2, FR-SS-3) against the < 5 s target.
-23. **Multi-instance validation** (NFR-P-1) — four concurrent instances, resource scaling.
+24. **Runtime site change** (FR-DA-4, FR-SS-2, FR-SS-3) against the < 5 s target.
+25. **Multi-instance validation** (NFR-P-1) — four concurrent instances, resource scaling.
 
 ### Stage 8 — Validate the non-functional requirements
-24. Measure every target in `REQUIREMENTS.md` §4.1 (60 fps, < 2 s first render, < 200 MB,
+26. Measure every target in `REQUIREMENTS.md` §4.1 (60 fps, < 2 s first render, < 200 MB,
     < 128 MB GPU). These are stated as design targets to be validated, not assumed.
-25. Long-run soak for memory stability (NFR-ST-4); audit for `unwrap`/`expect` on
+27. Long-run soak for memory stability (NFR-ST-4); audit for `unwrap`/`expect` on
     untrusted data (NFR-ST-2); confirm no unsanctioned network connections (BC-1, BC-2).
-26. Reproducible-build verification (NFR-SEC-4).
+28. Reproducible-build verification (NFR-SEC-4).
 
 ### Stage 9 — Release
-27. **Answer Q12 and Q13**, package, and document minimum system requirements.
+29. **Answer Q12 and Q13**, package, and document minimum system requirements.
 
 ---
 
@@ -312,6 +373,21 @@ established remedy.
 Q16 questions whether ADR-0014's host allowlist can survive contact with ADR-0007's
 arbitrary-host tile providers. Neither is a documentation problem; both need a decision
 and an ADR before their subsystem starts.
+
+<!-- resolved 2026-08-28: both, in the way this paragraph hoped for. ADR-0025 supersedes
+ADR-0006's parser clause (build-time bake, five crates removed). ADR-0026 amends
+ADR-0014's scope boundaries rather than breaking them: the allowlist stays, and gets
+stronger, on the radar path; the tile path is a sibling policy crate over the same
+engine. Neither ADR was silently rewritten — the errata pattern held. The successor
+pressure is Q18 (tile image decoding), raised by ADR-0026.
+
+resolved 2026-08-28: Q18 too, though not the way this paragraph anticipated. It was
+closed by deferring the tile subsystem out of v1.0 rather than by choosing a codec
+(ADR-0027) — the measurements showed the format question could not be narrowed (four of
+five USGS services serve both JPEG and PNG from one template) and that the narrow JPEG
+profile which made owning a decoder look cheap is an observation of a provider's cache,
+not a specification a decoder can rely on. Q5 and Q7 closed with it. Stage 5 is now
+overlay-only with no blocking questions in front of it. -->
 
 **Test rigor is uneven across the boundary layers, in the wrong direction.**
 `http-ingest` has a fuzz corpus gated on stable `cargo test`. `nexrad-decoder` — the other

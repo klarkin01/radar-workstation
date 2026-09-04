@@ -404,8 +404,25 @@ account) — but is otherwise inert. Confirmed live against S3 both before and a
 
 ### E-09 — the client cannot serve ADR-0007 `medium — architectural, plan now`
 
-**Still open.** Now also tracked as `docs/open-questions.md` Q16 — that is the live version
-of this finding.
+**Closed 2026-08-28 by [ADR-0026](adr/0026-tile-http-boundary.md)**, which resolves Q16.
+The finding was correct and the recommendation below (option 2, a second client crate) was
+not taken. Option 2's *goal* — a tile path structurally unable to affect the radar path —
+is exactly what shipped; its *mechanism* was rejected, because a second client means a
+second copy of `connection.rs` + `response.rs` (~1,065 lines) and of the 31-file fuzz
+corpus, concentrating divergence risk on the most security-sensitive code in the workspace
+and contradicting `CLAUDE.md`'s DRY instruction. ADR-0026 splits `http-ingest` by layer
+instead — one engine, two sibling policy crates (`s3-fetch`, `tile-fetch`) — reaching the
+same isolation for ~300 lines and zero new dependencies, because the seam already existed
+inside the crate. The answer to this finding's closing question is that `http-ingest`'s
+allowlist design is a **permanent** asset for the path it guards: on the radar path it is
+strengthened from a string match to a `Bucket` enum. Three of the capability premises
+below (HTTP/2, redirects, and the difficulty of conditional requests) did not survive
+measurement against the live providers — see ADR-0026's Context. The original text is
+preserved below for the audit trail.
+
+The successor finding is `docs/open-questions.md` **Q18**: tile bodies are JPEG/PNG, and
+decoding them is a new untrusted-input parser on a network path — a larger dependency
+surface than the transport question this finding raised.
 
 This is the one genuinely *new* forward-looking gap, and it follows directly from
 ADR-0014's own scope boundaries, which explicitly exclude arbitrary URL parsing, redirect

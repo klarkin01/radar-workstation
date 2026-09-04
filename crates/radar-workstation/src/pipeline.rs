@@ -43,7 +43,7 @@ use tokio::task::JoinHandle;
 use crate::assembly::{self, AssemblyConfig, AssemblyEvent};
 use crate::compute::{self, StateUpdate};
 use crate::event::{Event, TaskKind};
-use crate::ingest::s3_poll::{IngestStatus, S3Poller, BUCKET_HOST};
+use crate::ingest::s3_poll::{IngestStatus, S3Poller};
 use crate::ingest::ChunkEnvelope;
 use crate::sites::Site;
 use crate::state::AppState;
@@ -181,8 +181,7 @@ async fn run_ingest_pipeline(
     status_tx: watch::Sender<IngestStatus>,
     poll_interval: Duration,
 ) {
-    let client =
-        http_ingest::Client::new(BUCKET_HOST).expect("BUCKET_HOST is in http-ingest's compile-time allowlist");
+    let client = http_ingest::S3Client::new(http_ingest::Bucket::Chunks);
     let poller = S3Poller::new(site_id, client, status_tx);
     let (chunk_tx, chunk_rx) = mpsc::channel::<ChunkEnvelope>(CHUNK_CHANNEL_CAPACITY);
     let (event_tx, event_rx) = mpsc::channel::<AssemblyEvent>(EVENT_CHANNEL_CAPACITY);

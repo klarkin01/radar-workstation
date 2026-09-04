@@ -6,8 +6,8 @@ use rustls::{ClientConfig, RootCertStore};
 
 use crate::error::Error;
 
-/// Builds the shared TLS client configuration once per `Client::new`. Reused
-/// across every reconnect (`Client::tls` is an `Arc`) so rustls' session
+/// Builds the shared TLS client configuration once per `S3Client::new`. Reused
+/// across every reconnect (`S3Client::tls` is an `Arc`) so rustls' session
 /// cache survives a dropped connection — this is the entire mechanism behind
 /// session resumption.
 pub(crate) fn build_config() -> Arc<ClientConfig> {

@@ -90,6 +90,16 @@ pub enum Event {
     /// A user override palette was readable but produced no usable colour
     /// entries; the bundled default was used instead.
     UserPaletteMalformed { product: DisplayProduct, path: String },
+
+    // --- map underlay bundle (S5, `overlay`) ---
+    /// The compiled-in overlay bundle failed validation; no map underlay is
+    /// drawn. Cannot happen for a bundle this project generated — handled
+    /// anyway (Stability as Ethics).
+    OverlayBundleInvalid { reason: &'static str },
+    /// A bundle layer carried a kind this build does not know; it was
+    /// skipped rather than treated as an error, so a future bundle can add
+    /// a layer without a version bump breaking an older binary.
+    OverlayLayerUnknownKind { kind: u32 },
 }
 
 impl std::fmt::Display for Event {
@@ -166,6 +176,12 @@ impl std::fmt::Display for Event {
             }
             Self::UserPaletteMalformed { product, path } => {
                 write!(f, "user {product} palette {path} had no usable colour entries, using bundled default")
+            }
+            Self::OverlayBundleInvalid { reason } => {
+                write!(f, "compiled-in overlay bundle failed validation ({reason}), no map underlay drawn")
+            }
+            Self::OverlayLayerUnknownKind { kind } => {
+                write!(f, "overlay bundle layer kind {kind} is not recognized by this build, skipping")
             }
         }
     }

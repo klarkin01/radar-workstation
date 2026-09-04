@@ -112,8 +112,9 @@ NEXRAD polar coords          Geographic coords (WGS84)
          (zoom + pan)
 ```
 
-Vector overlay data (shapefiles) is pre-projected from WGS84 into azimuthal equidistant
-coordinates at load time, not at render time. The GPU receives already-projected geometry.
+Vector overlay data is projected from WGS84 into azimuthal equidistant coordinates once
+at site load, not at render time. The GPU receives already-projected geometry. See
+Vector Overlay Rendering below and ADR-0025.
 
 Map imagery tiles are fetched in Web Mercator (the XYZ tile standard) and reprojected
 on the GPU via a vertex shader. Tile reprojection is a one-time cost per tile, cached
@@ -128,22 +129,25 @@ Layers are composited by wgpu in this order, back to front:
 | Order | Layer | Source | Notes |
 |---|---|---|---|
 | 1 | Background | Solid color | Dark by default. Always present. |
-| 2 | Terrain imagery | XYZ tile cache | Optional, toggleable. Transparent until tiles load. |
-| 3 | County boundaries | Bundled shapefile | Always visible. |
-| 4 | State / country boundaries | Bundled shapefile | Always visible. Slightly thicker line weight than counties. |
-| 5 | Major highways | Bundled shapefile | Toggleable. Shown at all zoom levels. |
+| 2 | Terrain imagery | XYZ tile cache | **Unpopulated in v1.0** — the tile subsystem is deferred to post-v1.0 (ADR-0027). The slot is retained so the order is not re-litigated when it returns; nothing draws here today. Optional and toggleable when built. |
+| 3 | County boundaries | Baked overlay bundle (Natural Earth 10m) | Always visible. ADR-0025. |
+| 4 | State / country boundaries | Baked overlay bundle (Natural Earth 10m) | Always visible. Distinguished from counties by colour/opacity contrast, not line width — wgpu `LineList` primitives have no width control, so both are 1 px. |
+| 5 | Major highways | Baked overlay bundle (TIGER/Line Primary Roads, Douglas–Peucker ε = 30 m) | Toggleable (`H`, persisted). Shown at all zoom levels. Simplified at bake time — 30 m is half a pixel at `view::MIN_M_PER_PX` and 8.3× finer than a 250 m gate; the source carries a vertex every 87.7 m. **13 of 163 sites have no coverage** (overseas DoD, interior Alaska, outer Hawaii) — TIGER is a US product; those sites' road layer draws nothing and reports nothing (confirmed by offscreen render, PABC). ADR-0029. |
 | 6 | Radar data | Selected gridded product texture | The primary content. Alpha-composited over map layers. |
-| 6a | Reference geometry | Range rings, azimuth spokes, site marker (Stage 4) | `LineList` in world metres through the view uniform. Toggled by `R`. Chrome of the same kind as the radar image; drawn with it. Ring labels drawn by egui. |
-| 7 | Placefile overlays | Parsed placefile data | Drawn per-placefile in user-configured order. |
-| 8 | Radar site markers | Bundled site list | Small icon + ICAO label. Clickable for site selection (Stage 7). Stage 4 draws only the active site's marker, as part of layer 6a. |
-| 9 | City labels | Bundled label data | Appear above a zoom threshold only. |
+| 6a | Reference geometry | Range rings, azimuth spokes, active site marker (Stage 4) | `LineList` in world metres through the view uniform. Toggled by `R`, persisted. Chrome of the same kind as the radar image; drawn with it. Ring labels drawn by egui. |
+| 7 | Placefile overlays | Parsed placefile data | **Stage 6.** Drawn per-placefile in user-configured order. |
+| 8 | Radar site markers | Bundled site list | Every other bundled site (the active site's marker is layer 6a), projected against the active site at renderer init (Stage 5). Not clickable; runtime site selection is Stage 7. ICAO labels share layer 9's declutter pass, entering at rank 0. |
+| 9 | City labels | Baked overlay bundle (Natural Earth 10m `populated_places`) | Drawn by egui at `Order::Background`, which *is* compositing slot 9 — layers 1–8 are all wgpu and layer 10 is egui chrome, so there is no wgpu layer above this one. One screen-space declutter pass shared with layer 8's site labels (site labels win any collision — ADR-0028 §5 erratum, S5-g). No toggle. |
 
 egui UI chrome is composited on top of all wgpu layers by the egui render pass.
 
-**Stage 4 status:** only layers 1, 6, 6a, and 8 (active-site marker) have a data source
-today. Layers 2–5, 7, and 9 are gated on Stages 5–6 (Q15, Q16, Q6). The two-pass frame
-(pass 1: clear + scene; pass 2: egui) does not change as those layers land — they slot
-into pass 1 in this order.
+**Stage 5 status:** layers 1, 3, 4, 5, 6, 6a, 8, and 9 all have a data source and a
+renderer (`render::overlay`, `render::labels`) as of `docs/plans/stage-5-map-underlays.md`.
+**Layer 2 has no v1.0 data source at all** — the tile subsystem is deferred to post-v1.0
+by ADR-0027 (closing Q18), so v1.0's basemap is vector-only. Layer 7 (placefiles) is
+Stage 6, gated on Q6. The two-pass frame (pass 1: clear + scene; pass 2: egui) did not
+change when layers 3–5, 8, and 9 landed — they slot into pass 1 in this order, before and
+after the radar draw as the table above shows.
 
 ---
 
@@ -275,16 +279,92 @@ re-fetching or re-computing data.
 
 ## Vector Overlay Rendering
 
-County, state, country, and highway geometry is loaded from bundled shapefiles at
-startup and tessellated into GPU vertex buffers by `lyon`. These buffers are uploaded
-to the GPU once and held for the lifetime of the process.
+<!-- corrected 2026-08-28 (ADR-0025, resolving Q15): this section previously said geometry
+is "loaded from bundled shapefiles at startup and tessellated into GPU vertex buffers by
+`lyon`." No shapefile parser and no tessellator ship. -->
 
-At render time, vector overlays are drawn as line primitives from the pre-uploaded
-vertex buffers. Pan and zoom are applied via a uniform transform matrix — the geometry
-itself does not change, only the view transform.
+County, state, country, and highway geometry ships as a single flat binary bundle baked at
+build time by `utility/map-bake/` and compiled into the executable with `include_bytes!`
+(ADR-0025). It holds `i32` coordinates in units of 1e-7 degrees — *geographic*, not
+projected, because azimuthal equidistant is centred on the active site and the site is a
+runtime choice.
 
-This makes vector overlay rendering essentially free at runtime — a matrix multiply
-and a draw call per layer.
+At renderer init the bundle is projected into azimuthal equidistant metres — **synchronously,
+on the main thread, not on `spawn_blocking`** (S5-e, ADR-0025 §4 erratum: at Stage 5 the site
+is fixed for the process lifetime, so there is exactly one projection, ever; the function
+itself is pure, so a future runtime site change (Stage 7) moves the *call* onto
+`spawn_blocking` without touching this code) — measured at ~25 ms over 729,234 points (KDOX,
+release build; the ADR predicted ~21 ms) and uploaded as a `LineList` vertex buffer plus a
+derived index buffer, then held for the lifetime of the site selection. The CPU-side copy is
+dropped after upload. The whole basemap is ~6.42 MB of bundle and ~11.48 MB of GPU buffers
+(729,234 vertices + 1,411,736 indices), 9% of the 128 MB per-instance target — matching
+ADR-0029's 11.46 MB prediction to within the primary-roads simplification's normal
+run-to-run variance.
+
+Only the primary-roads layer is simplified. The three Natural Earth layers were measured as
+adequate at native density and are baked untouched.
+
+At render time, overlays are drawn as line primitives through the same view uniform
+`render/reference.rs` uses for range rings. Pan and zoom are the uniform — the geometry
+itself does not change.
+
+This makes vector overlay rendering essentially free at runtime — a uniform write and a
+draw call per layer — and there is no per-frame projection, no parsing anywhere in the
+shipped binary, and no startup file I/O.
+
+City labels (layer 9) ride in the same bundle but are **not** `LineList` geometry — see
+City Labels below.
+
+---
+
+## City Labels
+
+*Added 2026-08-30, [ADR-0028](../adr/0028-city-labels.md), resolving Q19.*
+
+Labels are the one overlay layer that is text rather than geometry, so they take a
+different path from layers 3–5 while sharing their bundle and their projection pass.
+
+**Source and bundle.** Natural Earth 10m `populated_places`, filtered to the same 700 km
+site footprint as the geometry layers: 1,216 of 7,342 records, ~27 KiB. The bundle carries
+a label index and a UTF-8 string table (ADR-0025 §3). The runtime sees exactly
+`{ lon, lat, rank, name }` — `rank` is a dense `u16`, ascending, normalised at bake time
+from whatever importance signal the source happens to carry. Nothing source-specific
+reaches the render path, which is what makes a denser source a regeneration rather than a
+redesign.
+
+The source is **provisional and known-sparse**: 19 labels inside a KDOX 230 km PPI, 2
+inside 100 km. That is the design for v1.0, not a bug in the selection pass.
+
+**Selection (the declutter pass).** Labels are chosen by a screen-space, rank-ordered
+greedy collision cull, not by a fixed zoom threshold — labels appear as screen space opens
+up. The pass:
+
+- is **pure** — `(labels, &ViewState, viewport) -> Vec<PlacedLabel>` — and unit-tested
+  without a window, the pattern `view.rs`, `input.rs`, `adapter.rs` and `time.rs` already
+  establish;
+- is **render-loop owned**, alongside `ViewState`, and never enters `AppState` (ADR-0018).
+  FR-NI-4's spatial-stability guarantee covers it: a new scan, a product switch, or a
+  sweep switch must not change which labels are placed;
+- **culls candidates against `ctx.available_rect()`** before placement, so labels are never
+  hidden under the status bar or legend;
+- is recomputed when the view or viewport changes, memoised otherwise.
+
+Measured at KDOX, 1920×1080, against a deliberately dense source (Natural Earth is too
+sparse to exercise it): 2,997 candidates → 254 placed at 230 km; 6,519 → 360 at 460 km.
+The pass self-limits to ~250–360 labels regardless of how dense the source is. **At
+Natural Earth density it will essentially never reject a candidate**, so it is tested with
+synthetic dense input rather than by the shipped bundle.
+
+**Drawing.** egui, in the existing egui pass, at `Order::Background` with its own
+`LayerId` — the same mechanism `render/ui.rs::ring_labels` already uses for range-ring
+labels. Because compositing layers 1–8 are all wgpu and layer 10 is egui chrome, egui's
+lowest order is exactly slot 9: no ordering violation, and no second egui pass. Measured
+against the pinned `egui 0.36.1`, 1920×1080, 12 pt: 500 labels cost 0.108 ms of
+`run_ui` + `tessellate` (12,758 triangles), and panning costs the same as static, because
+the galley cache keys on text and font rather than position.
+
+`render/labels.rs` owns bundle access and selection; `render/ui.rs` draws — the same split
+by which `reference.rs` computes `ring_labels()` and `ui.rs` paints them.
 
 ---
 

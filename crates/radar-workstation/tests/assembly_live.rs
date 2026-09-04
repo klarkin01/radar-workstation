@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use nexrad_decoder::VolumeStatus;
 use radar_workstation::assembly::{self, AssemblyConfig, AssemblyEvent};
-use radar_workstation::ingest::s3_poll::{IngestStatus, S3Poller, BUCKET_HOST, DEFAULT_POLL_INTERVAL};
+use radar_workstation::ingest::s3_poll::{IngestStatus, S3Poller, DEFAULT_POLL_INTERVAL};
 use radar_workstation::ingest::ChunkEnvelope;
 use radar_workstation::state::AppState;
 
@@ -24,7 +24,7 @@ const OVERALL_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 #[tokio::test]
 #[ignore]
 async fn polls_a_real_site_to_one_complete_volume() {
-    let client = http_ingest::Client::new(BUCKET_HOST).expect("client");
+    let client = http_ingest::S3Client::new(http_ingest::Bucket::Chunks);
     let site = radar_workstation::sites::by_id(LIVE_TEST_SITE).expect("site in bundled table");
     let (status_tx, ingest_rx) = tokio::sync::watch::channel(IngestStatus::default());
     let poller = S3Poller::new(LIVE_TEST_SITE, client, status_tx);

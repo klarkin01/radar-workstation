@@ -27,6 +27,7 @@ session's purpose.
 | `nexrad-sample/` (Rust) | Fetch (`fetch-sample`) and decode (`decode-sample`) NEXRAD chunk files from S3 for manual inspection |
 | `radar-viz/` (Rust) | Render a decoded volume scan to a PNG PPI image for visual verification — see its own README |
 | `nexrad-sites/generate.py` | Generate `crates/radar-workstation/src/sites_generated.rs` (the bundled WSR-88D site table) from `nexrad-sites/data/nexrad-stations.txt` |
+| `map-bake/bake.py` | Generate `crates/radar-workstation/src/overlay/overlay.bin` and `bundle.manifest.txt` (the map underlay bundle: counties, states/provinces, coastline, primary roads, city labels) from five shapefile sources |
 
 ---
 
@@ -151,6 +152,48 @@ before parsing, so a reflowed source format fails loudly at generation time rath
 silently misparsing a field.
 
 ---
+
+## map-bake/
+
+Generates the map underlay bundle (`crates/radar-workstation/src/overlay/overlay.bin` and
+`bundle.manifest.txt`, S5-W1/W2, ADR-0025, ADR-0028, ADR-0029) from five shapefile sources.
+stdlib-only Python — no `shapefile`/`dbase`/`geo`/`lyon` dependency, following the same
+"own the boundary rather than install a parser to answer a question about not shipping
+one" reasoning `nexrad-sites/generate.py` and the fixture generators already follow.
+Digest-verified before it emits anything: a substituted or re-downloaded source fails
+loudly rather than being baked silently.
+
+**Sources** — four already on disk (`.gitignore`d) in `utility/radar-viz/data/`; the
+fifth must be downloaded before baking:
+
+| File | Source | Retrieved | License |
+|---|---|---|---|
+| `tl_2025_us_primaryroads.{shp,dbf}` | [Census TIGER/Line](https://www2.census.gov/geo/tiger/TIGER2025/PRIMARYRD/) | 2025-09-15 | Public domain |
+| `ne_10m_admin_1_states_provinces.{shp,dbf}` | [Natural Earth](https://naciscdn.org/naturalearth/10m/cultural/) | 2022-05-09 | Public domain |
+| `ne_10m_admin_2_counties_lakes.{shp,dbf}` | [Natural Earth](https://naciscdn.org/naturalearth/10m/cultural/) | 2022-05-09 | Public domain |
+| `ne_10m_coastline.{shp,dbf}` | [Natural Earth](https://naciscdn.org/naturalearth/10m/physical/) | 2021-11-14 | Public domain |
+| `ne_10m_populated_places.{shp,dbf}` | [Natural Earth](https://naciscdn.org/naturalearth/10m/cultural/) | 2026-09-02 | Public domain |
+
+Exact SHA-256 digests for every source are recorded in `map-bake/bake.py`'s `SOURCES`
+table and in the committed `bundle.manifest.txt` — the digest check is what makes a
+regeneration from substituted inputs fail loudly rather than baking silently.
+
+**Regenerate:**
+
+```bash
+curl -o utility/radar-viz/data/ne_10m_populated_places.zip \
+  https://naciscdn.org/naturalearth/10m/cultural/ne_10m_populated_places.zip
+(cd utility/radar-viz/data && unzip -o ne_10m_populated_places.zip)
+python3 utility/map-bake/bake.py
+```
+
+The generator prints per-layer part/point counts, filters every layer to within 700 km of
+any bundled site's bounding box, simplifies the primary-roads layer only (Douglas–Peucker,
+ε = 30 m, iterative — ADR-0029 §1), and writes both the bundle and its manifest. It parses
+`crates/radar-workstation/src/sites_generated.rs` for the footprint filter's site table
+(the same site table `nexrad-sites/generate.py` produces), asserting the parsed count is
+163 so a reformatted generated file fails loudly rather than silently filtering against
+the wrong sites.
 
 ## Adding new utilities
 

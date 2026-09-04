@@ -10,7 +10,6 @@ use tokio_rustls::TlsConnector;
 
 use crate::config::{ClientConfig, Limits, Timeouts};
 use crate::error::{Error, Phase};
-use crate::host::Host;
 use crate::response::{parse_chunk_size_line, parse_head, BodyFraming, Head};
 use crate::tls;
 
@@ -52,7 +51,7 @@ pub(crate) struct Connection<S> {
     pub(crate) reusable: bool,
 }
 
-/// Outcome of one request attempt, as `Client` needs it to implement the
+/// Outcome of one request attempt, as `S3Client` needs it to implement the
 /// D-a/1.1 retry rule without `Connection` knowing anything about retries.
 pub(crate) enum Attempt {
     Success(Bytes),
@@ -77,11 +76,11 @@ enum Internal {
 
 impl Connection<TlsStream<TcpStream>> {
     pub(crate) async fn connect(
-        host: &Host,
+        host: &str,
         tls_config: &Arc<rustls::ClientConfig>,
         cfg: &ClientConfig,
     ) -> Result<Self, Error> {
-        let addr = format!("{}:443", host.as_str());
+        let addr = format!("{host}:443");
         let tcp = timeout(cfg.timeouts.connect, TcpStream::connect(addr))
             .await
             .map_err(|_| Error::Timeout { phase: Phase::Connect })?
@@ -89,7 +88,7 @@ impl Connection<TlsStream<TcpStream>> {
         tcp.set_nodelay(true).map_err(Error::Connect)?;
 
         let connector = TlsConnector::from(tls_config.clone());
-        let server_name = tls::server_name(host.as_str())?;
+        let server_name = tls::server_name(host)?;
         let tls_stream = timeout(cfg.timeouts.tls_handshake, connector.connect(server_name, tcp))
             .await
             .map_err(|_| Error::Timeout { phase: Phase::Tls })?
@@ -277,7 +276,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
 #[cfg(test)]
 impl Connection<TcpStream> {
     /// Plaintext connect for `#[cfg(test)]` loopback tests only (D-d). This
-    /// path is compiled out of release builds — `Client` only ever
+    /// path is compiled out of release builds — `S3Client` only ever
     /// constructs the TLS variant above.
     pub(crate) async fn connect_plaintext(addr: std::net::SocketAddr, cfg: &ClientConfig) -> Result<Self, Error> {
         let tcp = timeout(cfg.timeouts.connect, TcpStream::connect(addr))
@@ -361,7 +360,7 @@ mod tests {
         assert!(matches!(conn.round_trip(req, &cfg.limits, &cfg.timeouts).await, Attempt::Success(_)));
 
         // Reusing the now-dead connection should surface ClosedEmpty, which
-        // is what `Client` uses to trigger the retry-on-fresh-connection path.
+        // is what `S3Client` uses to trigger the retry-on-fresh-connection path.
         assert!(matches!(conn.round_trip(req, &cfg.limits, &cfg.timeouts).await, Attempt::ClosedEmpty));
         assert!(!conn.reusable);
     }

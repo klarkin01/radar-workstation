@@ -66,10 +66,9 @@ fn download_sample_returns_an_error_for_invalid_urls() {
     ));
 
     // A non-allowlisted host passes syntax (split_s3_url doesn't check the
-    // allowlist) but is rejected once Client::new sees it.
+    // allowlist) but is rejected once `Bucket::from_host` sees it — the
+    // successor to the old `Client::new(host)` rejection now that `S3Client`
+    // takes a `Bucket`, not a hostname (ADR-0026 §2).
     let (host, _key) = split_s3_url("https://evil.com/key").unwrap();
-    assert_eq!(
-        http_ingest::Client::new(host).err().map(|e| matches!(e, http_ingest::Error::HostNotAllowed(_))),
-        Some(true)
-    );
+    assert_eq!(http_ingest::Bucket::from_host(host), None);
 }

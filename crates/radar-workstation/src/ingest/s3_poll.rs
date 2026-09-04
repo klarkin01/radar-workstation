@@ -9,10 +9,6 @@ use crate::state::AppState;
 
 use super::ChunkEnvelope;
 
-/// Hostname `Client::new` should be given to construct the `http_ingest::Client`
-/// passed into `S3Poller::new`. Not used internally — `Client` already knows
-/// its own host once constructed.
-pub const BUCKET_HOST: &str = "unidata-nexrad-level2-chunks.s3.amazonaws.com";
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Empty polls, with no key ever seen for the current target volume,
@@ -154,7 +150,7 @@ impl Default for IngestStatus {
 /// `<timestamp>-<n>-<kind>` names do sort chronologically.
 pub struct S3Poller {
     site_id: String,
-    client: http_ingest::Client,
+    client: http_ingest::S3Client,
     /// Volume-sequence number of the last volume whose `-E` chunk has been seen
     /// (i.e. fully delivered). `None` only before the first poll has run.
     last_completed_volume: Option<u64>,
@@ -185,7 +181,7 @@ impl S3Poller {
     /// long-lived channel for `AppState`'s receiver to keep working.
     /// `watch::Sender` is cheaply `Clone`, so callers hand each new poller
     /// a clone of one sender created once, up front.
-    pub fn new(site_id: impl Into<String>, client: http_ingest::Client, status_tx: watch::Sender<IngestStatus>) -> Self {
+    pub fn new(site_id: impl Into<String>, client: http_ingest::S3Client, status_tx: watch::Sender<IngestStatus>) -> Self {
         Self {
             site_id: site_id.into(),
             client,
@@ -810,7 +806,7 @@ mod tests {
 
     #[test]
     fn new_poller_publishes_default_polling_status() {
-        let client = http_ingest::Client::new(BUCKET_HOST).expect("client");
+        let client = http_ingest::S3Client::new(http_ingest::Bucket::Chunks);
         let (status_tx, status_rx) = watch::channel(IngestStatus::default());
         let _poller = S3Poller::new("KDOX", client, status_tx);
         let status = status_rx.borrow().clone();
@@ -939,7 +935,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn cold_start_listing_size() {
-        let client = http_ingest::Client::new(BUCKET_HOST).expect("client");
+        let client = http_ingest::S3Client::new(http_ingest::Bucket::Chunks);
         let (status_tx, _status_rx) = watch::channel(IngestStatus::default());
         let mut poller = S3Poller::new(LIVE_TEST_SITE, client, status_tx);
         let prefix = format!("{}/", poller.site_id);
@@ -959,7 +955,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn cold_start_poll_once_latency() {
-        let client = http_ingest::Client::new(BUCKET_HOST).expect("client");
+        let client = http_ingest::S3Client::new(http_ingest::Bucket::Chunks);
         let (status_tx, _status_rx) = watch::channel(IngestStatus::default());
         let mut poller = S3Poller::new(LIVE_TEST_SITE, client, status_tx);
         let app_state = test_app_state();
@@ -978,7 +974,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn steady_state_poll_latency() {
-        let client = http_ingest::Client::new(BUCKET_HOST).expect("client");
+        let client = http_ingest::S3Client::new(http_ingest::Bucket::Chunks);
         let (status_tx, _status_rx) = watch::channel(IngestStatus::default());
         let mut poller = S3Poller::new(LIVE_TEST_SITE, client, status_tx);
         let app_state = test_app_state();
@@ -1005,7 +1001,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn keepalive_amortization() {
-        let mut client = http_ingest::Client::new(BUCKET_HOST).expect("client");
+        let mut client = http_ingest::S3Client::new(http_ingest::Bucket::Chunks);
         let listing = client
             .list_prefix(&format!("{LIVE_TEST_SITE}/"), None, None, None)
             .await
@@ -1042,7 +1038,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn bucket_site_prefixes_match_bundled_site_list() {
-        let mut client = http_ingest::Client::new(BUCKET_HOST).expect("client");
+        let mut client = http_ingest::S3Client::new(http_ingest::Bucket::Chunks);
         let mut bucket_sites = std::collections::BTreeSet::new();
         let mut continuation_token: Option<String> = None;
 
@@ -1094,7 +1090,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn does_not_stall_when_forced_past_the_newest_real_volume() {
-        let client = http_ingest::Client::new(BUCKET_HOST).expect("client");
+        let client = http_ingest::S3Client::new(http_ingest::Bucket::Chunks);
         let (status_tx, _status_rx) = watch::channel(IngestStatus::default());
         let mut poller = S3Poller::new(LIVE_TEST_SITE, client, status_tx);
         let prefix = format!("{}/", poller.site_id);
