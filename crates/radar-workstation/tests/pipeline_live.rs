@@ -18,7 +18,7 @@ use radar_workstation::compute::DisplayProduct;
 use radar_workstation::ingest::s3_poll::IngestStatus;
 use radar_workstation::pipeline::Pipeline;
 use radar_workstation::sites;
-use radar_workstation::state::AppState;
+use radar_workstation::state::{AppState, RetentionPolicy};
 
 const LIVE_TEST_SITE: &str = "KDOX";
 const DEADLINE: Duration = Duration::from_secs(60);
@@ -29,7 +29,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 async fn pipeline_spawn_produces_a_visible_sweep_within_the_deadline() {
     let site = sites::by_id(LIVE_TEST_SITE).expect("site in bundled table");
     let (status_tx, status_rx) = tokio::sync::watch::channel(IngestStatus::default());
-    let state = Arc::new(AppState::new(site, status_rx));
+    let state = Arc::new(AppState::new(site, status_rx, RetentionPolicy::default()));
 
     let start = Instant::now();
     let pipeline = Pipeline::spawn(
@@ -76,7 +76,7 @@ async fn pipeline_spawn_produces_a_gridded_reflectivity_sweep_without_starving_t
 
     let site = sites::by_id(LIVE_TEST_SITE).expect("site in bundled table");
     let (status_tx, status_rx) = tokio::sync::watch::channel(IngestStatus::default());
-    let state = Arc::new(AppState::new(site, status_rx.clone()));
+    let state = Arc::new(AppState::new(site, status_rx.clone(), RetentionPolicy::default()));
 
     let start = Instant::now();
     let pipeline = Pipeline::spawn(

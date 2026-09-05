@@ -155,6 +155,15 @@ a comment.
 
 ### Part B — Retain history
 
+**Done (2026-09-04).** Executed as
+`docs/plans/stage-6a-part-b-retain-history.md`, which is the record of what
+was actually decided and built — read it, not the four sketches below, which
+are left as originally written per this document's own preamble. In one
+line: B1 became [ADR-0030](../adr/0030-volume-history-retention.md); B2's
+"plausibly 20–35 MB" estimate was measured directly (below); B3 and B4 are
+`state::history::FrameRing` and `render::radar`'s `residency`/`plan_sync`
+respectively.
+
 **B1. Decide and record the retention model (new ADR; amends ADR-0018).**
 The question is what a "frame" is. Proposed: a frame is one *volume*, and the
 history is a ring of per-volume grid sets keyed by `VolumeId` — not a ring of
@@ -171,6 +180,16 @@ is ~0.86 MB each. A VCP-35 volume is plausibly 20–35 MB of grids, which puts a
 across VCP 12/35/212 with a small harness before the cap is a number in a
 config file. The likely outcomes are a per-product history (only the selected
 product is retained deep) or a byte-budget ring — pick after measuring, not now.
+
+> **Corrected 2026-09-04**, against the measurement Part B actually ran
+> (`utility/radar-viz --path budget`, three live volumes): a whole volume is
+> **28–40 MB**, not 20–35 — the low end was about right, the high end was
+> low. A 20-frame loop is therefore ~560–800 MB, not "far past 200 MB" by a
+> vague margin but by a specific, now-recorded one
+> ([ADR-0030](../adr/0030-volume-history-retention.md)). The two outcomes this
+> paragraph guessed at were both considered and both rejected — see the ADR's
+> Alternatives — in favor of whole frames under a frame-count-and-byte-budget
+> pair.
 
 **B3. Implement the history ring in `RadarState`.**
 Add the ring behind the existing private-field discipline, mutated only through

@@ -709,7 +709,11 @@ mod tests {
     /// otherwise care about its contents.
     fn test_app_state() -> AppState {
         let (_tx, rx) = tokio::sync::watch::channel(IngestStatus::default());
-        AppState::new(crate::sites::by_id("KDOX").expect("KDOX in bundled table"), rx)
+        AppState::new(
+            crate::sites::by_id("KDOX").expect("KDOX in bundled table"),
+            rx,
+            crate::state::RetentionPolicy::default(),
+        )
     }
 
     #[test]

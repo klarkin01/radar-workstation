@@ -4,91 +4,91 @@
 //! it is what makes retention behavior across a volume boundary an ordinary
 //! unit test rather than something that needs real time to pass.
 //!
-//! Stage 3 changes the input type from `AssemblyEvent` to
-//! `compute::StateUpdate` — everything downstream of assembly now deals in
-//! grids, not radials — but every rule below is the Stage 2 rule, unchanged
-//! in meaning; only how the input is constructed changed.
+//! Stage 3 changed the input type from `AssemblyEvent` to
+//! `compute::StateUpdate` — everything downstream of assembly deals in
+//! grids, not radials. Stage 6a Part B (ADR-0030) changes what happens to a
+//! `StateUpdate` once it arrives: every rule below now routes into
+//! `RadarState`'s [`history::FrameRing`](super::history::FrameRing) rather
+//! than a single merged map. Every rule is the same rule — a VCP change
+//! still hides the old pattern's elevations from the live view, a stale
+//! sweep still cannot clobber a newer one, `TimedOut`/`Superseded` still
+//! clear nothing — but several of them are now structural properties of the
+//! ring (a sweep can only ever land in its own volume's frame) rather than
+//! guards this function enforces by comparison.
+//!
+//! Two things a single `bool` could say before but no longer can: whether
+//! the byte budget started binding (`history::FrameRing::trim`), and
+//! whether a sweep or derived set arrived for a volume old enough that no
+//! retained frame would take it (`history::LateVolume`). Both are
+//! observability, not data — reported by `AppState::apply_event`, which
+//! owns the event log, exactly as `StateUpdate::Info` already was — so
+//! `apply` returns `(bool, Vec<Event>)` rather than a bare `bool`.
 
 use std::time::Instant;
 
 use nexrad_decoder::VolumeStatus;
 
-use crate::compute::StateUpdate;
+use crate::event::Event;
 
 use super::{DisplaySweep, RadarState};
 
 /// Apply one compute-layer update to `state`. Returns whether anything
-/// changed (i.e. whether `revision` was bumped).
-pub fn apply(state: &mut RadarState, event: StateUpdate, now: Instant) -> bool {
+/// changed (i.e. whether `revision` was bumped) and any events the caller
+/// (`AppState::apply_event`) should report.
+pub fn apply(state: &mut RadarState, event: crate::compute::StateUpdate, now: Instant) -> (bool, Vec<Event>) {
+    use crate::compute::StateUpdate;
+
     match event {
         StateUpdate::SweepGridded { elevation_number, elevation_deg, volume, vcp_number, grids } => {
-            // A VCP change invalidates the old pattern's elevation set
-            // entirely: a new pattern has a different set of tilts, so
-            // carrying forward an elevation number from the old one would
-            // display a sweep that no longer corresponds to any tilt the
-            // antenna is actually scanning. An incomplete volume *within*
-            // the same VCP does not hit this — that's the merged-display
-            // retention this module exists for. The old VCP's derived
-            // products (Echo Tops/VIL) are equally meaningless under a new
-            // tilt set, so they are cleared alongside the sweeps.
-            if state.current_vcp.is_some_and(|current| current != vcp_number) {
-                state.sweeps.clear();
-                state.derived.clear();
-                state.derived_volume = None;
+            let landed = state.history.head_mut(volume, vcp_number, now).map(|frame| {
+                frame.insert_sweep(DisplaySweep { elevation_number, elevation_deg, volume, vcp_number, received: now, grids });
+            });
+            if landed.is_err() {
+                return (false, vec![Event::LateVolumeDiscarded { volume }]);
             }
-            state.current_vcp = Some(vcp_number);
-
-            let replace = match state.sweeps.get(&elevation_number) {
-                // Re-anchoring and late chunks can in principle deliver
-                // events out of order; a sweep from an older volume must
-                // never clobber one already displayed from a newer volume.
-                Some(existing) => volume >= existing.volume,
-                None => true,
-            };
-            if !replace {
-                return false;
+            let mut events = Vec::new();
+            if let Some(event) = state.history.trim() {
+                events.push(event);
             }
-            state.sweeps.insert(
-                elevation_number,
-                DisplaySweep { elevation_number, elevation_deg, volume, vcp_number, received: now, grids },
-            );
             state.revision += 1;
-            true
+            (true, events)
         }
-        StateUpdate::DerivedComputed { volume, vcp_number: _, grids } => {
-            // Same out-of-order guard as sweeps: a `DerivedComputed` from
-            // an older volume must never overwrite a newer volume's Echo
-            // Tops/VIL.
-            if state.derived_volume.is_some_and(|existing| volume < existing) {
-                return false;
+        StateUpdate::DerivedComputed { volume, vcp_number, grids } => {
+            let landed = state.history.head_mut(volume, vcp_number, now).map(|frame| frame.set_derived(grids));
+            if landed.is_err() {
+                return (false, vec![Event::LateVolumeDiscarded { volume }]);
             }
-            // Replaced wholesale, not merged: Echo Tops and VIL are
-            // properties of one whole volume, so a partial merge would mix
-            // one volume's low-level tilts with another's.
-            state.derived.clear();
-            for grid in grids {
-                state.derived.insert(grid.product, grid);
+            let mut events = Vec::new();
+            if let Some(event) = state.history.trim() {
+                events.push(event);
             }
-            state.derived_volume = Some(volume);
             state.revision += 1;
-            true
+            (true, events)
         }
         StateUpdate::VolumeClosed { summary } => {
             // TimedOut / Superseded volumes clear nothing (ADR-0012): a
             // visible gap beats silently modifying data already displayed
-            // — and that includes leaving the previous `derived` set in
-            // place (FR-DA-5: last good data stays displayed).
+            // — and that includes leaving whatever frame this volume has
+            // untouched.
             if summary.status != VolumeStatus::Complete {
-                return false;
+                return (false, Vec::new());
             }
-            state.last_complete = Some(summary);
-            state.revision += 1;
-            true
+            // A volume that closed without a single gridded sweep has no
+            // frame to mark — `frame_mut` must not conjure one (unlike
+            // `head_mut`, which the sweep/derived paths use).
+            match state.history.frame_mut(summary.volume) {
+                Some(frame) => {
+                    frame.complete = Some(summary);
+                    state.revision += 1;
+                    (true, Vec::new())
+                }
+                None => (false, Vec::new()),
+            }
         }
-        // Observability, not data — informational events do not touch
-        // sweeps, derived products, or revision. AppState::apply_event (not
-        // this function) is where they reach the event log.
-        StateUpdate::Info(_) => false,
+        // Observability, not data — informational events do not touch the
+        // ring or `revision`. `AppState::apply_event` (not this function)
+        // is where they reach the event log.
+        StateUpdate::Info(_) => (false, Vec::new()),
     }
 }
 
@@ -99,7 +99,8 @@ mod tests {
     use nexrad_decoder::VolumeStatus;
 
     use crate::assembly::VolumeId;
-    use crate::compute::{DisplayProduct, SweepGrid};
+    use crate::compute::{DisplayProduct, StateUpdate, SweepGrid};
+    use crate::state::history::{self, RetentionPolicy};
 
     use super::*;
 
@@ -150,17 +151,26 @@ mod tests {
     }
 
     fn new_state() -> RadarState {
-        RadarState::new(crate::sites::by_id("KDOX").expect("KDOX in bundled table"))
+        RadarState::new(crate::sites::by_id("KDOX").expect("KDOX in bundled table"), RetentionPolicy::default())
+    }
+
+    /// The live view, read through the same fold `AppState::snapshot` uses —
+    /// every test below reads through here rather than `state.sweeps`,
+    /// which no longer exists (ADR-0030).
+    fn live_sweeps(state: &RadarState) -> Vec<DisplaySweep> {
+        history::live_sweeps(state.history.as_deque())
     }
 
     #[test]
     fn sweep_closed_becomes_visible_immediately() {
         let mut state = new_state();
-        let changed = apply(&mut state, sweep_gridded(1, 100, 35), t0());
+        let (changed, events) = apply(&mut state, sweep_gridded(1, 100, 35), t0());
         assert!(changed);
+        assert!(events.is_empty());
         assert_eq!(state.revision, 1);
-        assert_eq!(state.sweeps.len(), 1);
-        assert!(state.sweeps.contains_key(&1));
+        let sweeps = live_sweeps(&state);
+        assert_eq!(sweeps.len(), 1);
+        assert!(sweeps.iter().any(|s| s.elevation_number == 1));
     }
 
     #[test]
@@ -169,27 +179,54 @@ mod tests {
         apply(&mut state, sweep_gridded(1, 200, 35), t0());
         let revision_after_first = state.revision;
 
-        let changed = apply(&mut state, sweep_gridded(1, 100, 35), t0());
+        let (changed, _events) = apply(&mut state, sweep_gridded(1, 100, 35), t0());
         assert!(!changed, "an older volume's sweep must not replace a newer one");
         assert_eq!(state.revision, revision_after_first);
-        assert_eq!(state.sweeps[&1].volume, volume_id(200));
+        let sweeps = live_sweeps(&state);
+        assert_eq!(sweeps.iter().find(|s| s.elevation_number == 1).unwrap().volume, volume_id(200));
+    }
+
+    #[test]
+    fn a_stale_sweep_lands_in_its_own_frame_and_does_not_disturb_the_live_view() {
+        // Unlike Stage 3, a stale sweep for a volume no longer retained is
+        // simply discarded (there is no frame behind the head to land in at
+        // all, with only one volume so far retained) — the live view must
+        // still show only the newer sweep.
+        let mut state = new_state();
+        apply(&mut state, sweep_gridded(1, 200, 35), t0());
+        let (changed, events) = apply(&mut state, sweep_gridded(1, 100, 35), t0());
+        assert!(!changed);
+        assert!(matches!(events.as_slice(), [Event::LateVolumeDiscarded { .. }]));
+        let sweeps = live_sweeps(&state);
+        assert_eq!(sweeps.len(), 1);
+        assert_eq!(sweeps[0].volume, volume_id(200));
     }
 
     #[test]
     fn timed_out_volume_does_not_become_last_complete() {
         let mut state = new_state();
-        let changed = apply(&mut state, StateUpdate::VolumeClosed { summary: volume_summary(VolumeStatus::TimedOut) }, t0());
+        let (changed, _events) =
+            apply(&mut state, StateUpdate::VolumeClosed { summary: volume_summary(VolumeStatus::TimedOut) }, t0());
         assert!(!changed);
-        assert!(state.last_complete.is_none());
+        assert!(state.history.newest().is_none());
     }
 
     #[test]
-    fn complete_volume_becomes_last_complete() {
+    fn a_completed_volume_marks_its_own_frame_complete() {
         let mut state = new_state();
-        let changed =
+        apply(&mut state, sweep_gridded(1, 0, 35), t0());
+        let (changed, _events) =
             apply(&mut state, StateUpdate::VolumeClosed { summary: volume_summary(VolumeStatus::Complete) }, t0());
         assert!(changed);
-        assert_eq!(state.last_complete.unwrap().status, VolumeStatus::Complete);
+        assert_eq!(state.history.newest().unwrap().complete.unwrap().status, VolumeStatus::Complete);
+    }
+
+    #[test]
+    fn a_volume_closing_without_any_gridded_sweep_is_a_no_op() {
+        let mut state = new_state();
+        let (changed, _events) =
+            apply(&mut state, StateUpdate::VolumeClosed { summary: volume_summary(VolumeStatus::Complete) }, t0());
+        assert!(!changed, "no frame exists yet for this volume; VolumeClosed must not conjure one");
     }
 
     #[test]
@@ -199,11 +236,11 @@ mod tests {
         apply(&mut state, sweep_gridded(2, 100, 35), t0());
         let revision_before = state.revision;
 
-        let changed =
+        let (changed, _events) =
             apply(&mut state, StateUpdate::VolumeClosed { summary: volume_summary(VolumeStatus::Superseded) }, t0());
         assert!(!changed);
         assert_eq!(state.revision, revision_before);
-        assert_eq!(state.sweeps.len(), 2, "a superseded volume must not clear already-visible sweeps");
+        assert_eq!(live_sweeps(&state).len(), 2, "a superseded volume must not clear already-visible sweeps");
     }
 
     #[test]
@@ -211,14 +248,17 @@ mod tests {
         let mut state = new_state();
         apply(&mut state, sweep_gridded(1, 100, 35), t0());
         apply(&mut state, sweep_gridded(2, 100, 35), t0());
-        assert_eq!(state.sweeps.len(), 2);
+        assert_eq!(live_sweeps(&state).len(), 2);
 
         // A new VCP arrives with an elevation 1 but not (yet) elevation 2 —
         // elevation 2's stale VCP-35 sweep must not remain displayed as if
-        // it were part of the new pattern.
+        // it were part of the new pattern. The old frame is still in the
+        // ring (ADR-0030 §3.4) — only the live *view* drops it.
         apply(&mut state, sweep_gridded(1, 200, 212), t0());
-        assert_eq!(state.sweeps.len(), 1, "old VCP's elevations must be dropped on a VCP change");
-        assert!(state.sweeps.contains_key(&1));
+        let sweeps = live_sweeps(&state);
+        assert_eq!(sweeps.len(), 1, "old VCP's elevations must be dropped from the live view on a VCP change");
+        assert!(sweeps.iter().any(|s| s.elevation_number == 1));
+        assert_eq!(state.history.len(), 2, "the old VCP's frame must still be retained, not deleted");
     }
 
     #[test]
@@ -228,77 +268,129 @@ mod tests {
         apply(&mut state, sweep_gridded(2, 100, 35), t0());
         // Next volume, same VCP, only elevation 1 has closed so far.
         apply(&mut state, sweep_gridded(1, 200, 35), t0());
-        assert_eq!(state.sweeps.len(), 2, "elevation 2 from the prior volume must remain visible");
-        assert_eq!(state.sweeps[&2].volume, volume_id(100));
+        let sweeps = live_sweeps(&state);
+        assert_eq!(sweeps.len(), 2, "elevation 2 from the prior volume must remain visible");
+        assert_eq!(sweeps.iter().find(|s| s.elevation_number == 2).unwrap().volume, volume_id(100));
     }
 
     #[test]
     fn informational_events_do_not_bump_revision() {
         let mut state = new_state();
         let before = state.revision;
-        let changed = apply(
+        let (changed, events) = apply(
             &mut state,
             StateUpdate::Info(crate::assembly::AssemblyEvent::LateRadialsDiscarded { elevation_number: 1, count: 3 }),
             t0(),
         );
         assert!(!changed);
+        assert!(events.is_empty());
         assert_eq!(state.revision, before);
 
-        let changed =
+        let (changed, events) =
             apply(&mut state, StateUpdate::Info(crate::assembly::AssemblyEvent::MissingStartChunk), t0());
         assert!(!changed);
+        assert!(events.is_empty());
         assert_eq!(state.revision, before);
     }
 
     #[test]
-    fn reset_clears_all_radar_state() {
+    fn reset_clears_the_history_ring() {
         let mut state = new_state();
-        apply(&mut state, sweep_gridded(1, 100, 35), t0());
+        apply(&mut state, sweep_gridded(1, 0, 35), t0());
         apply(&mut state, StateUpdate::VolumeClosed { summary: volume_summary(VolumeStatus::Complete) }, t0());
-        assert!(!state.sweeps.is_empty());
-        assert!(state.last_complete.is_some());
+        assert!(!live_sweeps(&state).is_empty());
+        assert!(state.history.newest().unwrap().complete.is_some());
 
         let ktlh = crate::sites::by_id("KTLH").expect("KTLH in bundled table");
         state.reset(ktlh);
-        assert!(state.sweeps.is_empty());
-        assert!(state.last_complete.is_none());
+        assert!(live_sweeps(&state).is_empty());
+        assert!(state.history.newest().is_none());
         assert_eq!(state.site.id, "KTLH");
+    }
+
+    #[test]
+    fn a_second_volume_starts_a_second_frame() {
+        let mut state = new_state();
+        apply(&mut state, sweep_gridded(1, 100, 35), t0());
+        apply(&mut state, sweep_gridded(1, 200, 35), t0());
+        assert_eq!(state.history.len(), 2);
+    }
+
+    #[test]
+    fn sweeps_from_one_volume_all_land_in_one_frame() {
+        let mut state = new_state();
+        apply(&mut state, sweep_gridded(1, 100, 35), t0());
+        apply(&mut state, sweep_gridded(2, 100, 35), t0());
+        assert_eq!(state.history.len(), 1);
+        assert_eq!(state.history.newest().unwrap().sweeps.len(), 2);
+    }
+
+    #[test]
+    fn history_depth_never_exceeds_the_policy() {
+        let mut state = RadarState::new(
+            crate::sites::by_id("KDOX").expect("KDOX in bundled table"),
+            RetentionPolicy { frames: 3, budget_bytes: usize::MAX },
+        );
+        for t in [100, 200, 300, 400, 500] {
+            apply(&mut state, sweep_gridded(1, t, 35), t0());
+        }
+        assert!(state.history.len() <= 3, "history must never exceed the configured frame count");
     }
 
     #[test]
     fn derived_products_are_replaced_not_merged() {
         let mut state = new_state();
-        let first = vec![grid(DisplayProduct::EchoTops, 0)];
-        apply(&mut state, StateUpdate::DerivedComputed { volume: volume_id(100), vcp_number: 35, grids: first }, t0());
-        assert_eq!(state.derived.len(), 1);
+        let first = StateUpdate::DerivedComputed {
+            volume: volume_id(100),
+            vcp_number: 35,
+            grids: vec![grid(DisplayProduct::EchoTops, 0)],
+        };
+        apply(&mut state, first, t0());
+        assert_eq!(state.history.newest().unwrap().derived.len(), 1);
 
-        let second = vec![grid(DisplayProduct::Vil, 0)];
-        apply(&mut state, StateUpdate::DerivedComputed { volume: volume_id(200), vcp_number: 35, grids: second }, t0());
-        assert_eq!(state.derived.len(), 1, "a newer volume's derived set must replace, not merge with, the old one");
-        assert!(state.derived.contains_key(&DisplayProduct::Vil));
-        assert!(!state.derived.contains_key(&DisplayProduct::EchoTops));
+        let second = StateUpdate::DerivedComputed {
+            volume: volume_id(100),
+            vcp_number: 35,
+            grids: vec![grid(DisplayProduct::Vil, 0)],
+        };
+        apply(&mut state, second, t0());
+        let derived = &state.history.newest().unwrap().derived;
+        assert_eq!(derived.len(), 1, "a newer derived set must replace, not merge with, the old one within a frame");
+        assert!(derived.contains_key(&DisplayProduct::Vil));
+        assert!(!derived.contains_key(&DisplayProduct::EchoTops));
     }
 
     #[test]
     fn stale_derived_products_do_not_overwrite_newer() {
         let mut state = new_state();
-        let newer = vec![grid(DisplayProduct::Vil, 0)];
-        apply(&mut state, StateUpdate::DerivedComputed { volume: volume_id(200), vcp_number: 35, grids: newer }, t0());
+        let newer = StateUpdate::DerivedComputed {
+            volume: volume_id(200),
+            vcp_number: 35,
+            grids: vec![grid(DisplayProduct::Vil, 0)],
+        };
+        apply(&mut state, newer, t0());
 
-        let older = vec![grid(DisplayProduct::EchoTops, 0)];
-        let changed =
-            apply(&mut state, StateUpdate::DerivedComputed { volume: volume_id(100), vcp_number: 35, grids: older }, t0());
-        assert!(!changed, "an older volume's derived products must not replace a newer volume's");
-        assert!(state.derived.contains_key(&DisplayProduct::Vil));
+        let older = StateUpdate::DerivedComputed {
+            volume: volume_id(100),
+            vcp_number: 35,
+            grids: vec![grid(DisplayProduct::EchoTops, 0)],
+        };
+        let (changed, events) = apply(&mut state, older, t0());
+        assert!(!changed, "an older volume's derived products must not land ahead of a newer one");
+        assert!(matches!(events.as_slice(), [Event::LateVolumeDiscarded { .. }]));
+        assert!(state.history.newest().unwrap().derived.contains_key(&DisplayProduct::Vil));
     }
 
     #[test]
     fn timed_out_volume_leaves_derived_products_intact() {
         let mut state = new_state();
-        let grids = vec![grid(DisplayProduct::Vil, 0)];
-        apply(&mut state, StateUpdate::DerivedComputed { volume: volume_id(100), vcp_number: 35, grids }, t0());
+        let grids = StateUpdate::DerivedComputed { volume: volume_id(100), vcp_number: 35, grids: vec![grid(DisplayProduct::Vil, 0)] };
+        apply(&mut state, grids, t0());
 
         apply(&mut state, StateUpdate::VolumeClosed { summary: volume_summary(VolumeStatus::TimedOut) }, t0());
-        assert!(state.derived.contains_key(&DisplayProduct::Vil), "FR-DA-5: last good data stays displayed");
+        assert!(
+            state.history.newest().unwrap().derived.contains_key(&DisplayProduct::Vil),
+            "FR-DA-5: last good data stays displayed"
+        );
     }
 }

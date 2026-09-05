@@ -5,7 +5,7 @@ use radar_workstation::compute::DisplayProduct;
 use radar_workstation::config;
 use radar_workstation::ingest::s3_poll::IngestStatus;
 use radar_workstation::pipeline::Pipeline;
-use radar_workstation::state::AppState;
+use radar_workstation::state::{AppState, RetentionPolicy};
 
 mod cli;
 mod headless;
@@ -90,8 +90,9 @@ fn main() -> ExitCode {
         }
     };
 
+    let retention_policy = retention_policy_from_config(&cfg);
     let (status_tx, status_rx) = tokio::sync::watch::channel(IngestStatus::default());
-    let state = Arc::new(AppState::new(site, status_rx));
+    let state = Arc::new(AppState::new(site, status_rx, retention_policy));
     // Anything config::load found wrong with the file (a bad line, an
     // unknown site, a clamped interval) is reported now that there's an
     // AppState to report it into — config loading itself never fails.
@@ -104,7 +105,7 @@ fn main() -> ExitCode {
     let exit = if args.headless {
         // The one call Stage 2 left as a placeholder for the render loop —
         // now a supported mode (S4-e), not a stub.
-        headless::run(&state);
+        headless::run(&state, retention_policy);
         ExitCode::SUCCESS
     } else {
         run_render(Arc::clone(&state), site, runtime.handle().clone(), &cfg, config_path.as_deref())
@@ -112,6 +113,28 @@ fn main() -> ExitCode {
 
     runtime.block_on(pipeline.shutdown());
     exit
+}
+
+/// Builds the operator's retention policy (ADR-0030, FR-DA-10) from the two
+/// `history.*` config keys. `history.budget_mb = 0` is a first-class
+/// setting — it means [`RetentionPolicy::DISABLED`], the Stage 5 footprint
+/// — and wins over any configured frame count, since a zero byte budget can
+/// never actually retain more than the newest frame regardless of what was
+/// asked for.
+fn retention_policy_from_config(cfg: &config::Config) -> RetentionPolicy {
+    use radar_workstation::state::history::{DEFAULT_HISTORY_BUDGET_BYTES, DEFAULT_HISTORY_FRAMES};
+
+    match cfg.history_budget_mb {
+        Some(0) => RetentionPolicy::DISABLED,
+        Some(mb) => RetentionPolicy {
+            frames: cfg.history_frames.unwrap_or(DEFAULT_HISTORY_FRAMES),
+            budget_bytes: mb * 1024 * 1024,
+        },
+        None => RetentionPolicy {
+            frames: cfg.history_frames.unwrap_or(DEFAULT_HISTORY_FRAMES),
+            budget_bytes: DEFAULT_HISTORY_BUDGET_BYTES,
+        },
+    }
 }
 
 /// Runs the render loop and persists window geometry / active product on a

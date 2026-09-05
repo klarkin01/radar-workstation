@@ -6,6 +6,7 @@
 //! revisit at Stage 4 if `RUST_LOG`-style filtering across ten-plus
 //! subsystems makes the cost worth it.
 
+use crate::assembly::VolumeId;
 use crate::compute::DisplayProduct;
 use crate::ingest::s3_poll::PollError;
 use crate::ingest::volume_seq::VolumeSeq;
@@ -84,6 +85,19 @@ pub enum Event {
     /// accumulating volume for Echo Tops/VIL) exceeded its bound; the
     /// oldest tilt was dropped rather than letting a stuck volume leak.
     RetainedGridSetBounded { dropped_elevation_number: u8 },
+
+    // --- volume history retention (Stage 6a Part B, `state::history`, ADR-0030) ---
+    /// The byte budget, not the requested frame count, is what bounds the
+    /// history — the loop is shorter than the operator asked for. Edge-
+    /// triggered: reported when the constraint starts binding, not per
+    /// eviction.
+    HistoryBudgetBound { frames_retained: usize, requested_frames: usize, bytes: usize },
+    /// A sweep or derived set arrived for a volume older than every
+    /// retained frame, and no retained frame matched it either. Discarded:
+    /// landing it behind the ring's head would break the ordering
+    /// invariant every other function relies on. Observability, not data
+    /// (ADR-0012's rule table).
+    LateVolumeDiscarded { volume: VolumeId },
 
     // --- colour tables (S3-W3, `compute::palette`) ---
     /// A `.pal` line was neither a comment, blank, nor a recognized,
@@ -179,6 +193,16 @@ impl std::fmt::Display for Event {
                 "retained reflectivity grid set exceeded its bound, dropped elevation \
                  {dropped_elevation_number}"
             ),
+            Self::HistoryBudgetBound { frames_retained, requested_frames, bytes } => write!(
+                f,
+                "history.budget_mb is binding before history.frames: retaining {frames_retained} of \
+                 {requested_frames} requested volumes ({} MiB)",
+                bytes / (1024 * 1024)
+            ),
+            Self::LateVolumeDiscarded { volume } => write!(
+                f,
+                "discarded a sweep/derived update for volume {volume:?}, older than every retained frame"
+            ),
             Self::PaletteLineUnparseable { product, line } => {
                 write!(f, "{product} palette line {line} is not valid, skipping")
             }
@@ -273,6 +297,16 @@ mod tests {
         assert!(text.contains("79"));
         assert!(text.contains("165"));
         assert!(text.contains("12"));
+
+        let bound = Event::HistoryBudgetBound { frames_retained: 8, requested_frames: 12, bytes: 320 * 1024 * 1024 };
+        let text = bound.to_string();
+        assert!(text.contains('8'));
+        assert!(text.contains("12"));
+        assert!(text.contains("320"));
+
+        let discarded = Event::LateVolumeDiscarded { volume: VolumeId { julian_date: 20_000, scan_time_ms: 100 } };
+        let text = discarded.to_string();
+        assert!(text.contains("20000") || text.contains("20_000"));
     }
 
     fn sample_event() -> Event {

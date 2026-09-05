@@ -275,6 +275,22 @@ Each elevation sweep is a separate texture. The active sweep is selected by the 
 Switching sweeps is a GPU state change (swap the active texture) — it does not require
 re-fetching or re-computing data.
 
+### GPU residency across retained history (Stage 6a Part B, ADR-0030)
+
+FR-RP-7 ("product and sweep switches are GPU state changes only") is unchanged for the
+*displayed* frame, but is now a statement about one frame among several retained ones,
+not the whole cache: `render::radar::residency` is a pure function of `(frames,
+selection, budget)` that says every grid of the newest retained frame, plus the selected
+`(product, elevation_number)` grid of every other retained frame, must be GPU-resident —
+oldest frames dropping out first under a ~76 MB tail budget (128 MB target, less the
+~11.46 MB overlay, less the newest frame's own grids). `plan_sync` diffs that against
+the cache and is the only thing that decides GPU contents; a switch never re-uploads the
+displayed frame, and playback of an already-resident selection uploads nothing (both are
+pure-tested, not just believed). Uploads that must happen are rate-limited to 4 per
+frame (~5 MB, well under budget) so a product switch with a full tail resident fills over
+a few frames rather than stalling one; the render loop requests an immediate redraw while
+work remains.
+
 ---
 
 ## Vector Overlay Rendering
@@ -410,8 +426,9 @@ These are design targets, not benchmarks. They should be validated during develo
 | Frame rate (new scan upload) | No perceptible drop | `revision`-gated re-upload; `plan_sync` uploads only changed grids. Not timed on-device. |
 | Frame rate (idle) | ~2 fps by design (S4-c) | By construction: `ControlFlow::WaitUntil(now + 500 ms)`. |
 | Time to first render after launch | < 2 seconds | Not measured on-device. Palette load is < 50 ms (regression-guarded); pipeline compilation is the remaining cost. |
-| Memory per instance (steady state) | < 200 MB | Not measured on-device; Stage 3 headless was ~147 MB. |
-| GPU memory per instance | < 128 MB | Stage 3 measured 37.28 MB grids + 2.52 MB derived; the surface, LUT uniforms (4 KB each, ≤32), and egui atlas add little. Not measured on-device. |
+| Memory per instance, history disabled (`history.budget_mb = 0`) | < 200 MB | Stage 3 headless was ~147 MB; a windowed live run on this development machine measured VmHWM ≈ 393 MB (2026-09-04, ADR-0030) — the gap is GPU-driver/Vulkan overhead this machine's discrete adapter charges to RSS, not application heap; see the ADR for the caveat and the follow-up it leaves open. |
+| Memory per instance, default history retention | < 200 MB + `history.budget_mb` | Amended 2026-09-04 (ADR-0030): a retained volume measured 28-40 MB across three live volumes (VCP 35/12/212); the default policy (12 frames, 320 MB budget) buys ~8-12 frames depending on site/VCP. |
+| GPU memory per instance | < 128 MB | Stage 3 measured 37.28 MB grids + 2.52 MB derived for one frame; with history, the resident set is bounded to a ~76 MB tail budget on top of that (ADR-0030). Not measured on-device. |
 | Texture uploads across a product/sweep switch | 0 (FR-RP-7) | **0** — `plan_sync` unit tests assert an empty upload list for both. |
 
 ---

@@ -330,16 +330,25 @@ construction rather than a rule to remember.
 
 ### Contents (of `RadarState`, the one locked structure)
 - The active site (`&'static Site`, from the bundled table — S2-W3)
-- Newest closed sweep per elevation number, **as gridded products**
-  (`BTreeMap<u8, DisplaySweep>`, `DisplaySweep.grids: Vec<Arc<SweepGrid>>` — S3-g),
-  carried across volume boundaries so a closing volume never blanks the display
-  (ADR-0012)
-- Volume-derived products (Echo Tops, VIL), replaced wholesale per completed volume
-  (`BTreeMap<DisplayProduct, Arc<SweepGrid>>`)
-- Metadata for the last successfully completed volume (`VolumeSummary`, not the
-  `VolumeScan` itself — S3-g: its sweeps are already gridded and released) (FR-DA-5)
+- A bounded ring of retained volumes, oldest → newest (`state::history::FrameRing`,
+  Stage 6a Part B, [ADR-0030](../adr/0030-volume-history-retention.md)). Each `Frame`
+  holds **only its own volume's** closed sweeps (`BTreeMap<u8, DisplaySweep>`,
+  `DisplaySweep.grids: Vec<Arc<SweepGrid>>` — S3-g) and, once the volume completes, its
+  own Echo Tops/VIL (`BTreeMap<DisplayProduct, Arc<SweepGrid>>`) and `VolumeSummary`
+  (FR-DA-5). Bounded by an operator-set frame count and byte budget
+  (`RetentionPolicy`), oldest evicted first, newest never evicted.
 - A `revision: u64` counter, incremented on every applied change, that the render loop
-  will use (Stage 4) to skip GPU texture re-upload when unchanged (FR-DR-5)
+  uses (Stage 4) to skip GPU texture re-upload when unchanged (FR-DR-5)
+
+The merged live view Stage 2 through 5 displayed — the newest sweep per elevation
+number, carried across volume boundaries so a closing volume never blanks the display
+(ADR-0012, FR-DA-3) — is **derived**, not stored: `AppState::snapshot()` folds the ring
+newest-first (`state::history::live_sweeps`/`live_derived`), stopping at the first frame
+whose VCP differs from the newest frame's. `StateSnapshot` keeps `sweeps`/`derived`/
+`last_complete` with their original meanings for every existing consumer, and adds
+`frames: Vec<Arc<history::Frame>>` — the whole retained ring, at the cost of one
+refcount bump per frame — for Stage 6a Part C's timeline, the first consumer that reads
+it directly.
 
 The tile cache index and placefile data are Stage 5/6 concerns not yet designed in
 detail; ADR-0018 notes that adding them is expected to be additive to this structure,

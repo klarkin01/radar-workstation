@@ -2,7 +2,7 @@
 //! line whenever shared state changes, until stdin reaches EOF.
 //!
 //! **Stage 4 (S4-e, 2026-08-28):** this is no longer a placeholder. `main`
-//! branches once — `if args.headless { headless::run(&state) } else {
+//! branches once — `if args.headless { headless::run(&state, policy) } else {
 //! render::run(...) }` — and this path is the *supported* way to run the
 //! pipeline where there is no display or GPU: a server, a container, CI.
 //! `tests/pipeline_live.rs` depends on it. The Stage 2 note about deferring
@@ -15,7 +15,7 @@ use std::io::BufRead;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use radar_workstation::state::{AppState, StateSnapshot};
+use radar_workstation::state::{AppState, RetentionPolicy, StateSnapshot};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -23,11 +23,19 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// change, one line naming every sweep held, the products present on each
 /// with their grid dimensions and fill fraction, and the derived products
 /// once a volume has completed — diagnosable before there is a renderer.
-fn format_state_line(snapshot: &StateSnapshot) -> String {
+/// Stage 6a Part B (ADR-0030) adds `frames=<retained>/<requested>` and
+/// `hist=<n>MiB` — the ring's depth against what was asked for, and its
+/// total byte footprint — so the ring is diagnosable before Part C draws a
+/// timeline over it.
+fn format_state_line(snapshot: &StateSnapshot, policy: RetentionPolicy) -> String {
+    let hist_bytes: usize = snapshot.frames.iter().map(|f| f.bytes()).sum();
     let mut line = format!(
-        "[{}] rev={} sweeps={} derived={} last_complete_vcp={:?} ingest={:?}",
+        "[{}] rev={} frames={}/{} hist={}MiB sweeps={} derived={} last_complete_vcp={:?} ingest={:?}",
         snapshot.site.id,
         snapshot.revision,
+        snapshot.frames.len(),
+        policy.frames,
+        hist_bytes / (1024 * 1024),
         snapshot.sweeps.len(),
         snapshot.derived.len(),
         snapshot.last_complete.map(|v| v.vcp_number),
@@ -55,7 +63,7 @@ fn format_state_line(snapshot: &StateSnapshot) -> String {
 
 /// Runs until stdin closes (Ctrl-D, or immediately if stdin isn't a live
 /// terminal — e.g. piped from `/dev/null` in an automated run).
-pub fn run(state: &AppState) {
+pub fn run(state: &AppState, policy: RetentionPolicy) {
     let (eof_tx, eof_rx) = mpsc::channel::<()>();
     std::thread::spawn(move || {
         let stdin = std::io::stdin();
@@ -87,7 +95,7 @@ pub fn run(state: &AppState) {
         let snapshot = state.snapshot();
         if last_printed_revision != Some(snapshot.revision) {
             last_printed_revision = Some(snapshot.revision);
-            println!("{}", format_state_line(&snapshot));
+            println!("{}", format_state_line(&snapshot, policy));
         }
     }
 }

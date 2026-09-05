@@ -16,7 +16,7 @@ use nexrad_decoder::VolumeStatus;
 use radar_workstation::assembly::{self, AssemblyConfig, AssemblyEvent};
 use radar_workstation::ingest::s3_poll::{IngestStatus, S3Poller, DEFAULT_POLL_INTERVAL};
 use radar_workstation::ingest::ChunkEnvelope;
-use radar_workstation::state::AppState;
+use radar_workstation::state::{AppState, RetentionPolicy};
 
 const LIVE_TEST_SITE: &str = "KDOX";
 const OVERALL_TIMEOUT: Duration = Duration::from_secs(20 * 60);
@@ -28,7 +28,7 @@ async fn polls_a_real_site_to_one_complete_volume() {
     let site = radar_workstation::sites::by_id(LIVE_TEST_SITE).expect("site in bundled table");
     let (status_tx, ingest_rx) = tokio::sync::watch::channel(IngestStatus::default());
     let poller = S3Poller::new(LIVE_TEST_SITE, client, status_tx);
-    let app_state = Arc::new(AppState::new(site, ingest_rx));
+    let app_state = Arc::new(AppState::new(site, ingest_rx, RetentionPolicy::default()));
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
     let (chunk_tx, chunk_rx) = tokio::sync::mpsc::channel::<ChunkEnvelope>(32);

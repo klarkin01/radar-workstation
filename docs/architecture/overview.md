@@ -151,9 +151,12 @@ correct.
 ### Shared Application State
 The single source of truth for radar data — **not** user settings or view state, which
 the render loop owns outright and never shares (see [ADR-0018](../adr/0018-shared-application-state.md),
-Q4's resolution). Holds the newest closed sweep per elevation **as gridded products**
-(not raw radials — released once gridded, S3-g), volume-derived products (Echo
-Tops/VIL), and metadata for the last complete volume. Written by the data pipeline and
+Q4's resolution). Holds a bounded ring of the most recently completed volumes, each as
+its own gridded sweeps and derived products (Echo Tops/VIL) — not raw radials, released
+once gridded (S3-g); not a per-tilt merge, since a retained volume must show only what
+that volume actually scanned (Stage 6a Part B,
+[ADR-0030](../adr/0030-volume-history-retention.md)). The merged live view Stage 5
+displayed is now a read-time fold over that ring. Written by the data pipeline and
 compute layer through a narrow apply/report API; read by the rendering subsystem every
 frame through a single `snapshot()` call that returns owned data. `Arc<AppState>`
 internally holds `RwLock<RadarState>` — one lock, scoped to radar data only, not an

@@ -26,8 +26,8 @@
 //! rather than a rule a later contributor has to remember.
 
 mod apply;
+pub mod history;
 
-use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Instant;
 
@@ -35,18 +35,19 @@ use nexrad_decoder::{VolumeScan, VolumeStatus};
 use tokio::sync::watch;
 
 use crate::assembly::VolumeId;
-use crate::compute::{DisplayProduct, StateUpdate, SweepGrid};
+use crate::compute::SweepGrid;
 use crate::event::{Event, EventLog};
 use crate::ingest::s3_poll::IngestStatus;
 use crate::sites::Site;
 
 pub use apply::apply;
+pub use history::{Frame, RetentionPolicy};
 
 /// One elevation's most recently closed sweep, held for display as grids —
 /// not the sweep itself (S3-g). Cheap to clone: `Arc` for each grid,
 /// `Copy`/small-`Vec` for everything else — this is what keeps
 /// [`AppState::snapshot`]'s per-frame cost a handful of refcount bumps.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct DisplaySweep {
     pub elevation_number: u8,
     pub elevation_deg: f32,
@@ -92,28 +93,15 @@ impl VolumeSummary {
 /// this module; go through [`AppState::new`].
 pub struct RadarState {
     pub site: &'static Site,
-    /// Newest closed sweep per elevation number, carried across volume
-    /// boundaries so a closing volume never blanks the display (ADR-0012,
-    /// FR-DA-3). Private: mutated only through [`apply`] and [`Self::reset`],
-    /// which are the only places the retention/staleness rules need to be
-    /// enforced.
-    sweeps: BTreeMap<u8, DisplaySweep>,
-    /// Volume-level products (Echo Tops, VIL) — one grid each, replaced
-    /// wholesale when a volume closes `Complete`. Cleared, not merged, on
-    /// every replacement: Echo Tops and VIL are properties of one whole
-    /// volume, and a partial merge would mix two volumes' tilts.
-    derived: BTreeMap<DisplayProduct, Arc<SweepGrid>>,
-    /// Which volume `derived` was computed from, so a late/stale
-    /// `DerivedComputed` from an older volume can't clobber a newer one —
-    /// the same out-of-order guard `sweeps` gets from each `DisplaySweep`'s
-    /// own `volume` field.
-    derived_volume: Option<VolumeId>,
-    /// VCP number of the sweeps currently held, if any. Used by [`apply`] to
-    /// detect a VCP change, which invalidates the old pattern's elevation
-    /// set entirely (S2-W1 §3.3) — an incomplete volume in the *same* VCP
-    /// does not trigger this.
-    current_vcp: Option<u16>,
-    pub last_complete: Option<VolumeSummary>,
+    /// The retained volumes (ADR-0030). Everything Stage 3's `RadarState`
+    /// held directly — the merged sweep map, the derived-product set, which
+    /// volume they came from, `last_complete` — is now derivable from this
+    /// ring: `current_vcp` is the newest frame's `vcp_number`, the live
+    /// sweep/derived views are [`history::live_sweeps`]/[`history::live_derived`]
+    /// folds over it, and `last_complete` is the newest frame (searching
+    /// backwards) whose `complete` is `Some`. Private: mutated only through
+    /// [`apply`] and [`Self::reset`].
+    history: history::FrameRing,
     /// Increments on every applied change. The render loop (Stage 4) will
     /// compare this against the value it last uploaded to the GPU and skip
     /// texture re-upload when unchanged (FR-DR-5).
@@ -121,16 +109,8 @@ pub struct RadarState {
 }
 
 impl RadarState {
-    fn new(site: &'static Site) -> Self {
-        Self {
-            site,
-            sweeps: BTreeMap::new(),
-            derived: BTreeMap::new(),
-            derived_volume: None,
-            current_vcp: None,
-            last_complete: None,
-            revision: 0,
-        }
+    fn new(site: &'static Site, policy: history::RetentionPolicy) -> Self {
+        Self { site, history: history::FrameRing::new(policy), revision: 0 }
     }
 
     /// Empties everything and switches to `site`. FR-DA-4 (site change)
@@ -139,24 +119,38 @@ impl RadarState {
     /// the render loop must notice, and `revision` stays a single
     /// monotonically increasing counter across a site switch rather than
     /// resetting to a value the render loop may have already seen.
+    ///
+    /// The history ring is cleared, not carried over (ADR-0030 §3.4): a
+    /// frame's grids are polar grids around a specific site, and there is
+    /// nothing in the old ring that could be correctly displayed under the
+    /// new one.
     pub fn reset(&mut self, site: &'static Site) {
         self.site = site;
-        self.sweeps.clear();
-        self.derived.clear();
-        self.derived_volume = None;
-        self.current_vcp = None;
-        self.last_complete = None;
+        self.history.clear();
         self.revision += 1;
     }
 }
 
 /// Owned snapshot of [`RadarState`], returned by [`AppState::snapshot`].
-/// Nothing in here borrows from the lock.
+/// Nothing in here borrows from the lock. Cost: N `Arc<Frame>` clones for
+/// `frames` (one refcount bump per retained frame, whatever each frame
+/// holds — ADR-0030 §3.2), plus the live fold behind `sweeps`/`derived`
+/// (bounded by retained frames × elevations, at most a few dozen map
+/// probes at the proposed default retention) and the same handful of
+/// `DisplaySweep` clones Stage 3 always did.
 pub struct StateSnapshot {
     pub site: &'static Site,
+    /// The live merged view — newest sweep per elevation number, folded
+    /// over `frames` ([`history::live_sweeps`]). Byte-for-byte what Stage 5
+    /// displayed; every consumer of this field is unchanged by ADR-0030.
     pub sweeps: Vec<DisplaySweep>,
+    /// The live derived-product view ([`history::live_derived`]).
     pub derived: Vec<Arc<SweepGrid>>,
     pub last_complete: Option<VolumeSummary>,
+    /// Every retained frame, oldest → newest (ADR-0030). `Part C` (the
+    /// timeline) is the first consumer that reads this directly; nothing
+    /// before it does.
+    pub frames: Vec<Arc<history::Frame>>,
     pub revision: u64,
     pub ingest: IngestStatus,
 }
@@ -168,8 +162,8 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(site: &'static Site, ingest: watch::Receiver<IngestStatus>) -> Self {
-        Self { radar: RwLock::new(RadarState::new(site)), ingest, events: Mutex::new(EventLog::new()) }
+    pub fn new(site: &'static Site, ingest: watch::Receiver<IngestStatus>, policy: history::RetentionPolicy) -> Self {
+        Self { radar: RwLock::new(RadarState::new(site, policy)), ingest, events: Mutex::new(EventLog::new()) }
     }
 
     /// A poisoned lock (a panic while holding it) must never become a
@@ -189,11 +183,13 @@ impl AppState {
 
     pub fn snapshot(&self) -> StateSnapshot {
         let radar = self.read_radar();
+        let deque = radar.history.as_deque();
         StateSnapshot {
             site: radar.site,
-            sweeps: radar.sweeps.values().cloned().collect(),
-            derived: radar.derived.values().cloned().collect(),
-            last_complete: radar.last_complete,
+            sweeps: history::live_sweeps(deque),
+            derived: history::live_derived(deque),
+            last_complete: deque.iter().rev().find_map(|f| f.complete),
+            frames: radar.history.snapshot_frames(),
             revision: radar.revision,
             ingest: self.ingest.borrow().clone(),
         }
@@ -206,8 +202,12 @@ impl AppState {
     /// `StateUpdate::Info`'s `LateRadialsDiscarded`/`MissingStartChunk` are
     /// observability, not radar data (ADR-0012 rule table) — reported here,
     /// at the `AppState` level where the event log lives, rather than by
-    /// the pure `state::apply`, which only ever touches `RadarState`.
-    pub fn apply_event(&self, event: StateUpdate, now: Instant) -> bool {
+    /// the pure `state::apply`, which only ever touches `RadarState`. The
+    /// same split now covers `apply`'s own events (a late volume discarded,
+    /// the byte budget starting to bind, ADR-0030) — `apply` returns them
+    /// rather than reporting them itself, for the same reason.
+    pub fn apply_event(&self, event: crate::compute::StateUpdate, now: Instant) -> bool {
+        use crate::compute::StateUpdate;
         if let StateUpdate::Info(assembly_event) = &event {
             match assembly_event {
                 crate::assembly::AssemblyEvent::LateRadialsDiscarded { elevation_number, count } => {
@@ -218,7 +218,11 @@ impl AppState {
                 | crate::assembly::AssemblyEvent::VolumeClosed { .. } => {}
             }
         }
-        apply(&mut self.write_radar(), event, now)
+        let (changed, events) = apply(&mut self.write_radar(), event, now);
+        for event in events {
+            self.report(event);
+        }
+        changed
     }
 
     pub fn reset(&self, site: &'static Site) {
@@ -250,6 +254,7 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compute::StateUpdate;
 
     fn test_site() -> &'static Site {
         crate::sites::by_id("KDOX").expect("KDOX is in the bundled table")
@@ -257,7 +262,7 @@ mod tests {
 
     fn app_state() -> AppState {
         let (_tx, rx) = watch::channel(IngestStatus::default());
-        AppState::new(test_site(), rx)
+        AppState::new(test_site(), rx, history::RetentionPolicy::default())
     }
 
     #[test]

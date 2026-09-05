@@ -40,7 +40,7 @@ pub struct AssemblyConfig {
 /// of `VolumeContext`/`VolumeScan`, computed at sweep-closure time from data
 /// `VolumeAssembler` already holds — `state::apply` (S2-W1) consumes it but
 /// does not derive it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct VolumeId {
     pub julian_date: u16,
     pub scan_time_ms: u32,

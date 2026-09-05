@@ -37,6 +37,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, PhysicalKey};
 use winit::window::{Window, WindowId};
 
+use radar_workstation::assembly::VolumeId;
 use radar_workstation::compute::palette::{self, Palette};
 use radar_workstation::compute::{DisplayProduct, SweepGrid};
 use radar_workstation::event::Event;
@@ -109,7 +110,8 @@ pub fn run(
         overlay: None,
         view,
         initial_size,
-        last_uploaded_revision: None,
+        last_uploaded_selection: None,
+        history_upload_pending: false,
         last_drawn_revision: None,
         last_chrome_text: String::new(),
         show_help: false,
@@ -184,7 +186,17 @@ struct App {
     overlay: Option<OverlayRenderer>,
     view: ViewState,
     initial_size: (u32, u32),
-    last_uploaded_revision: Option<u64>,
+    /// `(revision, product, elevation_number)` — the residency selection
+    /// last synced to the GPU (ADR-0030 §3.6): a product or elevation
+    /// switch alone must still re-plan residency (the tail depends on the
+    /// selection), even though `revision` did not change.
+    last_uploaded_selection: Option<(u64, DisplayProduct, u8)>,
+    /// Set when the last `sync` call left `SyncPlan::more_pending` — the
+    /// history tail is still uploading under the per-frame rate limit
+    /// (ADR-0030 §3.7). Drives an immediate redraw *and* another `sync`
+    /// call next frame even though `last_uploaded_selection` hasn't
+    /// changed, until the tail catches up.
+    history_upload_pending: bool,
     last_drawn_revision: Option<u64>,
     last_chrome_text: String,
     show_help: bool,
@@ -271,10 +283,12 @@ impl App {
         }
     }
 
-    /// The grid `Arc` for the current selection, plus its angle. Also sets
-    /// the first-run default (§3.8). Returns an owned `Arc` clone (a
-    /// refcount bump) so the caller has no borrow entangled with `self`.
-    fn resolve_selection(&mut self, snapshot: &StateSnapshot) -> (Option<Arc<SweepGrid>>, Option<f32>) {
+    /// The grid `Arc` for the current selection, plus its angle and the
+    /// `VolumeId` of the frame it came from — `radar::RadarRenderer::draw`'s
+    /// cache key now includes it (ADR-0030). Also sets the first-run
+    /// default (§3.8). Returns an owned `Arc` clone (a refcount bump) so the
+    /// caller has no borrow entangled with `self`.
+    fn resolve_selection(&mut self, snapshot: &StateSnapshot) -> (Option<Arc<SweepGrid>>, Option<f32>, Option<VolumeId>) {
         if self.view.elevation_number == 0 {
             if let Some(lowest) =
                 snapshot.sweeps.iter().min_by(|a, b| a.elevation_deg.total_cmp(&b.elevation_deg))
@@ -286,12 +300,21 @@ impl App {
         if matches!(self.view.product, DisplayProduct::EchoTops | DisplayProduct::Vil) {
             let g = snapshot.derived.iter().find(|g| g.product == self.view.product).cloned();
             let deg = g.as_ref().map(|g| g.elevation_deg);
-            return (g, deg);
+            // `snapshot.derived` is the live fold's pick — "the newest frame
+            // that has it" (`history::live_derived`) — which need not be the
+            // literal newest retained frame. Relocate it by `Arc` identity
+            // rather than re-deriving the fold's own rule a second time.
+            let volume = g.as_ref().and_then(|g| {
+                snapshot.frames.iter().rev().find_map(|frame| {
+                    frame.derived.get(&g.product).filter(|cached| Arc::ptr_eq(cached, g)).map(|_| frame.volume)
+                })
+            });
+            return (g, deg, volume);
         }
 
         let sweep = snapshot.sweeps.iter().find(|s| s.elevation_number == self.view.elevation_number);
         let grid = sweep.and_then(|s| s.grids.iter().find(|g| g.product == self.view.product).cloned());
-        (grid, sweep.map(|s| s.elevation_deg))
+        (grid, sweep.map(|s| s.elevation_deg), sweep.map(|s| s.volume))
     }
 
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
@@ -302,7 +325,7 @@ impl App {
 
         let state = Arc::clone(&self.state);
         let snapshot = state.snapshot();
-        let (selected_grid, selected_deg) = self.resolve_selection(&snapshot);
+        let (selected_grid, selected_deg, selected_volume) = self.resolve_selection(&snapshot);
 
         let window = self.window.clone().unwrap();
         let egui_ctx = self.egui_ctx.clone();
@@ -342,11 +365,19 @@ impl App {
         let reference = self.reference.as_ref().unwrap();
         let overlay = self.overlay.as_ref();
 
-        if self.last_uploaded_revision != Some(snapshot.revision) {
-            for event in radar.sync(&gpu.device, &gpu.queue, &snapshot, &self.palettes) {
+        let upload_key = (snapshot.revision, view.product, view.elevation_number);
+        // Re-sync when the selection changed *or* the last sync left the
+        // history tail mid-upload (ADR-0030 §3.7) — `last_uploaded_selection`
+        // alone would never call `sync` again once it matches, even though
+        // the tail rate limit means one call is not always enough.
+        if self.last_uploaded_selection != Some(upload_key) || self.history_upload_pending {
+            let (events, more_pending) =
+                radar.sync(&gpu.device, &gpu.queue, &snapshot, view.product, view.elevation_number, &self.palettes);
+            for event in events {
                 state.report(event);
             }
-            self.last_uploaded_revision = Some(snapshot.revision);
+            self.last_uploaded_selection = Some(upload_key);
+            self.history_upload_pending = more_pending;
         }
         self.last_drawn_revision = Some(snapshot.revision);
 
@@ -449,8 +480,8 @@ impl App {
             if let Some(overlay) = overlay {
                 overlay.draw(&gpu.queue, &mut pass, camera, view.show_highways);
             }
-            if let Some(grid) = selected_grid.as_deref() {
-                radar.draw(&gpu.device, &gpu.queue, &mut pass, grid, camera);
+            if let (Some(grid), Some(volume)) = (selected_grid.as_deref(), selected_volume) {
+                radar.draw(&gpu.device, &gpu.queue, &mut pass, grid, volume, camera);
             }
             if view.show_reference {
                 reference.draw(&gpu.queue, &mut pass, camera);
@@ -502,7 +533,8 @@ impl App {
             .map(|v| v.repaint_delay)
             .min()
             .unwrap_or(IDLE_TICK);
-        self.next_deadline = Instant::now() + egui_delay.min(IDLE_TICK);
+        let delay = if self.history_upload_pending { Duration::ZERO } else { egui_delay.min(IDLE_TICK) };
+        self.next_deadline = Instant::now() + delay;
     }
 
     /// Identity of the sweep currently on screen, for the data-age readout
@@ -814,7 +846,11 @@ mod tests {
     #[tokio::test]
     async fn view_state_is_unchanged_by_any_sequence_of_state_updates() {
         let (_tx, rx) = watch::channel(IngestStatus::default());
-        let state = AppState::new(radar_workstation::sites::by_id("KDOX").unwrap(), rx);
+        let state = AppState::new(
+            radar_workstation::sites::by_id("KDOX").unwrap(),
+            rx,
+            radar_workstation::state::RetentionPolicy::default(),
+        );
 
         let mut view = ViewState::initial((1280.0, 800.0), DisplayProduct::Reflectivity);
         super::view::pan_by_pixels(&mut view, 137.0, -88.0);

@@ -41,6 +41,18 @@ pub const VIEW_PRODUCT_KEY: &str = "view.product";
 pub const VIEW_HIGHWAYS_KEY: &str = "view.highways";
 pub const VIEW_REFERENCE_KEY: &str = "view.reference";
 
+/// FR-DA-10 / ADR-0030. Read-only in the ADR-0019 sense: loaded, never
+/// written back — like `ingest.poll_interval_seconds`, unlike `view.*`.
+pub const HISTORY_FRAMES_KEY: &str = "history.frames";
+pub const HISTORY_BUDGET_MB_KEY: &str = "history.budget_mb";
+/// Out-of-range values fall back to the default and report
+/// `ConfigValueInvalid`, the same "reject, don't clamp" precedent the
+/// window-geometry keys set (§10): the operator asked for a specific
+/// memory commitment, and every value in range is not equally safe the way
+/// a poll interval is.
+pub const HISTORY_FRAMES_RANGE: std::ops::RangeInclusive<usize> = 1..=64;
+pub const HISTORY_BUDGET_MB_RANGE: std::ops::RangeInclusive<usize> = 0..=4096;
+
 /// Window-geometry clamp bounds (S4-W7 §10). Out-of-range values fall back
 /// to the built-in default and report `ConfigValueInvalid` rather than
 /// being silently clamped — a saved geometry that doesn't fit the current
@@ -68,6 +80,11 @@ pub struct Config {
     /// — the render loop supplies its own default (`true`, both — S5-f).
     pub show_highways: Option<bool>,
     pub show_reference: Option<bool>,
+    /// `None` when the file carried no valid `history.frames`/
+    /// `history.budget_mb` — `main` builds `state::RetentionPolicy::default()`
+    /// from whichever of the two is absent (ADR-0030).
+    pub history_frames: Option<usize>,
+    pub history_budget_mb: Option<usize>,
 }
 
 impl Default for Config {
@@ -80,6 +97,8 @@ impl Default for Config {
             view_product: None,
             show_highways: None,
             show_reference: None,
+            history_frames: None,
+            history_budget_mb: None,
         }
     }
 }
@@ -147,6 +166,12 @@ fn apply_key(config: &mut Config, key: &str, value: String, events: &mut Vec<Eve
         },
         VIEW_HIGHWAYS_KEY => config.show_highways = parse_bool(key, &value, events),
         VIEW_REFERENCE_KEY => config.show_reference = parse_bool(key, &value, events),
+        HISTORY_FRAMES_KEY => {
+            config.history_frames = parse_in_range(key, &value, HISTORY_FRAMES_RANGE, events);
+        }
+        HISTORY_BUDGET_MB_KEY => {
+            config.history_budget_mb = parse_in_range(key, &value, HISTORY_BUDGET_MB_RANGE, events);
+        }
         // Unrecognized but syntactically valid keys are ignored, not
         // reported: they may be a newer version's setting this binary
         // doesn't know about yet (NFR-P-1's multi-instance, multi-version
@@ -155,24 +180,35 @@ fn apply_key(config: &mut Config, key: &str, value: String, events: &mut Vec<Eve
     }
 }
 
-/// A window dimension: parsed as `u32`, accepted only within `range`.
-/// Anything else (non-numeric, or numeric but out of range) is `None` plus
-/// one `ConfigValueInvalid`, so the render loop falls back to its own
-/// default — §10's "out of range → default + `ConfigValueInvalid`", not a
-/// silent clamp.
-fn parse_dimension(
+/// A numeric value, accepted only within `range`. Anything else
+/// (non-numeric, or numeric but out of range) is `None` plus one
+/// `ConfigValueInvalid`, so the caller falls back to its own default —
+/// §10's "out of range → default + `ConfigValueInvalid`", not a silent
+/// clamp. Shared by the window-geometry keys (`u32`) and the history keys
+/// (`usize`, ADR-0030) rather than one copy per integer type.
+fn parse_in_range<T: std::str::FromStr + PartialOrd>(
     key: &str,
     value: &str,
-    range: std::ops::RangeInclusive<u32>,
+    range: std::ops::RangeInclusive<T>,
     events: &mut Vec<Event>,
-) -> Option<u32> {
-    match value.parse::<u32>() {
+) -> Option<T> {
+    match value.parse::<T>() {
         Ok(n) if range.contains(&n) => Some(n),
         _ => {
             events.push(Event::ConfigValueInvalid { key: key.to_string(), value: value.to_string() });
             None
         }
     }
+}
+
+/// A window dimension: parsed as `u32`, accepted only within `range`.
+fn parse_dimension(
+    key: &str,
+    value: &str,
+    range: std::ops::RangeInclusive<u32>,
+    events: &mut Vec<Event>,
+) -> Option<u32> {
+    parse_in_range(key, value, range, events)
 }
 
 /// A `true`/`false` value, case-insensitive. Anything else is `None` plus
@@ -349,6 +385,59 @@ mod tests {
         let (config, events) = load(&path);
         assert_eq!(config.window_width, None);
         assert!(matches!(events.as_slice(), [Event::ConfigValueInvalid { .. }]));
+    }
+
+    #[test]
+    fn history_keys_load_when_valid() {
+        let path = temp_config_path("history-keys-valid");
+        std::fs::write(&path, "history.frames = 8\nhistory.budget_mb = 96\n").unwrap();
+
+        let (config, events) = load(&path);
+        assert!(events.is_empty(), "{events:?}");
+        assert_eq!(config.history_frames, Some(8));
+        assert_eq!(config.history_budget_mb, Some(96));
+    }
+
+    #[test]
+    fn history_budget_mb_of_zero_is_accepted() {
+        let path = temp_config_path("history-budget-zero");
+        std::fs::write(&path, "history.budget_mb = 0\n").unwrap();
+
+        let (config, events) = load(&path);
+        assert!(events.is_empty(), "{events:?}");
+        assert_eq!(config.history_budget_mb, Some(0), "0 means RetentionPolicy::DISABLED, and must be accepted");
+    }
+
+    #[test]
+    fn history_frames_of_zero_is_rejected() {
+        let path = temp_config_path("history-frames-zero");
+        std::fs::write(&path, "history.frames = 0\n").unwrap();
+
+        let (config, events) = load(&path);
+        assert_eq!(config.history_frames, None);
+        assert!(matches!(events.as_slice(), [Event::ConfigValueInvalid { key, .. }] if key == HISTORY_FRAMES_KEY));
+    }
+
+    #[test]
+    fn out_of_range_history_keys_fall_back_to_none_and_are_reported() {
+        let path = temp_config_path("history-keys-out-of-range");
+        std::fs::write(&path, "history.frames = 65\nhistory.budget_mb = 4097\n").unwrap();
+
+        let (config, events) = load(&path);
+        assert_eq!(config.history_frames, None);
+        assert_eq!(config.history_budget_mb, None);
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|e| matches!(e, Event::ConfigValueInvalid { .. })));
+    }
+
+    #[test]
+    fn a_file_with_no_history_keys_yields_the_default_retention_policy() {
+        let path = temp_config_path("history-keys-absent");
+        std::fs::write(&path, "site = KDOX\n").unwrap();
+
+        let (config, _events) = load(&path);
+        assert_eq!(config.history_frames, None);
+        assert_eq!(config.history_budget_mb, None);
     }
 
     #[test]

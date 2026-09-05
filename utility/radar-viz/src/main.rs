@@ -52,6 +52,7 @@ fn run() -> Result<(), String> {
     match args.path {
         RenderPath::Radial => run_radial_path(&args, all_radials),
         RenderPath::Grid => run_grid_path(&args, all_radials),
+        RenderPath::Budget => run_budget_path(&args, all_radials),
     }
 }
 
@@ -181,6 +182,88 @@ fn run_grid_path(args: &Args, all_radials: Vec<Radial>) -> Result<(), String> {
 
     png_out::write_png(&img, &args.output).map_err(|e| format!("failed to write PNG: {e}"))?;
     eprintln!("Done.");
+    Ok(())
+}
+
+// ── Budget path (Stage 6a Part B, W1.1: measures the frame footprint) ────────
+//
+// One complete volume's worth of gridded output, measured exactly as the
+// application allocates it: `grid::grid_all_base_products` per sweep, then
+// `derived::compute_derived` over the volume's reflectivity grids — the same
+// two calls `compute::handle_event` makes. Bytes come from `SweepGrid::
+// byte_len()`, never a recomputed `az × gates`, so what's printed is what the
+// type actually allocates, not an estimate of it.
+fn run_budget_path(_args: &Args, all_radials: Vec<Radial>) -> Result<(), String> {
+    let vcp_number = all_radials
+        .iter()
+        .find_map(|r| r.site_parameters.as_ref().map(|sp| sp.vcp_number))
+        .unwrap_or(0);
+    let site_id = all_radials
+        .first()
+        .map(|r| String::from_utf8_lossy(&r.site_id).trim_end().to_string())
+        .unwrap_or_else(|| "????".to_string());
+
+    let by_elevation = group_by_elevation(all_radials);
+    let elevation_count = by_elevation.len();
+
+    let mut per_product_bytes: BTreeMap<DisplayProduct, usize> = BTreeMap::new();
+    let mut ref_grids: Vec<Arc<grid::SweepGrid>> = Vec::new();
+    let mut base_bytes: usize = 0;
+
+    println!("el  angle   az    product   gates   bytes");
+    for (elevation_number, radials) in by_elevation {
+        let sweep = build_sweep(elevation_number, radials);
+        let (grids, events) = grid::grid_all_base_products(&sweep);
+        for event in &events {
+            eprintln!("grid warning: {event}");
+        }
+        for g in &grids {
+            let bytes = g.byte_len();
+            println!(
+                "{:>2}  {:>5.2}  {:>4}    {:<8}  {:>5}  {:>4} KiB",
+                elevation_number,
+                g.elevation_deg,
+                g.azimuth_count,
+                g.product,
+                g.gate_count,
+                bytes.div_ceil(1024)
+            );
+            *per_product_bytes.entry(g.product).or_default() += bytes;
+            base_bytes += bytes;
+            if g.product == DisplayProduct::Reflectivity {
+                ref_grids.push(Arc::clone(g));
+            }
+        }
+    }
+
+    println!("per-product totals:");
+    for product in DisplayProduct::ALL {
+        if let Some(bytes) = per_product_bytes.get(&product) {
+            println!("  {product:<8} {:>6} KiB", bytes.div_ceil(1024));
+        }
+    }
+
+    let (derived_grids, derived_events) = derived::compute_derived(&ref_grids);
+    for event in &derived_events {
+        eprintln!("derived warning: {event}");
+    }
+    let mut derived_bytes: usize = 0;
+    print!("derived:");
+    for g in &derived_grids {
+        let bytes = g.byte_len();
+        derived_bytes += bytes;
+        print!(" {} {}x{} {} KiB", g.product, g.azimuth_count, g.gate_count, bytes.div_ceil(1024));
+    }
+    println!();
+
+    let total_bytes = base_bytes + derived_bytes;
+    println!(
+        "FRAME {site_id} vcp={vcp_number} elevations={elevation_count} base={} KiB derived={} KiB total={} KiB",
+        base_bytes.div_ceil(1024),
+        derived_bytes.div_ceil(1024),
+        total_bytes.div_ceil(1024),
+    );
+
     Ok(())
 }
 
@@ -319,6 +402,10 @@ fn moment_kind_name(k: ProductKind) -> &'static str {
 enum RenderPath {
     Radial,
     Grid,
+    /// Stage 6a Part B, W1.1: no image output — measures one volume's
+    /// gridded footprint (base products + derived) and prints it, for
+    /// `docs/adr/0030-volume-history-retention.md`'s frame-size table.
+    Budget,
 }
 
 #[derive(Clone, Copy)]
@@ -343,7 +430,7 @@ const USAGE: &str = "\
 Usage: radar-viz [OPTIONS] <input-dir>
 
 Options:
-  --path radial|grid                         default: radial (see this file's module doc comment)
+  --path radial|grid|budget                  default: radial (see this file's module doc comment)
   --product DREF|DVEL|DSW|DZDR|DPHI|DRHO|ECHO_TOPS|VIL
                                               default: DREF (ECHO_TOPS/VIL require --path grid)
   --sweep <n>                                 default: 1
@@ -419,7 +506,8 @@ fn parse_path(s: &str) -> Result<RenderPath, String> {
     match s {
         "radial" => Ok(RenderPath::Radial),
         "grid" => Ok(RenderPath::Grid),
-        other => Err(format!("unknown --path '{other}'; expected radial or grid")),
+        "budget" => Ok(RenderPath::Budget),
+        other => Err(format!("unknown --path '{other}'; expected radial, grid, or budget")),
     }
 }
 
