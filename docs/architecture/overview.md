@@ -4,24 +4,12 @@
 entry point to the architecture directory. For the principles that govern every decision
 made here, see [PHILOSOPHY.md](../PHILOSOPHY.md).*
 
-> **Implementation status:** Stage 3 complete (`docs/plans/
-> stage-3-compute-layer.md`). The NEXRAD decoder (Message 31), the workspace-local
-> HTTP/1.1 client (`crates/http-ingest`), the chunk ingest layer (S3 chunk-stream
-> polling, chunk detection, BZ2 decompression), the volume assembly state machine
-> (ADR-0012), the compute layer (gridding, colour tables, Echo Tops/VIL — ADR-0020,
-> ADR-0021), shared application state (ADR-0018), the runtime/supervision skeleton
-> (`pipeline.rs`), the bundled site list (`sites.rs`), and configuration persistence
-> (ADR-0019) are all implemented and tested — `cargo run --release -- KDOX` polls,
-> decodes, assembles, grids every in-scope product, and derives Echo Tops/VIL, all
-> visible in the headless output. **Stage 4 (2026-08-28):** the render loop described
-> below is now implemented (winit + wgpu + egui, ADR-0022/ADR-0023,
-> `crates/radar-workstation/src/render/`) — `cargo run --release -- KDOX` opens a window
-> and draws the radar. `--headless` runs the terminal loop above instead. View state
-> (pan, zoom, active product/sweep) is genuinely owned by `render::ViewState` and never
-> enters `AppState`. Map underlays and placefiles (layers 3–5, 7, 9) remain unbuilt —
-> Stages 5–6. Layer 2 (terrain imagery tiles) is **deferred out of v1.0 entirely**
-> (ADR-0027, 2026-08-28): v1.0 ships a vector-only basemap. See the root
-> [README.md](../../README.md) for the full status statement.
+> **Implementation status:** The current status is kept in one place, the root
+> [README.md](../../README.md#status), so this document does not repeat it. In short,
+> as of 2026-09-04, Stages 0–5 and Stage 6a Parts A–B are built. Placefiles (layer 7,
+> Stage 6) and the timeline (Stage 6a Part C) are not. Layer 2
+> (terrain imagery tiles) is **deferred out of v1.0 entirely** (ADR-0027), so v1.0
+> ships a vector-only basemap.
 
 ---
 
@@ -33,8 +21,10 @@ radar-workstation/
 ├── crates/
 │   ├── radar-workstation/         ← application crate (binary)
 │   ├── nexrad-decoder/            ← decoder library crate
-│   └── http-ingest/               ← workspace-local HTTP/1.1 client — ADR-0014
+│   ├── http-ingest/               ← workspace-local HTTP/1.1 client — ADR-0014
+│   └── fuzz-support/              ← dev-only seeded mutator for parser hardening tests
 ├── utility/                       ← dev-only tooling, not part of the product
+│   ├── map-bake/                  ← bake the overlay bundle from TIGER/Natural Earth — ADR-0025
 │   ├── nexrad-inspect/            ← Python cross-validation scripts (MetPy-based)
 │   ├── nexrad-sample/             ← fetch/decode sample chunks from S3
 │   ├── nexrad-sites/              ← generate the bundled WSR-88D site table
@@ -151,9 +141,12 @@ correct.
 ### Shared Application State
 The single source of truth for radar data — **not** user settings or view state, which
 the render loop owns outright and never shares (see [ADR-0018](../adr/0018-shared-application-state.md),
-Q4's resolution). Holds the newest closed sweep per elevation **as gridded products**
-(not raw radials — released once gridded, S3-g), volume-derived products (Echo
-Tops/VIL), and metadata for the last complete volume. Written by the data pipeline and
+Q4's resolution). Holds a bounded ring of the most recently completed volumes, each as
+its own gridded sweeps and derived products (Echo Tops/VIL) — not raw radials, released
+once gridded (S3-g); not a per-tilt merge, since a retained volume must show only what
+that volume actually scanned (Stage 6a Part B,
+[ADR-0030](../adr/0030-volume-history-retention.md)). The merged live view Stage 5
+displayed is now a read-time fold over that ring. Written by the data pipeline and
 compute layer through a narrow apply/report API; read by the rendering subsystem every
 frame through a single `snapshot()` call that returns owned data. `Arc<AppState>`
 internally holds `RwLock<RadarState>` — one lock, scoped to radar data only, not an

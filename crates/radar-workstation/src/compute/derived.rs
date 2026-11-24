@@ -7,10 +7,10 @@
 //! rather than slant range — the one place in this codebase where the two
 //! differ materially.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::compute::{geometry, grid::SweepGrid, DisplayProduct};
+use crate::assembly::VolumeId;
+use crate::compute::{cut, geometry, grid::SweepGrid, DisplayProduct};
 use crate::event::Event;
 
 pub const ECHO_TOP_THRESHOLD_DBZ: f32 = 18.0;
@@ -38,21 +38,21 @@ impl OutputGeometry {
     }
 }
 
-/// One reflectivity grid per distinct elevation angle, ascending, newest
-/// wins where a VCP repeats an angle (SAILS/MRLE insert repeated low-level
-/// cuts with distinct elevation *numbers* at the same angle — see
-/// `RadialStatus::StartOfLastElevation`'s doc comment). Angles are bucketed
-/// to the nearest 0.01° rather than compared for exact float equality —
-/// real repeated cuts measure stable well under that tolerance.
+/// One reflectivity grid per distinct tilt, ascending in angle (ADR-0031
+/// D-2/D-3): tilts are identified by commanded cut angle (`compute::cut`),
+/// and among the grids at one cut the D-3 rule picks — the full-range
+/// surveillance REF over a split cut's range-limited Doppler REF, the newest
+/// SAILS/MRLE re-closure among equal ranges. All of `ref_grids` belong to the
+/// one volume being derived, so the volume term of D-3's rank is a constant.
 fn distinct_tilts_ascending(ref_grids: &[Arc<SweepGrid>]) -> Vec<Arc<SweepGrid>> {
-    let mut by_angle: BTreeMap<i32, Arc<SweepGrid>> = BTreeMap::new();
-    for grid in ref_grids {
-        let bucket = (grid.elevation_deg * 100.0).round() as i32;
-        // `ref_grids` is in sweep-closure order; a later insert for the
-        // same bucket is the newer closure and is kept.
-        by_angle.insert(bucket, Arc::clone(grid));
-    }
-    by_angle.into_values().collect()
+    const THIS_VOLUME: VolumeId = VolumeId { julian_date: 0, scan_time_ms: 0 };
+    cut::distinct_cuts(ref_grids)
+        .into_iter()
+        .filter_map(|key| {
+            cut::best_at_cut(ref_grids.iter().map(|g| (THIS_VOLUME, g)), DisplayProduct::Reflectivity, key)
+                .map(|(_, g)| Arc::clone(g))
+        })
+        .collect()
 }
 
 fn azimuth_deg_center(a: u16, azimuth_count: u16) -> f32 {
@@ -170,6 +170,7 @@ fn echo_tops(tilts: &[Arc<SweepGrid>], out: &OutputGeometry) -> Option<SweepGrid
         gate_width_m: out.gate_width_m,
         elevation_number: 0,
         elevation_deg: 0.0,
+        cut_deg: 0.0,
         nyquist_velocity_mps: None,
         scale: 253.0 / ECHO_TOP_MAX_KFT,
         offset: 2.0,
@@ -228,6 +229,7 @@ fn vil(tilts: &[Arc<SweepGrid>], out: &OutputGeometry) -> Option<SweepGrid> {
         gate_width_m: out.gate_width_m,
         elevation_number: 0,
         elevation_deg: 0.0,
+        cut_deg: 0.0,
         nyquist_velocity_mps: None,
         scale: 253.0 / VIL_MAX_KG_M2,
         offset: 2.0,
@@ -261,6 +263,7 @@ mod tests {
             gate_width_m,
             elevation_number: 0,
             elevation_deg,
+            cut_deg: elevation_deg,
             nyquist_velocity_mps: None,
             scale: 1.0,
             offset: 0.0,
@@ -375,11 +378,35 @@ mod tests {
         let mut first_closure = (*first).clone();
         first_closure.elevation_number = 1;
         let mut sails_repeat = (*first).clone();
-        sails_repeat.elevation_number = 9; // same angle, new elevation_number, closed later
+        sails_repeat.elevation_number = 9; // same cut, new elevation_number, closed later
+        sails_repeat.elevation_deg = 0.53; // measured drift must not split the tilt
 
         let grids = vec![Arc::new(first_closure), Arc::new(sails_repeat)];
         let distinct = distinct_tilts_ascending(&grids);
-        assert_eq!(distinct.len(), 1, "two grids at the same angle must collapse to one tilt");
+        assert_eq!(distinct.len(), 1, "two grids at the same commanded cut must collapse to one tilt");
         assert_eq!(distinct[0].elevation_number, 9, "the later closure must win");
+    }
+
+    #[test]
+    fn a_split_cut_contributes_its_surveillance_ref_not_its_doppler_ref() {
+        let base = tilt(0.5, 2000.0, Some(20.0));
+        let mut surveillance = (*base).clone();
+        surveillance.elevation_number = 1;
+        surveillance.gate_count += 100; // full-range surveillance scan
+        let mut doppler = (*base).clone();
+        doppler.elevation_number = 2; // range-limited Doppler half, later number
+
+        let grids = vec![Arc::new(surveillance), Arc::new(doppler)];
+        let distinct = distinct_tilts_ascending(&grids);
+        assert_eq!(distinct.len(), 1, "both halves of a split cut are one tilt");
+        assert_eq!(distinct[0].elevation_number, 1, "the longer-range surveillance REF must win");
+    }
+
+    #[test]
+    fn distinct_tilts_are_ascending_by_cut() {
+        let high = tilt(5.0, 2000.0, Some(20.0));
+        let low = tilt(0.5, 2000.0, Some(20.0));
+        let distinct = distinct_tilts_ascending(&[high, low]);
+        assert_eq!(distinct.iter().map(|g| g.cut_deg).collect::<Vec<_>>(), vec![0.5, 5.0]);
     }
 }

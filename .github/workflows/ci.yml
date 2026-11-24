@@ -27,16 +27,16 @@ jobs:
       # revisiting that reasoning.
 
       - name: cargo build --release --workspace
-        run: cargo build --release --workspace
+        run: cargo build --locked --release --workspace
 
       # --workspace explicitly: default-members (Cargo.toml) scopes the bare
       # `cargo build`/`cargo test` to the three production crates, so CI must
       # opt back in to also cover the utility/ dev tools.
       - name: cargo test --workspace
-        run: cargo test --release --workspace
+        run: cargo test --locked --release --workspace
 
       - name: cargo clippy --workspace --all-targets
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       - name: install cargo-deny
         run: cargo install --locked cargo-deny --version 0.20.2

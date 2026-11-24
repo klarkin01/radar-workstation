@@ -300,7 +300,11 @@ mod tests {
 
     fn test_app_state() -> Arc<AppState> {
         let (_tx, rx) = watch::channel(IngestStatus::default());
-        Arc::new(AppState::new(crate::sites::by_id("KDOX").expect("KDOX in bundled table"), rx))
+        Arc::new(AppState::new(
+            crate::sites::by_id("KDOX").expect("KDOX in bundled table"),
+            rx,
+            crate::state::RetentionPolicy::default(),
+        ))
     }
 
     #[test]

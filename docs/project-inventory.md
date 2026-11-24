@@ -23,7 +23,19 @@ design, or estimate effort in hours.
 > declutter-selected city/site labels (ADR-0028), all baked into the binary with no
 > runtime parser and no network, plus `S3Client::new(bucket: Bucket)` from ADR-0026 §2.
 > `--headless` runs the Stage 2 loop. Tiles and placefiles (Stage 6, and tiles post-v1.0
-> per ADR-0027) remain unbuilt. This document's numbers (test counts, LOC, package counts,
+> per ADR-0027) remain unbuilt.
+>
+> **Extended 2026-11-21, through Stage 6a Part B.** This roadmap gained a stage that §6
+> below does not list. **Stage 6a (time handling,
+> `docs/plans/stage-6a-time-handling.md`) runs *before* Stage 6 (placefiles)**, so the
+> placefile layer can be written against a timeline from the start. Part A
+> (`stage-6a-part-a-stale-data.md`) fixed the volume-sequence wrap bug and added the
+> scan-age readout. Part B (`stage-6a-part-b-retain-history.md`,
+> [ADR-0030](adr/0030-volume-history-retention.md)) added bounded volume history
+> retention. Part C (the timeline) is next. "Stage 6" in this document still means
+> placefiles. `docs/plans/stage-6a-checkpoint.md` is the current ordering of the work.
+>
+> This document's numbers (test counts, LOC, package counts,
 > open-question counts) reflect the `668b1ca` snapshot and are not re-audited here; each
 > plan's own Results section is the current source of truth for its stage, the same
 > relationship `dependency-inventory.md` has to its own remediation plan.

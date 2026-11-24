@@ -275,6 +275,46 @@ Each elevation sweep is a separate texture. The active sweep is selected by the 
 Switching sweeps is a GPU state change (swap the active texture) — it does not require
 re-fetching or re-computing data.
 
+### GPU residency across retained history (Stage 6a Parts B–C, ADR-0030, ADR-0031)
+
+FR-RP-7 ("product and sweep switches are GPU state changes only") is unchanged for the
+*displayed* frame, but is now a statement about one frame among several retained ones,
+not the whole cache. `render::radar::residency` is a pure function of `(frames,
+selection, budget)`. Since Stage 6a Part C it plans around the **focus frame**
+(ADR-0031 §5): the pinned frame while paused, the newest while live or playing
+(`render::timeline::residency_focus`). In upload-priority order, these must be resident:
+
+1. the displayed grid (in `Live` it may be carried forward from an older frame);
+2. every grid of the focus frame;
+3. the newest frame's selected grid;
+4. the selected grid of every other retained frame, chosen by the one grid-selection
+   rule (`compute::cut::best_at_cut` through `Frame::grid_at_cut`, ADR-0031 §3), keyed by
+   the commanded cut angle, not `elevation_number`.
+
+Only item 4 is budgeted, with the oldest frames dropping out first under a ~76 MB tail
+budget (128 MB target, less the ~11.46 MB overlay, less the focus frame's own grids).
+Items 1–3 are never dropped. `plan_sync` diffs that plan against the cache and is the
+only thing that decides GPU contents. These properties are pure-tested, not just
+believed:
+
+- a product or tilt switch never re-uploads the frame on screen, including a paused
+  older frame (FR-TL-10);
+- playback of an already-resident selection uploads nothing (FR-TL-9);
+- a focus change never evicts the newest frame's selected grid.
+
+Uploads that must happen are rate-limited to 4 per frame (~5 MB, well under budget), in
+residency's priority order. A product switch with a full tail resident therefore fills
+over a few frames rather than stalling one, and the render loop requests an immediate
+redraw while work remains.
+
+### Timeline pacing (Stage 6a Part C, ADR-0031)
+
+While playing, the render loop redraws once per frame step
+(`ControlFlow::WaitUntil(next_step)` from `render::timeline::tick`), never continuously.
+A stopped timeline adds no deadline, so it paces exactly as before (the 2 Hz idle tick
+plus input and egui repaint requests). The playback clock is the render loop's own, not
+a task's.
+
 ---
 
 ## Vector Overlay Rendering
@@ -340,8 +380,8 @@ greedy collision cull, not by a fixed zoom threshold — labels appear as screen
 up. The pass:
 
 - is **pure** — `(labels, &ViewState, viewport) -> Vec<PlacedLabel>` — and unit-tested
-  without a window, the pattern `view.rs`, `input.rs`, `adapter.rs` and `time.rs` already
-  establish;
+  without a window, the pattern `view.rs`, `input.rs` and `adapter.rs` already establish
+  (`time.rs` moved library-side in Stage 6a Part A);
 - is **render-loop owned**, alongside `ViewState`, and never enters `AppState` (ADR-0018).
   FR-NI-4's spatial-stability guarantee covers it: a new scan, a product switch, or a
   sweep switch must not change which labels are placed;
@@ -410,8 +450,9 @@ These are design targets, not benchmarks. They should be validated during develo
 | Frame rate (new scan upload) | No perceptible drop | `revision`-gated re-upload; `plan_sync` uploads only changed grids. Not timed on-device. |
 | Frame rate (idle) | ~2 fps by design (S4-c) | By construction: `ControlFlow::WaitUntil(now + 500 ms)`. |
 | Time to first render after launch | < 2 seconds | Not measured on-device. Palette load is < 50 ms (regression-guarded); pipeline compilation is the remaining cost. |
-| Memory per instance (steady state) | < 200 MB | Not measured on-device; Stage 3 headless was ~147 MB. |
-| GPU memory per instance | < 128 MB | Stage 3 measured 37.28 MB grids + 2.52 MB derived; the surface, LUT uniforms (4 KB each, ≤32), and egui atlas add little. Not measured on-device. |
+| Memory per instance, history disabled (`history.budget_mb = 0`) | < 200 MB | Stage 3 headless was ~147 MB; a windowed live run on this development machine measured VmHWM ≈ 393 MB (2026-09-04, ADR-0030) — the gap is GPU-driver/Vulkan overhead this machine's discrete adapter charges to RSS, not application heap; see the ADR for the caveat and the follow-up it leaves open. |
+| Memory per instance, default history retention | < 200 MB + `history.budget_mb` | Amended 2026-09-04 (ADR-0030): a retained volume measured 28-40 MB across three live volumes (VCP 35/12/212); the default policy (12 frames, 320 MB budget) buys ~8-12 frames depending on site/VCP. |
+| GPU memory per instance | < 128 MB | Stage 3 measured 37.28 MB grids + 2.52 MB derived for one frame; with history, the resident set is bounded to a ~76 MB tail budget on top of that (ADR-0030). Not measured on-device. |
 | Texture uploads across a product/sweep switch | 0 (FR-RP-7) | **0** — `plan_sync` unit tests assert an empty upload list for both. |
 
 ---

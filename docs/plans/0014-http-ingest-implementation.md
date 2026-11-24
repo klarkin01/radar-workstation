@@ -1,6 +1,6 @@
 # Implementation Plan — ADR-0014: `crates/http-ingest`
 
-**Status:** Draft, not yet implemented
+**Status:** Implemented 2026-07-29 (commit `4b694e0`) — this plan has no Results section; `dependency-inventory-remediation.md` §9 is the record of the resulting dependency posture
 **Drafted:** 2026-07-29
 **Implements:** ADR-0014 (Own the HTTP boundary)
 **Baseline commit:** `f512ea8`

@@ -6,8 +6,10 @@
 //! revisit at Stage 4 if `RUST_LOG`-style filtering across ten-plus
 //! subsystems makes the cost worth it.
 
+use crate::assembly::VolumeId;
 use crate::compute::DisplayProduct;
 use crate::ingest::s3_poll::PollError;
+use crate::ingest::volume_seq::VolumeSeq;
 
 /// Which supervised unit an event pertains to (S2-W2 §4.3). One variant
 /// today: the poller/assembly/applier trio is supervised together, not
@@ -32,8 +34,13 @@ pub enum Event {
     PollFailed(PollError),
     UnrecognizedKeySuffix { key: String },
     UnrecognizedVolumeFolder { entry: String },
-    ReAnchored { from_volume: u64, to_volume: u64, empty_polls: u32 },
-    AdvancedPastStalledVolume { from_volume: u64, to_volume: u64, empty_polls: u32 },
+    ReAnchored { from_volume: VolumeSeq, to_volume: VolumeSeq, empty_polls: u32 },
+    AdvancedPastStalledVolume { from_volume: VolumeSeq, to_volume: VolumeSeq, empty_polls: u32 },
+    /// The retained volume-sequence folders did not contain a gap large
+    /// enough to identify the retention boundary confidently, so "newest"
+    /// was resolved from a smaller gap than the bucket's observed behaviour
+    /// predicts. Reported, not fatal — the poller still picks deterministically.
+    VolumeSequenceOrderAmbiguous { largest_gap: u32, folder_count: usize },
     /// Mirrors `assembly::AssemblyEvent::LateRadialsDiscarded` — reported by
     /// `AppState::apply_event` (S2-W1/W2), not by the pure `state::apply`.
     LateRadialsDiscarded { elevation_number: u8, count: usize },
@@ -79,6 +86,19 @@ pub enum Event {
     /// oldest tilt was dropped rather than letting a stuck volume leak.
     RetainedGridSetBounded { dropped_elevation_number: u8 },
 
+    // --- volume history retention (Stage 6a Part B, `state::history`, ADR-0030) ---
+    /// The byte budget, not the requested frame count, is what bounds the
+    /// history — the loop is shorter than the operator asked for. Edge-
+    /// triggered: reported when the constraint starts binding, not per
+    /// eviction.
+    HistoryBudgetBound { frames_retained: usize, requested_frames: usize, bytes: usize },
+    /// A sweep or derived set arrived for a volume older than every
+    /// retained frame, and no retained frame matched it either. Discarded:
+    /// landing it behind the ring's head would break the ordering
+    /// invariant every other function relies on. Observability, not data
+    /// (ADR-0012's rule table).
+    LateVolumeDiscarded { volume: VolumeId },
+
     // --- colour tables (S3-W3, `compute::palette`) ---
     /// A `.pal` line was neither a comment, blank, nor a recognized,
     /// well-formed directive.
@@ -121,6 +141,11 @@ impl std::fmt::Display for Event {
                 f,
                 "advanced past stalled volume {from_volume} to {to_volume} after \
                  {empty_polls} empty polls (assembly watchdog will mark it TimedOut)"
+            ),
+            Self::VolumeSequenceOrderAmbiguous { largest_gap, folder_count } => write!(
+                f,
+                "volume-sequence folders ({folder_count}) had no gap wide enough (largest {largest_gap}) \
+                 to identify the retention boundary confidently; newest volume resolved from a smaller gap"
             ),
             Self::LateRadialsDiscarded { elevation_number, count } => write!(
                 f,
@@ -167,6 +192,16 @@ impl std::fmt::Display for Event {
                 f,
                 "retained reflectivity grid set exceeded its bound, dropped elevation \
                  {dropped_elevation_number}"
+            ),
+            Self::HistoryBudgetBound { frames_retained, requested_frames, bytes } => write!(
+                f,
+                "history.budget_mb is binding before history.frames: retaining {frames_retained} of \
+                 {requested_frames} requested volumes ({} MiB)",
+                bytes / (1024 * 1024)
+            ),
+            Self::LateVolumeDiscarded { volume } => write!(
+                f,
+                "discarded a sweep/derived update for volume {volume:?}, older than every retained frame"
             ),
             Self::PaletteLineUnparseable { product, line } => {
                 write!(f, "{product} palette line {line} is not valid, skipping")
@@ -253,11 +288,25 @@ mod tests {
 
     #[test]
     fn display_formats_are_human_readable() {
-        let event = Event::ReAnchored { from_volume: 79, to_volume: 165, empty_polls: 12 };
+        let event = Event::ReAnchored {
+            from_volume: VolumeSeq::new(79).unwrap(),
+            to_volume: VolumeSeq::new(165).unwrap(),
+            empty_polls: 12,
+        };
         let text = event.to_string();
         assert!(text.contains("79"));
         assert!(text.contains("165"));
         assert!(text.contains("12"));
+
+        let bound = Event::HistoryBudgetBound { frames_retained: 8, requested_frames: 12, bytes: 320 * 1024 * 1024 };
+        let text = bound.to_string();
+        assert!(text.contains('8'));
+        assert!(text.contains("12"));
+        assert!(text.contains("320"));
+
+        let discarded = Event::LateVolumeDiscarded { volume: VolumeId { julian_date: 20_000, scan_time_ms: 100 } };
+        let text = discarded.to_string();
+        assert!(text.contains("20000") || text.contains("20_000"));
     }
 
     fn sample_event() -> Event {

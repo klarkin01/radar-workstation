@@ -5,6 +5,13 @@
 //!
 //! Bindings follow GR2Analyst where it has a convention: `PageUp`/`PageDown`
 //! for tilt, arrows for pan. Do not swap them.
+//!
+//! **Timeline keys are ours, not GR2Analyst's** (ADR-0031, Part C plan D-6).
+//! No GR2Analyst timeline keyboard convention is recorded in this
+//! repository — its loop controls are toolbar buttons — so `Space`, `[`
+//! `]`, `End`, `,` `.` were chosen for not colliding with the map keys and
+//! for mnemonic (`End` pairs with `Home`). `Shift+[`/`]` cannot carry a
+//! second meaning: [`action_for_key`] matches the physical key first.
 
 use winit::keyboard::KeyCode;
 
@@ -37,6 +44,16 @@ pub enum Action {
     ToggleHighways,
     ToggleHelp,
     Quit,
+    // --- timeline (ADR-0031, D-6) ---
+    /// Play / pause the loop.
+    PlayPause,
+    /// One frame back / forward; stops playback; forward past newest → Live.
+    StepBackward,
+    StepForward,
+    JumpToLive,
+    /// Loop one frame shorter / longer (2..=64).
+    LoopShorter,
+    LoopLonger,
 }
 
 /// Map a physical key (plus whether Ctrl is held) to an [`Action`]. `None`
@@ -69,6 +86,12 @@ pub fn action_for_key(code: KeyCode, ctrl: bool) -> Option<Action> {
         KeyCode::KeyR => Some(Action::ToggleReference),
         KeyCode::KeyH => Some(Action::ToggleHighways),
         KeyCode::F1 => Some(Action::ToggleHelp),
+        KeyCode::Space => Some(Action::PlayPause),
+        KeyCode::BracketLeft => Some(Action::StepBackward),
+        KeyCode::BracketRight => Some(Action::StepForward),
+        KeyCode::End => Some(Action::JumpToLive),
+        KeyCode::Comma => Some(Action::LoopShorter),
+        KeyCode::Period => Some(Action::LoopLonger),
         _ => None,
     }
 }
@@ -113,6 +136,17 @@ mod tests {
         assert_eq!(action_for_key(KeyCode::KeyH, false), Some(Action::ToggleHighways));
         assert_eq!(action_for_key(KeyCode::F1, false), Some(Action::ToggleHelp));
         assert_eq!(action_for_char("?"), Some(Action::ToggleHelp));
+    }
+
+    #[test]
+    fn timeline_bindings() {
+        assert_eq!(action_for_key(KeyCode::Space, false), Some(Action::PlayPause));
+        assert_eq!(action_for_key(KeyCode::BracketLeft, false), Some(Action::StepBackward));
+        assert_eq!(action_for_key(KeyCode::BracketRight, false), Some(Action::StepForward));
+        assert_eq!(action_for_key(KeyCode::End, false), Some(Action::JumpToLive));
+        assert_eq!(action_for_key(KeyCode::Comma, false), Some(Action::LoopShorter));
+        assert_eq!(action_for_key(KeyCode::Period, false), Some(Action::LoopLonger));
+        assert_eq!(action_for_key(KeyCode::Space, true), None, "Ctrl suppresses timeline keys too");
     }
 
     #[test]

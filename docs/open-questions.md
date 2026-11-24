@@ -360,3 +360,25 @@ layer 5 is toggleable, so this degrades rather than breaks; and dropping sub-kil
 ramp/connector parts is worthless for bytes (0.7% of points) but may be worth doing for
 **visual clutter**, which is deliberately deferred until layer 5 has been drawn and looked
 at rather than raised as a new numbered question.
+
+**Q25: What is retained for the time axis, and how much?** — Resolved 2026-09-04
+(Stage 6a Part B) by [ADR-0030](adr/0030-volume-history-retention.md), answering all four
+of `stage-6a-time-handling.md` §5's Part B questions except whether *archive* playback is
+v1.0, which stays open for Part D:
+
+- **What is a frame?** One volume's own gridded output — its own closed sweeps and, once
+  it completes, its own Echo Tops/VIL. It does **not** inherit the live display's
+  carry-forward merge across volume boundaries (FR-DA-3, ADR-0012); that merge is now a
+  read-time fold over the retained ring instead, so a frame played back shows exactly what
+  the radar scanned at that time.
+- **What is retained, and how much?** The N most recent completed volumes, bounded by both
+  an operator-set frame count (`history.frames`) and byte budget (`history.budget_mb`),
+  oldest evicted first, newest never evicted. Measured at ~28-40 MB per volume
+  (`utility/radar-viz --path budget`, three live volumes across VCP 35/12/212) — enough
+  that the existing 200 MB per-instance memory target could not survive a useful loop
+  unamended; ADR-0030 restates the target rather than exceeding it silently.
+- **What does a VCP change do to the loop?** Nothing — the old pattern's frames are kept.
+  Only the live merged view stops folding across the VCP boundary, reproducing today's
+  behavior without deleting any history.
+- **Does history survive a site change?** No. A frame's grids are polar grids around a
+  specific site; `RadarState::reset` clears the ring.

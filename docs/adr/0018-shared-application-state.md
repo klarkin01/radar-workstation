@@ -187,3 +187,18 @@ are still in scope. Any future product needing full 16-bit precision (KDP, compu
 differentiating PHI over range — deferred per Q8) must be computed during gridding too,
 not later from `RadarState`, because by the time a volume closes there is no 16-bit data
 left anywhere in the process to compute it from.
+
+## Erratum (added 2026-09-04, Stage 6a Part B)
+
+This ADR's "Retention: one merged sweep per elevation, plus the last complete volume"
+paragraph is **superseded by [ADR-0030](0030-volume-history-retention.md)**. `RadarState`
+no longer holds `sweeps`/`derived`/`derived_volume`/`current_vcp`/`last_complete`
+directly; all five are replaced by one `history::FrameRing` holding the N most recent
+completed volumes as `Arc<Frame>`, bounded by an operator-configurable frame count and
+byte budget (`RetentionPolicy`). The merged view this ADR described is now a read-time
+fold over that ring (`state::history::live_sweeps`/`live_derived`), not a mutation, and
+`last_complete` is the newest retained frame (searching backwards) whose volume closed
+`Complete`. `AppState::snapshot()`'s read API and cost model are unchanged in shape — N
+`Arc` refcount bumps, now one per retained frame rather than one per sweep — and
+`RadarState`'s `RwLock` and poison-recovery are untouched. See ADR-0030 for the full
+decision, its Alternatives, and the measured frame sizes that drove it.

@@ -205,9 +205,11 @@ reflect. Recorded here so the ADR and the shipped code agree.
    asserted the chunks bucket's key layout is `SITE/YYYY/MM/DD/...`. Direct inspection of
    the live bucket (2026-07-31, while measuring cold-start latency for
    `docs/plans/dependency-inventory-remediation.md` W1) found the real layout is
-   `SITE/<volume-sequence>/<timestamp>-<n>-<kind>`: an unpadded, monotonically increasing
-   per-site volume counter as the first path segment, with the calendar timestamp embedded
-   in the filename rather than the path. This is not a wording nit — `S3Poller`'s
+   `SITE/<volume-sequence>/<timestamp>-<n>-<kind>`: an unpadded per-site volume counter as
+   the first path segment, with the calendar timestamp embedded in the filename rather
+   than the path. (2026-09-03: "monotonically increasing" here is itself wrong — the
+   counter is a cyclic 1–999 counter; see ADR-0011's erratum and
+   `crates/radar-workstation/src/ingest/volume_seq.rs`.) This is not a wording nit — `S3Poller`'s
    `current_hour_anchor` was built directly on the wrong assumption, and a live measurement
    against it returned 32,524 keys (a whole day's near-complete backlog) instead of a small
    hour-boundary backlog, because the constructed anchor string didn't correspond to any

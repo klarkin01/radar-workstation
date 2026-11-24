@@ -368,8 +368,10 @@ not a hygiene or dependency-shape issue.
 anchor, and ADR-0014 Erratum item 6 asserted the same layout for the archive-bucket
 comparison. The real `unidata-nexrad-level2-chunks` layout, confirmed by direct bucket
 inspection, is `SITE/<volume-sequence>/<timestamp>-<n>-<kind>`, where the volume-sequence
-directory is an **unpadded** monotonically increasing integer — lexically, `"78"` sorts
-after `"709"`. A live measurement against the unfixed code returned 32,524 keys (a near-
+directory is an **unpadded** integer — lexically, `"78"` sorts after `"709"`. (Re-measured
+2026-09-04: the counter is a **cyclic 1–999 counter**, not monotonically increasing; see
+ADR-0011's erratum and `crates/radar-workstation/src/ingest/volume_seq.rs`.) A live
+measurement against the unfixed code returned 32,524 keys (a near-
 complete day's retention) instead of a small hour-boundary backlog, because the
 constructed anchor matched no real prefix.
 
@@ -607,6 +609,12 @@ says stop and treat it as an open-source-scope question, not a `deny.toml` edit.
 `owned_ttf_parser`. `winit` is added with that feature omitted (the compositor draws our
 window decorations; we do not need egui-drawn client-side ones), so the advisory does
 **not** appear. `cargo audit` and `cargo deny check advisories` are both clean.
+
+**`egui-winit` `links` dropped (2026-11-23, RUSTSEC-2026-0592).** The feature pulled
+`webbrowser` → `url` → `idna` → ICU4X (`icu_*`, `zerovec`, `yoke`) to open URLs the app
+never emits. Removing it takes `Cargo.lock` from **337 to 309 packages** (−28) and puts
+`url`/`idna`/`icu_*` back out of the lockfile, so D-07 above holds again. The
+duplicate-version set below is unchanged.
 
 **Duplicate versions** (`[bans].multiple-versions = "warn"`, unchanged): the 8 duplicated
 crates are proc-macro / `no_std`-helper splits deep in the build graph

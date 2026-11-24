@@ -3,6 +3,10 @@
 ## Status
 Accepted
 
+The current list of keys, with their ranges, defaults and the ADR that owns each one, is
+the Configuration table in [`QUICK-START.md`](../../QUICK-START.md#configuration). This
+ADR records the file format, not the key set.
+
 ## Context
 FR-CP-1/2/3 require persisted, human-editable, plain-text configuration that must never
 prevent startup, even when missing or corrupt. `docs/plans/stage-2-make-the-application-exist.md`

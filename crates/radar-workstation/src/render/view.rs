@@ -15,7 +15,10 @@
 //! `compute`/the shader; at the site-centred scales this stage draws, world
 //! metres *are* projected metres.
 
+use radar_workstation::compute::cut::CutKey;
 use radar_workstation::compute::DisplayProduct;
+
+use super::timeline::Timeline;
 
 /// Minimum metres-per-pixel (maximum zoom-in). At ~60 m/px one 250 m gate
 /// spans a little over four pixels; finer than that just magnifies
@@ -57,9 +60,14 @@ pub struct ViewState {
     pub center_m: (f64, f64),
     pub m_per_px: f64,
     pub product: DisplayProduct,
-    /// The operator's selected elevation *number* (not angle). `0` until the
-    /// first sweep arrives and sets the default (§3.8).
-    pub elevation_number: u8,
+    /// The operator's selected tilt: a commanded cut angle, not an
+    /// elevation number (ADR-0031 D-2). `None` until the first PageUp/
+    /// PageDown — `timeline::resolve` reads it as the lowest live cut, so
+    /// the first-sweep default never writes into this struct (D-12).
+    pub cut: Option<CutKey>,
+    /// Live / paused / playing, loop length and pacing (ADR-0031). Changed
+    /// by operator input and the playback clock only (D-12).
+    pub timeline: Timeline,
     pub show_reference: bool,
     /// Layer 5 (primary roads) toggle (FR-DR-3, S5-f). Unlike
     /// `show_reference`, this has no effect on the reference geometry pass
@@ -68,21 +76,22 @@ pub struct ViewState {
 }
 
 impl ViewState {
-    /// The initial view: reflectivity, no elevation chosen yet, site-centred,
-    /// 230 km fitted to the shorter window half-extent.
-    pub fn initial(viewport: Viewport, product: DisplayProduct) -> Self {
+    /// The initial view: no tilt chosen yet, site-centred, 230 km fitted to
+    /// the shorter window half-extent, the timeline `Live`.
+    pub fn initial(viewport: Viewport, product: DisplayProduct, timeline: Timeline) -> Self {
         Self {
             center_m: (0.0, 0.0),
             m_per_px: fit_range(DEFAULT_RANGE_M, viewport),
             product,
-            elevation_number: 0,
+            cut: None,
+            timeline,
             show_reference: true,
             show_highways: true,
         }
     }
 
     /// Reset navigation to the default (site-centred, 230 km) **without**
-    /// touching the selected product or elevation — `Home` (§7.2).
+    /// touching the selected product, tilt or timeline — `Home` (§7.2).
     pub fn reset_navigation(&mut self, viewport: Viewport) {
         self.center_m = (0.0, 0.0);
         self.m_per_px = fit_range(DEFAULT_RANGE_M, viewport);
@@ -143,7 +152,7 @@ mod tests {
     const VP: Viewport = (1280.0, 800.0);
 
     fn view() -> ViewState {
-        ViewState::initial(VP, DisplayProduct::Reflectivity)
+        ViewState::initial(VP, DisplayProduct::Reflectivity, Timeline::from_config(&Default::default()))
     }
 
     #[test]
@@ -216,15 +225,18 @@ mod tests {
     }
 
     #[test]
-    fn reset_navigation_leaves_product_and_elevation_alone() {
+    fn reset_navigation_leaves_product_tilt_and_timeline_alone() {
         let mut v = view();
         v.product = DisplayProduct::Velocity;
-        v.elevation_number = 4;
+        v.cut = Some(radar_workstation::compute::cut::cut_key(1.3));
+        v.timeline.loop_frames = 5;
         v.center_m = (99_000.0, 99_000.0);
+        let before = v;
         v.reset_navigation(VP);
         assert_eq!(v.center_m, (0.0, 0.0));
         assert_eq!(v.product, DisplayProduct::Velocity);
-        assert_eq!(v.elevation_number, 4);
+        assert_eq!(v.cut, before.cut);
+        assert_eq!(v.timeline, before.timeline);
     }
 
     #[test]

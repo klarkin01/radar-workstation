@@ -5,7 +5,7 @@ use radar_workstation::compute::DisplayProduct;
 use radar_workstation::config;
 use radar_workstation::ingest::s3_poll::IngestStatus;
 use radar_workstation::pipeline::Pipeline;
-use radar_workstation::state::AppState;
+use radar_workstation::state::{AppState, RetentionPolicy};
 
 mod cli;
 mod headless;
@@ -90,8 +90,9 @@ fn main() -> ExitCode {
         }
     };
 
+    let retention_policy = retention_policy_from_config(&cfg);
     let (status_tx, status_rx) = tokio::sync::watch::channel(IngestStatus::default());
-    let state = Arc::new(AppState::new(site, status_rx));
+    let state = Arc::new(AppState::new(site, status_rx, retention_policy));
     // Anything config::load found wrong with the file (a bad line, an
     // unknown site, a clamped interval) is reported now that there's an
     // AppState to report it into — config loading itself never fails.
@@ -104,7 +105,7 @@ fn main() -> ExitCode {
     let exit = if args.headless {
         // The one call Stage 2 left as a placeholder for the render loop —
         // now a supported mode (S4-e), not a stub.
-        headless::run(&state);
+        headless::run(&state, retention_policy);
         ExitCode::SUCCESS
     } else {
         run_render(Arc::clone(&state), site, runtime.handle().clone(), &cfg, config_path.as_deref())
@@ -114,8 +115,30 @@ fn main() -> ExitCode {
     exit
 }
 
-/// Runs the render loop and persists window geometry / active product on a
-/// clean shutdown (§10). A window/GPU failure exits non-zero naming
+/// Builds the operator's retention policy (ADR-0030, FR-DA-10) from the two
+/// `history.*` config keys. `history.budget_mb = 0` is a first-class
+/// setting — it means [`RetentionPolicy::DISABLED`], the Stage 5 footprint
+/// — and wins over any configured frame count, since a zero byte budget can
+/// never actually retain more than the newest frame regardless of what was
+/// asked for.
+fn retention_policy_from_config(cfg: &config::Config) -> RetentionPolicy {
+    use radar_workstation::state::history::{DEFAULT_HISTORY_BUDGET_BYTES, DEFAULT_HISTORY_FRAMES};
+
+    match cfg.history_budget_mb {
+        Some(0) => RetentionPolicy::DISABLED,
+        Some(mb) => RetentionPolicy {
+            frames: cfg.history_frames.unwrap_or(DEFAULT_HISTORY_FRAMES),
+            budget_bytes: mb * 1024 * 1024,
+        },
+        None => RetentionPolicy {
+            frames: cfg.history_frames.unwrap_or(DEFAULT_HISTORY_FRAMES),
+            budget_bytes: DEFAULT_HISTORY_BUDGET_BYTES,
+        },
+    }
+}
+
+/// Runs the render loop and persists window geometry / active product /
+/// loop length on a clean shutdown (§10). A window/GPU failure exits non-zero naming
 /// `--headless` — never a silent fall-back to the headless log (S4-e).
 fn run_render(
     state: Arc<AppState>,
@@ -127,20 +150,16 @@ fn run_render(
     const DEFAULT_W: u32 = 1280;
     const DEFAULT_H: u32 = 800;
 
-    let initial_size = (cfg.window_width.unwrap_or(DEFAULT_W), cfg.window_height.unwrap_or(DEFAULT_H));
-    let initial_product = cfg.view_product.unwrap_or(DisplayProduct::Reflectivity);
-    let initial_show_highways = cfg.show_highways.unwrap_or(true);
-    let initial_show_reference = cfg.show_reference.unwrap_or(true);
+    let initial = render::InitialView {
+        size: (cfg.window_width.unwrap_or(DEFAULT_W), cfg.window_height.unwrap_or(DEFAULT_H)),
+        product: cfg.view_product.unwrap_or(DisplayProduct::Reflectivity),
+        show_highways: cfg.show_highways.unwrap_or(true),
+        show_reference: cfg.show_reference.unwrap_or(true),
+        // Headless never builds one: the timeline is a render-loop concept.
+        timeline: render::timeline::Timeline::from_config(cfg),
+    };
 
-    let persisted = match render::run(
-        state,
-        site,
-        handle,
-        initial_size,
-        initial_product,
-        initial_show_highways,
-        initial_show_reference,
-    ) {
+    let persisted = match render::run(state, site, handle, initial) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("radar-workstation: {e}");
@@ -173,6 +192,11 @@ fn run_render(
         }
         if cfg.show_reference != Some(persisted.show_reference) {
             changes.push((config::VIEW_REFERENCE_KEY.to_string(), persisted.show_reference.to_string()));
+        }
+        // Only `loop_frames` is written back; the interval and dwell are
+        // set-once preferences with no keys (D-13).
+        if cfg.timeline_loop_frames != Some(persisted.loop_frames) {
+            changes.push((config::TIMELINE_LOOP_FRAMES_KEY.to_string(), persisted.loop_frames.to_string()));
         }
         if !changes.is_empty() {
             if let Some(parent) = path.parent() {

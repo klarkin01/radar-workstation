@@ -18,6 +18,7 @@ Individual data chunks delivered to S3 as the radar antenna rotates. Each chunk
 represents approximately 120 radials (~100° of azimuthal coverage at one sweep). Chunks
 are available within seconds of the antenna completing that portion of the scan. Chunks
 persist for a maximum of 24 hours before being purged.
+<!-- corrected 2026-09-03: observed ~48 h, not 24 h, and not a contract either way; see Erratum -->
 
 Three chunk types exist per volume scan:
 - `-S` (start): Volume metadata — VCP definition, site calibration, clutter map, RDA
@@ -92,7 +93,7 @@ volume — a `VolumeScan` that has some sweeps fully populated and others absent
 a feature, not a limitation: users see the lowest sweep within ~60 seconds of scan start
 rather than waiting for the full volume.
 
-**24-hour chunk retention.** Chunks are purged after 24 hours. Historical analysis
+**24-hour chunk retention.** <!-- corrected 2026-09-03: observed ~48 h, not 24 h; see Erratum --> Chunks are purged after 24 hours. Historical analysis
 (loading past events) must use the assembled volume archive. The application should
 switch data sources transparently based on whether the requested time is within the
 chunk retention window.
@@ -102,3 +103,19 @@ chunk retention window.
 operates on decompressed Message 31 byte streams regardless of how those bytes arrived. The chunk
 format complexity is entirely contained in the data acquisition layer. The decoder sees
 the same input whether the source was a chunk or an assembled volume file.
+
+## Erratum (added 2026-09-03, Stage 6a Part A)
+
+Two "Context" / "Consequences" claims about the chunk bucket were corrected by direct
+measurement (`docs/plans/stage-6a-time-handling.md` §1; `crates/radar-workstation/src/ingest/volume_seq.rs`).
+The decision — target the chunk stream as the primary source — is unaffected.
+
+- **Retention is ~48 h, not 24 h.** `KDOX/749/` was still serving 2026-09-02T00:05Z
+  objects at 2026-09-04T00:55Z. Neither figure is a documented contract; treat retention
+  as observed behaviour that could change.
+- **The `<volume-sequence>` counter is cyclic over 1–999, not monotonic.** It rolls
+  `999 → 1` (observed at ~2026-09-03T03:13Z for `KDOX`), and objects from before a roll
+  are still listed after it, so a listing can hold both sides of the wrap at once. Code
+  that picks the newest volume must be wrap-aware; a numeric `max()` anchors to a
+  pre-wrap volume and cannot recover. The "switch data sources based on the retention
+  window" consequence still stands — only the window's size was wrong.

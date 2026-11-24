@@ -83,6 +83,14 @@ using the volume assembly state machine defined in ADR-0012, including explicit
 handling of missing `-S`, `-I`, and `-E` chunks, permanent discard of late-arriving
 radials for already-closed sweeps, and a watchdog timeout for stalled volumes.
 
+**FR-DA-10.** The application must retain the most recently completed volumes in
+memory, bounded by an operator-configurable frame count (`history.frames`) and byte
+budget (`history.budget_mb`), and must report when the byte budget rather than the
+frame count is the binding constraint (resolved 2026-09-04, Q25 — see
+[ADR-0030](adr/0030-volume-history-retention.md)). The timeline that consumes this
+retained history is FR-TL-1 to FR-TL-10 (§2.11, Stage 6a Part C,
+[ADR-0031](adr/0031-timeline-semantics.md)).
+
 ---
 
 ### 2.2 NEXRAD Decoding
@@ -366,6 +374,44 @@ configuration file, applying defaults. It must not crash on malformed configurat
 
 ---
 
+### 2.11 Timeline
+
+Added 2026-11-22 (Stage 6a Part C, `docs/plans/stage-6a-part-c-timeline.md`). The
+operator-visible time axis over the volumes FR-DA-10 retains. Semantics:
+[ADR-0031](adr/0031-timeline-semantics.md).
+
+**FR-TL-1.** The display has three modes: Live (the default at every launch, never
+persisted), Paused on a frame, and Playing.
+
+**FR-TL-2.** A non-live position shows only data its own volume scanned. Nothing is
+carried from another volume.
+
+**FR-TL-3.** The tilt selection is a commanded elevation angle. A frame without it
+shows no radar data, says so, and is skipped by step and play.
+
+**FR-TL-4.** The operator can step back and forward one frame. Stepping forward past
+the newest frame returns to Live, and one key returns to Live.
+
+**FR-TL-5.** Play/pause loops the newest N retained frames. N, the frame interval and
+the end dwell are configurable, and N is adjustable from the keyboard.
+
+**FR-TL-6.** The mode is always visible. When not Live, the displayed volume's full UTC
+time and its offset behind live are shown.
+
+**FR-TL-7.** Live-feed age stays visible in every mode, and its stale alert depends only
+on the live feed.
+
+**FR-TL-8.** If the paused frame is evicted, the display moves to the oldest retained
+frame and says so.
+
+**FR-TL-9.** Playback performs no texture uploads once resident. A non-playing instance
+adds no redraws.
+
+**FR-TL-10.** Product and tilt switches while paused upload nothing for the paused
+frame.
+
+---
+
 ## 3. Behavioral Constraints
 
 These are things the application must never do, under any circumstances. They are
@@ -419,14 +465,27 @@ These are design targets. They must be validated during development, not assumed
 | Frame rate impact of new scan arrival | No perceptible drop |
 | Time to first render after launch | < 2 seconds |
 | Time to display after site change | < 5 seconds on a normal network connection |
-| Memory per instance (steady state) | < 200 MB |
+| Memory per instance, history disabled (`history.budget_mb = 0`) | < 200 MB (the Stage 5 footprint) |
+| Memory per instance, default history retention | < 200 MB + `history.budget_mb` (see ADR-0030) |
 | GPU memory per instance | < 128 MB |
 | Multiple simultaneous instances | No meaningful resource contention |
+
+<!-- amended 2026-09-04 (ADR-0030, resolving Q25): a single "< 200 MB" row could not
+survive volume history retention (~30-40 MB per retained volume, measured) without either
+disabling the feature or silently exceeding the target. The target is restated rather
+than exceeded — see ADR-0030 §"Decision" 5 for the measured frame sizes and the chosen
+default (`history.frames = 12`, `history.budget_mb = 320`). -->
 
 **NFR-P-1.** Multiple simultaneous instances — each monitoring a different radar site
 — must be a supported and well-tested use case. Resource usage must scale approximately
 linearly with instance count. An operator running four instances must not experience
 degraded performance relative to running one.
+
+<!-- erratum 2026-09-04 (ADR-0030): "resource usage scales linearly with instance count"
+now has an operator-set term in it — `history.budget_mb` per instance — rather than being
+a fixed per-instance constant. It still scales linearly (N instances at the same policy
+cost N times one instance's footprint), and `history.budget_mb = 0` is the documented way
+back to exactly the Stage 5 per-instance footprint this requirement originally assumed. -->
 
 ---
 
@@ -540,6 +599,11 @@ the authoritative definition of "done" for v1.0.
   see FR-CT-1)
 - Configuration persistence across restarts
 - Multiple simultaneous independent instances
+- Volume history retention over the live chunk stream (resolved 2026-09-04, Q25 —
+  see FR-DA-10 and [ADR-0030](adr/0030-volume-history-retention.md))
+- Timeline over the retained live history (FR-TL-*): live / paused / playing, step,
+  loop length, an unmissable LIVE / NOT-LIVE state (Stage 6a Part C, see §2.11 and
+  [ADR-0031](adr/0031-timeline-semantics.md))
 
 ### Explicitly Deferred (Post-v1.0)
 
@@ -559,7 +623,10 @@ the authoritative definition of "done" for v1.0.
 - NEXRAD Level III product support
 - TDWR site support
 - Regional or national radar composites
-- Animation / loop playback of archived scans
+- Arbitrary-time archive playback — jumping to and rendering a past volume the live
+  chunk stream never carried (Stage 6a Part D; distinct from looping the volumes the
+  live stream already retained, which FR-DA-10/ADR-0030 make possible and Stage 6a
+  Part C delivers as playback of the live history ring)
 - Windows or macOS support
 - Mobile or web interface
 

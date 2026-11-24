@@ -273,3 +273,94 @@ fn reset_returns_to_idle_and_drops_in_flight_state() {
     // A tick after reset must not resurrect a stale timedout volume.
     assert!(a.on_tick(t0() + Duration::from_secs(10_000)).is_empty());
 }
+
+// --- cut_angle (ADR-0031 D-2) ---
+
+fn vcp_with_cuts(angles: &[f32]) -> VcpDefinition {
+    VcpDefinition {
+        vcp_number: 212,
+        pattern_type: 2,
+        elevations: angles
+            .iter()
+            .map(|&elevation_deg| nexrad_decoder::VcpElevationCut {
+                elevation_deg,
+                channel_config: 0,
+                waveform: 1,
+                super_res: 0,
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn cut_angle_takes_the_commanded_angle_when_message_5_is_present_and_close() {
+    let vcp = vcp_with_cuts(&[0.4834, 0.4834, 0.8789]);
+    assert_eq!(cut_angle(Some(&vcp), 1, 0.52), 0.4834);
+    assert_eq!(cut_angle(Some(&vcp), 2, 0.47), 0.4834, "a split cut's Doppler half shares the commanded angle");
+    assert_eq!(cut_angle(Some(&vcp), 3, 0.90), 0.8789);
+}
+
+#[test]
+fn cut_angle_falls_back_to_measured_without_message_5() {
+    assert_eq!(cut_angle(None, 1, 0.52), 0.52);
+}
+
+#[test]
+fn cut_angle_falls_back_to_measured_past_the_cut_list_or_at_elevation_zero() {
+    let vcp = vcp_with_cuts(&[0.4834]);
+    assert_eq!(cut_angle(Some(&vcp), 2, 1.3), 1.3, "an index past the cut list must not panic or borrow a cut");
+    assert_eq!(cut_angle(Some(&vcp), 0, 0.5), 0.5, "elevation_number 0 has no 1-based cut");
+}
+
+#[test]
+fn cut_angle_rejects_a_commanded_angle_more_than_the_tolerance_away() {
+    // Message 5 indexed onto a neighbouring cut (0.9° vs measured 0.5°).
+    let vcp = vcp_with_cuts(&[0.8789]);
+    assert_eq!(cut_angle(Some(&vcp), 1, 0.5), 0.5);
+}
+
+#[test]
+fn sweep_closed_carries_the_commanded_cut_angle() {
+    let mut a = VolumeAssembler::new(AssemblyConfig::default());
+    let mut vcp = vcp_with_cuts(&[0.4834]);
+    vcp.vcp_number = 35;
+    a.on_start_chunk(Some(vcp), t0());
+    // `radial(1, ..)` measures 0.5°, 0.0166° from the commanded 0.4834°.
+    let events = a.on_chunk(ChunkKind::Intermediate, vec![radial(1, RadialStatus::EndOfElevation)], t0());
+    let cut = events.iter().find_map(|e| match e {
+        AssemblyEvent::SweepClosed { cut_deg, sweep, .. } => Some((*cut_deg, sweep.elevation_deg)),
+        _ => None,
+    });
+    assert_eq!(cut, Some((0.4834, 0.5)), "cut identity is commanded; measured stays on the sweep");
+}
+
+#[test]
+fn cut_identity_is_checked_against_the_median_radial_not_a_settling_first_radial() {
+    // KATX VCP 215 el 1, 2026-11-22: the first radial read 0.28° while the
+    // sweep flew at the commanded 0.4834°. A first radial far enough out to
+    // fail the tolerance must not knock the sweep onto the fallback.
+    let mut a = VolumeAssembler::new(AssemblyConfig::default());
+    a.on_start_chunk(Some(vcp_with_cuts(&[0.4834])), t0());
+    let mut settling = radial(1, RadialStatus::StartOfVolume);
+    settling.elevation_deg = 0.1;
+    let mut radials = vec![settling];
+    for _ in 0..4 {
+        let mut r = radial(1, RadialStatus::Intermediate);
+        r.elevation_deg = 0.48;
+        radials.push(r);
+    }
+    let mut last = radial(1, RadialStatus::EndOfElevation);
+    last.elevation_deg = 0.49;
+    radials.push(last);
+    let events = a.on_chunk(ChunkKind::Intermediate, radials, t0());
+    let closed = events.iter().find_map(|e| match e {
+        AssemblyEvent::SweepClosed { cut_deg, sweep, .. } => Some((*cut_deg, sweep.elevation_deg)),
+        _ => None,
+    });
+    assert_eq!(closed, Some((0.4834, 0.1)), "commanded identity; Sweep::elevation_deg itself is unchanged");
+}
+
+#[test]
+fn median_elevation_of_an_empty_sweep_is_the_fallback() {
+    assert_eq!(median_elevation_deg(&[], 0.7), 0.7);
+}

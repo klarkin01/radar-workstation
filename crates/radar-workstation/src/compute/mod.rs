@@ -11,6 +11,7 @@
 //! representation) — see `grid.rs` for the gridding algorithm and
 //! `palette.rs` for how a grid's cell values become colour.
 
+pub mod cut;
 pub mod derived;
 pub mod geometry;
 pub mod grid;
@@ -79,6 +80,12 @@ impl DisplayProduct {
         Self::BASE.iter().find(|(p, _)| *p == self).map(|(_, k)| *k)
     }
 
+    /// Echo Tops / VIL: one grid per volume, on the ground-range axis, with
+    /// no tilt. Every base-vs-derived branch in the tree asks this.
+    pub fn is_derived(self) -> bool {
+        self.source_moment().is_none()
+    }
+
     /// Inverse of the [`std::fmt::Display`] impl (S4-W7 §10): parses the
     /// user-facing short name back to a product. Round-trips over
     /// [`Self::ALL`] — the `config` `view.product` key and any future
@@ -109,6 +116,8 @@ pub enum StateUpdate {
     SweepGridded {
         elevation_number: u8,
         elevation_deg: f32,
+        /// Commanded cut angle (ADR-0031 D-2), from `AssemblyEvent::SweepClosed`.
+        cut_deg: f32,
         volume: VolumeId,
         vcp_number: u16,
         /// One entry per base product actually present on this sweep,
@@ -223,10 +232,11 @@ async fn handle_event(
     retained: &mut RetainedTilts,
 ) -> bool {
     match event {
-        AssemblyEvent::SweepClosed { sweep, volume, vcp_number } => {
+        AssemblyEvent::SweepClosed { sweep, volume, vcp_number, cut_deg } => {
             let elevation_number = sweep.elevation_number;
             let elevation_deg = sweep.elevation_deg;
-            let (grids, events) = tokio::task::spawn_blocking(move || grid::grid_all_base_products(&sweep))
+            let (grids, events) =
+                tokio::task::spawn_blocking(move || grid::grid_all_base_products(&sweep, cut_deg))
                 .await
                 .expect("grid_all_base_products panicked");
             for event in events {
@@ -237,7 +247,7 @@ async fn handle_event(
                     state.report(event);
                 }
             }
-            tx.send(StateUpdate::SweepGridded { elevation_number, elevation_deg, volume, vcp_number, grids })
+            tx.send(StateUpdate::SweepGridded { elevation_number, elevation_deg, cut_deg, volume, vcp_number, grids })
                 .await
                 .is_ok()
         }

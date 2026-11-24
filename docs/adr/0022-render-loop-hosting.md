@@ -47,7 +47,7 @@ is the exact version `egui-wgpu 0.36.1` depends on; `winit 0.30.13` is the minim
 Roughly 400 lines of setup this project owns (`render/gpu.rs`, `render/mod.rs`'s
 `ApplicationHandler`) is the cheaper side of that trade, and it is written once.
 
-`winit` and `wgpu` are added with `default-features = false`:
+`winit`, `wgpu` and `egui-winit` are added with `default-features = false`:
 
 - `winit` — `["x11", "wayland", "wayland-dlopen", "rwh_06"]`. The default set also pulls
   `wayland-csd-adwaita`, whose client-side-decoration fallback drags in the **unmaintained**
@@ -57,6 +57,8 @@ Roughly 400 lines of setup this project owns (`render/gpu.rs`, `render/mod.rs`'s
 - `wgpu` — `["wgsl", "vulkan", "gles"]`. WGSL is the shader language; Vulkan is primary and
   OpenGL ES is the fallback for older hardware (ADR-0003), stated in code
   (`Backends::VULKAN | GL`) rather than left to the default.
+- `egui-winit` — `["wayland", "x11"]`. `links` is omitted: the app opens no URLs, and the
+  feature pulls `webbrowser` → `url` → ICU4X (measured in `docs/dependency-inventory.md`).
 
 ### `render/` is a binary-side module tree (S4-f)
 

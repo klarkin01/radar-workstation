@@ -53,7 +53,12 @@ pub struct SweepGrid {
 
     // --- provenance / display metadata ---
     pub elevation_number: u8,
+    /// Measured angle: the input to every beam-geometry calculation.
     pub elevation_deg: f32,
+    /// Commanded cut angle (`assembly::cut_angle`, ADR-0031 D-2): the tilt
+    /// *identity* `compute::cut` selects by. Never used for geometry. `0.0`
+    /// on a volume-derived grid, like `elevation_deg`.
+    pub cut_deg: f32,
     /// Q9: carried so Stage 4 can state the fold limit rather than
     /// silently displaying aliased data.
     pub nyquist_velocity_mps: Option<f32>,
@@ -179,8 +184,9 @@ fn source_geometry(sweep: &Sweep, kind: ProductKind) -> Option<SourceGeometry> {
 /// Grid one product from one closed sweep. `None` when the sweep carries no
 /// radial with this moment at all, or when the sweep's chosen geometry is
 /// degenerate (an event is reported for the latter, not the former — a
-/// missing moment on a legitimate split cut is not a fault).
-pub fn grid_sweep(sweep: &Sweep, product: DisplayProduct) -> Option<(SweepGrid, Vec<Event>)> {
+/// missing moment on a legitimate split cut is not a fault). `cut_deg` is
+/// the sweep's tilt identity (`assembly::cut_angle`), carried onto the grid.
+pub fn grid_sweep(sweep: &Sweep, product: DisplayProduct, cut_deg: f32) -> Option<(SweepGrid, Vec<Event>)> {
     let kind = product.source_moment()?;
     let mut events = Vec::new();
 
@@ -263,6 +269,7 @@ pub fn grid_sweep(sweep: &Sweep, product: DisplayProduct) -> Option<(SweepGrid, 
             gate_width_m: geometry.gate_width_m,
             elevation_number: sweep.elevation_number,
             elevation_deg: sweep.elevation_deg,
+            cut_deg,
             nyquist_velocity_mps: sweep.nyquist_velocity_mps,
             scale: eff_scale,
             offset: eff_offset,
@@ -276,11 +283,11 @@ pub fn grid_sweep(sweep: &Sweep, product: DisplayProduct) -> Option<(SweepGrid, 
 /// Grid every `DisplayProduct::BASE` product present on `sweep`. Run on
 /// `spawn_blocking` by `compute::compute_loop` — this is the whole of one
 /// blocking-thread job.
-pub fn grid_all_base_products(sweep: &Sweep) -> (Vec<Arc<SweepGrid>>, Vec<Event>) {
+pub fn grid_all_base_products(sweep: &Sweep, cut_deg: f32) -> (Vec<Arc<SweepGrid>>, Vec<Event>) {
     let mut grids = Vec::new();
     let mut events = Vec::new();
     for (product, _) in DisplayProduct::BASE {
-        if let Some((grid, grid_events)) = grid_sweep(sweep, product) {
+        if let Some((grid, grid_events)) = grid_sweep(sweep, product, cut_deg) {
             grids.push(Arc::new(grid));
             events.extend(grid_events);
         }
@@ -305,7 +312,7 @@ mod tests {
         }
         let s = sweep(1, 0.39, radials);
 
-        let (grid, events) = grid_sweep(&s, DisplayProduct::Reflectivity).expect("must grid");
+        let (grid, events) = grid_sweep(&s, DisplayProduct::Reflectivity, s.elevation_deg).expect("must grid");
         assert!(events.is_empty(), "a clean full sweep should report nothing: {events:?}");
         assert_eq!(grid.azimuth_count, 720);
         assert_eq!(grid.gate_count, 1832);
@@ -323,7 +330,7 @@ mod tests {
         }
         let s = sweep(1, 0.5, radials);
 
-        let (grid, _events) = grid_sweep(&s, DisplayProduct::Reflectivity).expect("must grid");
+        let (grid, _events) = grid_sweep(&s, DisplayProduct::Reflectivity, s.elevation_deg).expect("must grid");
         assert_eq!(grid.azimuth_count, 360);
         assert_eq!(grid.filled_azimuths, 360);
     }
@@ -337,7 +344,7 @@ mod tests {
         ];
         let s = sweep(1, 0.5, radials);
 
-        let (grid, _events) = grid_sweep(&s, DisplayProduct::Reflectivity).expect("must grid");
+        let (grid, _events) = grid_sweep(&s, DisplayProduct::Reflectivity, s.elevation_deg).expect("must grid");
         assert_eq!(grid.filled_azimuths, 2);
         // A slot nowhere near either written radial must be all zero.
         for gate in 0..grid.gate_count {
@@ -352,7 +359,7 @@ mod tests {
         let radials = vec![radial(1, 0.25, 1, &[(ProductKind::Ref, 4, 0, 250, 8, 2.0, 66.0)])];
         let s = sweep(1, 0.5, radials);
 
-        let (grid, _events) = grid_sweep(&s, DisplayProduct::Reflectivity).expect("must grid");
+        let (grid, _events) = grid_sweep(&s, DisplayProduct::Reflectivity, s.elevation_deg).expect("must grid");
         assert_eq!(grid.cell(0, 0), 0);
         assert_eq!(grid.cell(0, 1), 1);
         assert!(grid.physical(0, 0).is_none());
@@ -365,7 +372,7 @@ mod tests {
         let radials = vec![radial(1, 0.25, 1, &[(ProductKind::Ref, 200, 0, 250, 8, 2.0, 66.0)])];
         let s = sweep(1, 0.5, radials);
 
-        let (grid, _events) = grid_sweep(&s, DisplayProduct::Reflectivity).expect("must grid");
+        let (grid, _events) = grid_sweep(&s, DisplayProduct::Reflectivity, s.elevation_deg).expect("must grid");
         let v = grid.physical(0, 133).expect("raw=133 must be Some");
         assert!((v - 33.5).abs() < 1e-5, "expected 33.5 dBZ, got {v}");
     }
@@ -374,7 +381,7 @@ mod tests {
     fn split_cut_without_velocity_returns_none() {
         let radials = vec![radial(1, 0.25, 1, &[(ProductKind::Ref, 4, 0, 250, 8, 2.0, 66.0)])];
         let s = sweep(1, 0.5, radials);
-        assert!(grid_sweep(&s, DisplayProduct::Velocity).is_none());
+        assert!(grid_sweep(&s, DisplayProduct::Velocity, s.elevation_deg).is_none());
     }
 
     #[test]
@@ -384,7 +391,7 @@ mod tests {
         radials.push(radial(1, 90.25, 1, &[(ProductKind::Ref, 8, 0, 250, 8, 2.0, 66.0)]));
         let s = sweep(1, 0.5, radials);
 
-        let (grid, events) = grid_sweep(&s, DisplayProduct::Reflectivity).expect("must grid");
+        let (grid, events) = grid_sweep(&s, DisplayProduct::Reflectivity, s.elevation_deg).expect("must grid");
         assert_eq!(grid.gate_count, 4, "geometry is fixed by the first radial carrying the moment");
         assert_eq!(grid.filled_azimuths, 1, "the mismatched radial must not be scattered in");
         assert!(events.iter().any(|e| matches!(e, Event::InconsistentGateGeometry { skipped: 1, .. })));
@@ -394,13 +401,13 @@ mod tests {
     fn zero_gate_width_is_rejected() {
         let radials = vec![radial(1, 0.25, 1, &[(ProductKind::Ref, 4, 0, 0, 8, 2.0, 66.0)])];
         let s = sweep(1, 0.5, radials);
-        assert!(grid_sweep(&s, DisplayProduct::Reflectivity).is_none());
+        assert!(grid_sweep(&s, DisplayProduct::Reflectivity, s.elevation_deg).is_none());
     }
 
     #[test]
     fn empty_sweep_returns_none() {
         let s = sweep(1, 0.5, Vec::new());
-        assert!(grid_sweep(&s, DisplayProduct::Reflectivity).is_none());
+        assert!(grid_sweep(&s, DisplayProduct::Reflectivity, s.elevation_deg).is_none());
     }
 
     #[test]
@@ -410,7 +417,7 @@ mod tests {
         let radials = vec![radial16(1, 0.25, 1, ProductKind::Zdr, 4, 0, 250, 32.0, 418.0, &[0, 1, 450, 2])];
         let s = sweep(1, 0.5, radials);
 
-        let (grid, _events) = grid_sweep(&s, DisplayProduct::Zdr).expect("must grid");
+        let (grid, _events) = grid_sweep(&s, DisplayProduct::Zdr, s.elevation_deg).expect("must grid");
         let physical = grid.physical(0, 2).expect("raw 450 must be Some");
         assert!((physical - 1.0).abs() < 0.063, "expected ~1.0 dB within one step, got {physical}");
     }
@@ -425,8 +432,17 @@ mod tests {
     fn eight_bit_moments_are_copied_verbatim() {
         let radials = vec![radial(1, 0.25, 1, &[(ProductKind::Vel, 4, 0, 250, 8, 2.0, 129.0)])];
         let s = sweep(1, 0.5, radials);
-        let (grid, _events) = grid_sweep(&s, DisplayProduct::Velocity).expect("must grid");
+        let (grid, _events) = grid_sweep(&s, DisplayProduct::Velocity, s.elevation_deg).expect("must grid");
         assert!((grid.scale - 2.0).abs() < 1e-6);
         assert!((grid.offset - 129.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cut_identity_is_carried_and_measured_angle_is_kept_for_geometry() {
+        let radials = vec![radial(1, 0.25, 1, &[(ProductKind::Ref, 4, 0, 250, 8, 2.0, 66.0)])];
+        let s = sweep(1, 0.52, radials);
+        let (grid, _events) = grid_sweep(&s, DisplayProduct::Reflectivity, 0.4834).expect("must grid");
+        assert_eq!(grid.cut_deg, 0.4834);
+        assert_eq!(grid.elevation_deg, 0.52);
     }
 }
