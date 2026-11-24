@@ -25,11 +25,8 @@ allow = [
 ]
 
 [bans]
-# docs/dependency-inventory.md §6 assessed the workspace's two version
-# duplications (getrandom 0.2/0.4, windows-sys 0.52/0.61) and found both
-# benign. Neither shows up here to skip: getrandom's split is dev-dependency-
-# only and cargo-deny's graph excludes dev-deps by default; windows-sys is
-# excluded by `[graph].targets` above, since this is a Linux-only target.
+# Duplicates are assessed in docs/dependency-inventory.md (Stage 4 render
+# stack addendum); warn, do not skip.
 multiple-versions = "warn"
 
 [advisories]

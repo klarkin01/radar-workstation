@@ -4,6 +4,7 @@
 # Claude workflow
 CLAUDE.md
 .claude/
+design/
 
 # Editor artifacts
 .vscode/

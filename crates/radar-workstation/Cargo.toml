@@ -22,7 +22,8 @@ quick-xml = "0.41"
 # exact versions egui-wgpu 0.36 / egui-winit 0.36 depend on.
 egui = "=0.36.1"
 egui-wgpu = "=0.36.1"
-egui-winit = { version = "=0.36.1", default-features = false, features = ["links", "wayland", "x11"] }
+# `links` omitted: it pulls `webbrowser` -> `url` -> ICU4X, and the app opens no URLs.
+egui-winit = { version = "=0.36.1", default-features = false, features = ["wayland", "x11"] }
 wgpu = { version = "=30.0.1", default-features = false, features = ["wgsl", "vulkan", "gles"] }
 # default-features = false drops winit's `wayland-csd-adwaita` fallback
 # decoration path, which pulls the unmaintained `ttf-parser` (RUSTSEC-2026-0192)

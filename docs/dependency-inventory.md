@@ -610,6 +610,12 @@ says stop and treat it as an open-source-scope question, not a `deny.toml` edit.
 window decorations; we do not need egui-drawn client-side ones), so the advisory does
 **not** appear. `cargo audit` and `cargo deny check advisories` are both clean.
 
+**`egui-winit` `links` dropped (2026-11-23, RUSTSEC-2026-0592).** The feature pulled
+`webbrowser` → `url` → `idna` → ICU4X (`icu_*`, `zerovec`, `yoke`) to open URLs the app
+never emits. Removing it takes `Cargo.lock` from **337 to 309 packages** (−28) and puts
+`url`/`idna`/`icu_*` back out of the lockfile, so D-07 above holds again. The
+duplicate-version set below is unchanged.
+
 **Duplicate versions** (`[bans].multiple-versions = "warn"`, unchanged): the 8 duplicated
 crates are proc-macro / `no_std`-helper splits deep in the build graph
 (`syn` 1↔2, `thiserror` 1↔2, `rustix`/`linux-raw-sys` old↔new, `hashbrown` 0.16↔0.17,
