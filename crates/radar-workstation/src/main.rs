@@ -137,8 +137,8 @@ fn retention_policy_from_config(cfg: &config::Config) -> RetentionPolicy {
     }
 }
 
-/// Runs the render loop and persists window geometry / active product on a
-/// clean shutdown (§10). A window/GPU failure exits non-zero naming
+/// Runs the render loop and persists window geometry / active product /
+/// loop length on a clean shutdown (§10). A window/GPU failure exits non-zero naming
 /// `--headless` — never a silent fall-back to the headless log (S4-e).
 fn run_render(
     state: Arc<AppState>,
@@ -150,20 +150,16 @@ fn run_render(
     const DEFAULT_W: u32 = 1280;
     const DEFAULT_H: u32 = 800;
 
-    let initial_size = (cfg.window_width.unwrap_or(DEFAULT_W), cfg.window_height.unwrap_or(DEFAULT_H));
-    let initial_product = cfg.view_product.unwrap_or(DisplayProduct::Reflectivity);
-    let initial_show_highways = cfg.show_highways.unwrap_or(true);
-    let initial_show_reference = cfg.show_reference.unwrap_or(true);
+    let initial = render::InitialView {
+        size: (cfg.window_width.unwrap_or(DEFAULT_W), cfg.window_height.unwrap_or(DEFAULT_H)),
+        product: cfg.view_product.unwrap_or(DisplayProduct::Reflectivity),
+        show_highways: cfg.show_highways.unwrap_or(true),
+        show_reference: cfg.show_reference.unwrap_or(true),
+        // Headless never builds one: the timeline is a render-loop concept.
+        timeline: render::timeline::Timeline::from_config(cfg),
+    };
 
-    let persisted = match render::run(
-        state,
-        site,
-        handle,
-        initial_size,
-        initial_product,
-        initial_show_highways,
-        initial_show_reference,
-    ) {
+    let persisted = match render::run(state, site, handle, initial) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("radar-workstation: {e}");
@@ -196,6 +192,11 @@ fn run_render(
         }
         if cfg.show_reference != Some(persisted.show_reference) {
             changes.push((config::VIEW_REFERENCE_KEY.to_string(), persisted.show_reference.to_string()));
+        }
+        // Only `loop_frames` is written back; the interval and dwell are
+        // set-once preferences with no keys (D-13).
+        if cfg.timeline_loop_frames != Some(persisted.loop_frames) {
+            changes.push((config::TIMELINE_LOOP_FRAMES_KEY.to_string(), persisted.loop_frames.to_string()));
         }
         if !changes.is_empty() {
             if let Some(parent) = path.parent() {

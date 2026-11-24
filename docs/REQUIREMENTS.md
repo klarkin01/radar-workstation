@@ -88,7 +88,8 @@ memory, bounded by an operator-configurable frame count (`history.frames`) and b
 budget (`history.budget_mb`), and must report when the byte budget rather than the
 frame count is the binding constraint (resolved 2026-09-04, Q25 — see
 [ADR-0030](adr/0030-volume-history-retention.md)). The timeline that consumes this
-retained history is FR-TL-* (Stage 6a Part C, not yet written).
+retained history is FR-TL-1 to FR-TL-10 (§2.11, Stage 6a Part C,
+[ADR-0031](adr/0031-timeline-semantics.md)).
 
 ---
 
@@ -373,6 +374,44 @@ configuration file, applying defaults. It must not crash on malformed configurat
 
 ---
 
+### 2.11 Timeline
+
+Added 2026-11-22 (Stage 6a Part C, `docs/plans/stage-6a-part-c-timeline.md`). The
+operator-visible time axis over the volumes FR-DA-10 retains. Semantics:
+[ADR-0031](adr/0031-timeline-semantics.md).
+
+**FR-TL-1.** The display has three modes: Live (the default at every launch, never
+persisted), Paused on a frame, and Playing.
+
+**FR-TL-2.** A non-live position shows only data its own volume scanned. Nothing is
+carried from another volume.
+
+**FR-TL-3.** The tilt selection is a commanded elevation angle. A frame without it
+shows no radar data, says so, and is skipped by step and play.
+
+**FR-TL-4.** The operator can step back and forward one frame. Stepping forward past
+the newest frame returns to Live, and one key returns to Live.
+
+**FR-TL-5.** Play/pause loops the newest N retained frames. N, the frame interval and
+the end dwell are configurable, and N is adjustable from the keyboard.
+
+**FR-TL-6.** The mode is always visible. When not Live, the displayed volume's full UTC
+time and its offset behind live are shown.
+
+**FR-TL-7.** Live-feed age stays visible in every mode, and its stale alert depends only
+on the live feed.
+
+**FR-TL-8.** If the paused frame is evicted, the display moves to the oldest retained
+frame and says so.
+
+**FR-TL-9.** Playback performs no texture uploads once resident. A non-playing instance
+adds no redraws.
+
+**FR-TL-10.** Product and tilt switches while paused upload nothing for the paused
+frame.
+
+---
+
 ## 3. Behavioral Constraints
 
 These are things the application must never do, under any circumstances. They are
@@ -562,6 +601,9 @@ the authoritative definition of "done" for v1.0.
 - Multiple simultaneous independent instances
 - Volume history retention over the live chunk stream (resolved 2026-09-04, Q25 —
   see FR-DA-10 and [ADR-0030](adr/0030-volume-history-retention.md))
+- Timeline over the retained live history (FR-TL-*): live / paused / playing, step,
+  loop length, an unmissable LIVE / NOT-LIVE state (Stage 6a Part C, see §2.11 and
+  [ADR-0031](adr/0031-timeline-semantics.md))
 
 ### Explicitly Deferred (Post-v1.0)
 

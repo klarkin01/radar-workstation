@@ -133,7 +133,10 @@ fn run_grid_path(args: &Args, all_radials: Vec<Radial>) -> Result<(), String> {
                 format!("sweep {} not found; available: {:?}", args.sweep, available)
             })?;
             let sweep = build_sweep(args.sweep, radials);
-            let (grid, events) = grid::grid_sweep(&sweep, display_product).ok_or_else(|| {
+            // No Message 5 on this path: the measured angle is the cut
+            // identity (the ADR-0031 D-2 fallback). One sweep, so identity
+            // never has to match across volumes here.
+            let (grid, events) = grid::grid_sweep(&sweep, display_product, sweep.elevation_deg).ok_or_else(|| {
                 format!("{display_product} not present (or ungriddable) on sweep {}", args.sweep)
             })?;
             for event in &events {
@@ -148,7 +151,9 @@ fn run_grid_path(args: &Args, all_radials: Vec<Radial>) -> Result<(), String> {
             let mut ref_grids = Vec::new();
             for (elevation_number, radials) in by_elevation {
                 let sweep = build_sweep(elevation_number, radials);
-                if let Some((grid, _events)) = grid::grid_sweep(&sweep, DisplayProduct::Reflectivity) {
+                if let Some((grid, _events)) =
+                    grid::grid_sweep(&sweep, DisplayProduct::Reflectivity, sweep.elevation_deg)
+                {
                     ref_grids.push(Arc::new(grid));
                 }
             }
@@ -213,7 +218,7 @@ fn run_budget_path(_args: &Args, all_radials: Vec<Radial>) -> Result<(), String>
     println!("el  angle   az    product   gates   bytes");
     for (elevation_number, radials) in by_elevation {
         let sweep = build_sweep(elevation_number, radials);
-        let (grids, events) = grid::grid_all_base_products(&sweep);
+        let (grids, events) = grid::grid_all_base_products(&sweep, sweep.elevation_deg);
         for event in &events {
             eprintln!("grid warning: {event}");
         }

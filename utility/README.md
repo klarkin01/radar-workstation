@@ -100,9 +100,12 @@ Sample files can be obtained from:
 - **Unidata NEXRAD S3 archive (free, no auth, current):**
   `s3://unidata-nexrad-level2/<YYYY>/<MM>/<DD>/<SITE>/` for assembled volume files, or
   `s3://unidata-nexrad-level2-chunks/<SITE>/<volume-sequence>/<YYYYMMDD-HHMMSS>-<n>-<kind>`
-  for real-time chunks, e.g. `KDOX/166/20260728-095259-001-S` (chunks persist 24 hours).
-  `<volume-sequence>` is an **unpadded**, monotonically increasing per-site integer
-  identifying the volume scan — it is not derivable from wall-clock time, and its
+  for real-time chunks, e.g. `KDOX/166/20260728-095259-001-S`. Chunk retention is
+  observed at ~48 h, which is not a contract. `<volume-sequence>` is an **unpadded**,
+  **cyclic** per-site counter that rolls `999 → 1`, so it is not monotonic. Both claims
+  are documented in [ADR-0011's erratum](../docs/adr/0011-chunk-stream-data-source.md#erratum-added-2026-09-03-stage-6a-part-a)
+  and `crates/radar-workstation/src/ingest/volume_seq.rs`; they are not restated here.
+  The counter is not derivable from wall-clock time, and its
   lexical order does not match numeric order across digit widths (`"78"` sorts after
   `"709"`), so listing the bucket flatly and sorting by key does not give chronological
   order. Within one volume's directory the fixed-width `<timestamp>-<n>-<kind>`

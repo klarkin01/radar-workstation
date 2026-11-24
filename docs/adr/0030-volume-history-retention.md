@@ -168,9 +168,32 @@ shows. It is recorded here rather than smoothed over: the "< 200 MB, history
 disabled" row above is a target for the application's own footprint, and this
 number says a live windowed run on real hardware can already sit well past
 it before a single history frame exists. Confirming whether this is
-driver/GPU-vendor-specific (measure again on the ADR-0024 hybrid-GPU box —
-see the `dev-machine-hybrid-gpu` note) is follow-up work this ADR does not
-resolve.
+driver/GPU-vendor-specific is follow-up work this ADR does not resolve.
+
+**Follow-up, re-measured 2026-11-21** (`stage-6a-part-b-retain-history.md`
+§10, "§6 validation outcomes"). The development machine *is* the ADR-0024
+hybrid box: an NVIDIA RTX 4070 SUPER at `0000:01:00.0` drives the only
+display, and an AMD Granite Ridge iGPU at `0000:0c:00.0` drives none. With
+`history.budget_mb = 0`, a 40-minute windowed run on NVIDIA reached VmHWM
+328 MB, of which ~126 MB is shared file/driver mappings. `Pss_Anon` was
+**155 MB**. The same policy headless reached VmHWM 121 MB (`Pss_Anon`
+107 MB). The application's own anonymous footprint is therefore inside
+200 MB, and the RSS excess is mappings, as hypothesised above. What is
+still open:
+
+- **The iGPU comparison cannot be made windowed on this box.**
+  `RADAR_GPU=integrated` (or `=0000:0c:00.0`) fails surface bring-up by
+  design (ADR-0024 §1), because the iGPU drives no display. That
+  comparison needs a machine where the iGPU drives the screen.
+- **The target is stated in RSS terms.** Whether "< 200 MB" means VmHWM or
+  proportional anonymous memory should be decided before Stage 8 validates
+  it. Under VmHWM it fails on this machine before any history exists.
+
+**Default budget (§5 above), 2026-11-21.** Kept as committed (`12` / `320`).
+The measurement gives no reason to change it: ~34 MiB per VCP-35 frame, so
+~9 frames under the budget, and a windowed default instance at VmHWM 456 MB
+after ~5 frames, inside the amended 520 MB. Developer sign-off on the number
+is still to be recorded.
 
 ### 6. `revision` keeps its meaning; the frame set needs no second counter
 

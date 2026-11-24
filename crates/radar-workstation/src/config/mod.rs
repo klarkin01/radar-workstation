@@ -53,6 +53,20 @@ pub const HISTORY_BUDGET_MB_KEY: &str = "history.budget_mb";
 pub const HISTORY_FRAMES_RANGE: std::ops::RangeInclusive<usize> = 1..=64;
 pub const HISTORY_BUDGET_MB_RANGE: std::ops::RangeInclusive<usize> = 0..=4096;
 
+/// FR-TL-5 / ADR-0031 (Stage 6a Part C). `timeline.loop_frames` is written
+/// back on a clean shutdown (the `,` / `.` keys change it); the interval and
+/// dwell are set-once preferences — read-only, like `history.*` — and have
+/// no keys (Restraint). Out of range → default + `ConfigValueInvalid`.
+pub const TIMELINE_LOOP_FRAMES_KEY: &str = "timeline.loop_frames";
+pub const TIMELINE_FRAME_MS_KEY: &str = "timeline.frame_ms";
+pub const TIMELINE_DWELL_MS_KEY: &str = "timeline.dwell_ms";
+pub const TIMELINE_LOOP_FRAMES_RANGE: std::ops::RangeInclusive<usize> = 2..=64;
+pub const TIMELINE_FRAME_MS_RANGE: std::ops::RangeInclusive<u64> = 50..=2000;
+pub const TIMELINE_DWELL_MS_RANGE: std::ops::RangeInclusive<u64> = 0..=10_000;
+pub const TIMELINE_LOOP_FRAMES_DEFAULT: usize = 12;
+pub const TIMELINE_FRAME_MS_DEFAULT: u64 = 250;
+pub const TIMELINE_DWELL_MS_DEFAULT: u64 = 1500;
+
 /// Window-geometry clamp bounds (S4-W7 §10). Out-of-range values fall back
 /// to the built-in default and report `ConfigValueInvalid` rather than
 /// being silently clamped — a saved geometry that doesn't fit the current
@@ -85,6 +99,11 @@ pub struct Config {
     /// from whichever of the two is absent (ADR-0030).
     pub history_frames: Option<usize>,
     pub history_budget_mb: Option<usize>,
+    /// `None` when the file carried no valid `timeline.*` value — the
+    /// render loop's `Timeline::from_config` applies the `TIMELINE_*_DEFAULT`.
+    pub timeline_loop_frames: Option<usize>,
+    pub timeline_frame_ms: Option<u64>,
+    pub timeline_dwell_ms: Option<u64>,
 }
 
 impl Default for Config {
@@ -99,6 +118,9 @@ impl Default for Config {
             show_reference: None,
             history_frames: None,
             history_budget_mb: None,
+            timeline_loop_frames: None,
+            timeline_frame_ms: None,
+            timeline_dwell_ms: None,
         }
     }
 }
@@ -172,6 +194,15 @@ fn apply_key(config: &mut Config, key: &str, value: String, events: &mut Vec<Eve
         HISTORY_BUDGET_MB_KEY => {
             config.history_budget_mb = parse_in_range(key, &value, HISTORY_BUDGET_MB_RANGE, events);
         }
+        TIMELINE_LOOP_FRAMES_KEY => {
+            config.timeline_loop_frames = parse_in_range(key, &value, TIMELINE_LOOP_FRAMES_RANGE, events);
+        }
+        TIMELINE_FRAME_MS_KEY => {
+            config.timeline_frame_ms = parse_in_range(key, &value, TIMELINE_FRAME_MS_RANGE, events);
+        }
+        TIMELINE_DWELL_MS_KEY => {
+            config.timeline_dwell_ms = parse_in_range(key, &value, TIMELINE_DWELL_MS_RANGE, events);
+        }
         // Unrecognized but syntactically valid keys are ignored, not
         // reported: they may be a newer version's setting this binary
         // doesn't know about yet (NFR-P-1's multi-instance, multi-version
@@ -184,8 +215,9 @@ fn apply_key(config: &mut Config, key: &str, value: String, events: &mut Vec<Eve
 /// (non-numeric, or numeric but out of range) is `None` plus one
 /// `ConfigValueInvalid`, so the caller falls back to its own default —
 /// §10's "out of range → default + `ConfigValueInvalid`", not a silent
-/// clamp. Shared by the window-geometry keys (`u32`) and the history keys
-/// (`usize`, ADR-0030) rather than one copy per integer type.
+/// clamp. Shared by the window-geometry keys (`u32`), the history keys
+/// (`usize`, ADR-0030) and the timeline keys (ADR-0031) rather than one
+/// copy per integer type.
 fn parse_in_range<T: std::str::FromStr + PartialOrd>(
     key: &str,
     value: &str,
@@ -438,6 +470,53 @@ mod tests {
         let (config, _events) = load(&path);
         assert_eq!(config.history_frames, None);
         assert_eq!(config.history_budget_mb, None);
+    }
+
+    #[test]
+    fn timeline_keys_load_when_valid() {
+        let path = temp_config_path("timeline-keys-valid");
+        std::fs::write(&path, "timeline.loop_frames = 8\ntimeline.frame_ms = 400\ntimeline.dwell_ms = 0\n").unwrap();
+
+        let (config, events) = load(&path);
+        assert!(events.is_empty(), "{events:?}");
+        assert_eq!(config.timeline_loop_frames, Some(8));
+        assert_eq!(config.timeline_frame_ms, Some(400));
+        assert_eq!(config.timeline_dwell_ms, Some(0), "no end dwell is a valid choice");
+    }
+
+    #[test]
+    fn a_one_frame_loop_is_rejected() {
+        let path = temp_config_path("timeline-loop-one");
+        std::fs::write(&path, "timeline.loop_frames = 1\n").unwrap();
+
+        let (config, events) = load(&path);
+        assert_eq!(config.timeline_loop_frames, None);
+        assert!(matches!(events.as_slice(), [Event::ConfigValueInvalid { key, .. }] if key == TIMELINE_LOOP_FRAMES_KEY));
+    }
+
+    #[test]
+    fn out_of_range_timeline_keys_fall_back_to_none_and_are_reported() {
+        let path = temp_config_path("timeline-keys-out-of-range");
+        std::fs::write(&path, "timeline.loop_frames = 65\ntimeline.frame_ms = 49\ntimeline.dwell_ms = 10001\n").unwrap();
+
+        let (config, events) = load(&path);
+        assert_eq!(config.timeline_loop_frames, None);
+        assert_eq!(config.timeline_frame_ms, None);
+        assert_eq!(config.timeline_dwell_ms, None);
+        assert_eq!(events.len(), 3);
+        assert!(events.iter().all(|e| matches!(e, Event::ConfigValueInvalid { .. })));
+    }
+
+    #[test]
+    fn a_file_with_no_timeline_keys_leaves_them_unset() {
+        let path = temp_config_path("timeline-keys-absent");
+        std::fs::write(&path, "site = KDOX\n").unwrap();
+
+        let (config, _events) = load(&path);
+        assert_eq!(
+            (config.timeline_loop_frames, config.timeline_frame_ms, config.timeline_dwell_ms),
+            (None, None, None)
+        );
     }
 
     #[test]

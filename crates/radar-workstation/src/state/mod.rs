@@ -51,6 +51,8 @@ pub use history::{Frame, RetentionPolicy};
 pub struct DisplaySweep {
     pub elevation_number: u8,
     pub elevation_deg: f32,
+    /// Commanded cut angle — the tilt identity (ADR-0031 D-2).
+    pub cut_deg: f32,
     pub volume: VolumeId,
     pub vcp_number: u16,
     /// When this sweep was applied. Feeds FR-DA-5's data-age display.
@@ -147,9 +149,8 @@ pub struct StateSnapshot {
     /// The live derived-product view ([`history::live_derived`]).
     pub derived: Vec<Arc<SweepGrid>>,
     pub last_complete: Option<VolumeSummary>,
-    /// Every retained frame, oldest → newest (ADR-0030). `Part C` (the
-    /// timeline) is the first consumer that reads this directly; nothing
-    /// before it does.
+    /// Every retained frame, oldest → newest (ADR-0030). The timeline
+    /// (`render::timeline`, ADR-0031) resolves every non-live position here.
     pub frames: Vec<Arc<history::Frame>>,
     pub revision: u64,
     pub ingest: IngestStatus,

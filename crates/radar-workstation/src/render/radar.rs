@@ -15,6 +15,7 @@ use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
 use radar_workstation::assembly::VolumeId;
+use radar_workstation::compute::cut::CutKey;
 use radar_workstation::compute::palette::{compile_lut, ColorLut, Palette};
 use radar_workstation::compute::{DisplayProduct, SweepGrid};
 use radar_workstation::event::Event;
@@ -29,64 +30,90 @@ use radar_workstation::state::StateSnapshot;
 /// reads.
 pub type GridKey = (VolumeId, DisplayProduct, Option<u8>);
 
-/// The key a grid lives under, within `volume`'s frame. Shares its
-/// base-vs-derived rule with [`Frame::grid`]'s lookup
-/// ([`history::key_elevation`]) rather than matching it a second time.
+/// The key a grid lives under, within `volume`'s frame
+/// ([`history::key_elevation`]: by elevation *number*, which names exactly
+/// one grid per frame even where two share a cut).
 pub fn grid_key(volume: VolumeId, grid: &SweepGrid) -> GridKey {
     (volume, grid.product, history::key_elevation(grid.product, grid.elevation_number))
 }
 
 /// GPU budget for the *history tail* — every retained frame besides the
-/// newest, at one selected grid apiece. 128 MB target (`rendering.md`),
-/// less the ADR-0029 overlay's 11.46 MB, less the newest frame's own grids
+/// focus frame, at one selected grid apiece. 128 MB target (`rendering.md`),
+/// less the ADR-0029 overlay's 11.46 MB, less the focus frame's own grids
 /// (~40 MB at the measured worst case, always resident in full — see
 /// [`residency`]) leaves roughly 76 MB for the tail: about 60 frames of one
 /// super-resolution reflectivity grid (~1.26 MB), so the GPU is not what
 /// bounds the loop (ADR-0030 §3.7) — `history.budget_mb` is.
 const HISTORY_GPU_BUDGET_BYTES: usize = 76 * 1024 * 1024;
 
-/// What must be GPU-resident this frame (ADR-0030 §3.7): every grid of the
-/// newest frame — so a product or elevation switch still uploads nothing
-/// for the *displayed* frame (FR-RP-7) — plus the selected
-/// `(product, elevation_number)` grid of every other retained frame, so
-/// playback of that selection runs upload-free once resident. Oldest
-/// frames drop out first when `budget_bytes` binds; the newest frame is
-/// never dropped. Pure: no device, no queue, no `ViewState`.
+/// What residency is planned for this frame (ADR-0031 D-5) — built from the
+/// frame's one `timeline::Resolved`.
+#[derive(Debug, Clone, Copy)]
+pub struct Selection<'a> {
+    pub product: DisplayProduct,
+    pub cut: Option<CutKey>,
+    /// The frame kept fully resident: the pinned frame while paused, `None`
+    /// (the newest) while live or playing (`timeline::residency_focus`).
+    pub focus: Option<VolumeId>,
+    /// The grid on screen and the frame it lives in. Always resident — in
+    /// `Live` it may be carried forward from a frame that is not the focus.
+    pub displayed: Option<(VolumeId, &'a Arc<SweepGrid>)>,
+}
+
+impl Selection<'_> {
+    /// `residency` depends on exactly these; `sync` re-plans when they move.
+    pub fn key(&self) -> (DisplayProduct, Option<CutKey>, Option<VolumeId>, Option<GridKey>) {
+        (self.product, self.cut, self.focus, self.displayed.map(|(v, g)| grid_key(v, g)))
+    }
+}
+
+fn push_unique(resident: &mut Vec<(GridKey, Arc<SweepGrid>)>, volume: VolumeId, grid: &Arc<SweepGrid>) {
+    let key = grid_key(volume, grid);
+    if !resident.iter().any(|(k, _)| *k == key) {
+        resident.push((key, Arc::clone(grid)));
+    }
+}
+
+/// What must be GPU-resident this frame (ADR-0030 §3.7, ADR-0031 D-5), in
+/// upload-priority order:
 ///
-/// This assumes the newest retained frame is the one being displayed —
-/// true today by construction, since there is no pinning (Part B has no
-/// timeline). Stage 6a Part C must revisit this rule when a `Pinned`
-/// selection exists: the frame that must stay fully resident is then the
-/// *pinned* one, not necessarily the newest.
-pub fn residency(
-    frames: &[Arc<Frame>],
-    product: DisplayProduct,
-    elevation_number: u8,
-    budget_bytes: usize,
-) -> Vec<(GridKey, Arc<SweepGrid>)> {
-    let Some((newest, older)) = frames.split_last() else {
+/// 1. the displayed grid;
+/// 2. every grid of the **focus** frame — the pinned frame while paused,
+///    else the newest — so a product or tilt switch uploads nothing for the
+///    frame on screen (FR-RP-7, FR-TL-10);
+/// 3. the newest frame's selected grid, which a focus change never evicts;
+/// 4. the tail: every other frame's D-3 grid for `(product, cut)`
+///    (`Frame::grid_at_cut` — the very lookup playback displays), so a loop
+///    runs upload-free once resident (FR-TL-9). Oldest drop first when
+///    `budget_bytes` binds; 1–3 are never dropped.
+///
+/// Pure: no device, no queue, no `ViewState`.
+pub fn residency(frames: &[Arc<Frame>], sel: &Selection, budget_bytes: usize) -> Vec<(GridKey, Arc<SweepGrid>)> {
+    let Some(newest) = frames.last() else {
         return Vec::new();
     };
+    let focus = sel.focus.and_then(|v| frames.iter().find(|f| f.volume == v)).unwrap_or(newest);
 
     let mut resident = Vec::new();
-    for sweep in newest.sweeps.values() {
-        for grid in &sweep.grids {
-            resident.push((grid_key(newest.volume, grid), Arc::clone(grid)));
-        }
+    if let Some((volume, grid)) = sel.displayed {
+        push_unique(&mut resident, volume, grid);
     }
-    for grid in newest.derived.values() {
-        resident.push((grid_key(newest.volume, grid), Arc::clone(grid)));
+    for grid in focus.sweeps.values().flat_map(|s| s.grids.iter()).chain(focus.derived.values()) {
+        push_unique(&mut resident, focus.volume, grid);
+    }
+    if let Some(grid) = newest.grid_at_cut(sel.product, sel.cut) {
+        push_unique(&mut resident, newest.volume, grid);
     }
 
-    // `older` is oldest → newest (as `StateSnapshot::frames` always is), so
+    // `frames` is oldest → newest (as `StateSnapshot::frames` always is), so
     // dropping from the front below is "oldest dropped first" by
     // construction — not a separate sort.
-    let elevation_key = history::key_elevation(product, elevation_number);
-    let mut tail: Vec<(GridKey, Arc<SweepGrid>)> = older
+    let mut tail: Vec<(GridKey, Arc<SweepGrid>)> = frames
         .iter()
         .filter_map(|frame| {
-            frame.grid(product, elevation_key).map(|grid| (grid_key(frame.volume, grid), Arc::clone(grid)))
+            frame.grid_at_cut(sel.product, sel.cut).map(|grid| (grid_key(frame.volume, grid), Arc::clone(grid)))
         })
+        .filter(|(key, _)| !resident.iter().any(|(k, _)| k == key))
         .collect();
 
     let mut tail_bytes: usize = tail.iter().map(|(_, g)| g.byte_len()).sum();
@@ -120,23 +147,21 @@ pub struct SyncPlan {
 /// what is cached and what `residency` says should be resident. A grid is
 /// re-uploaded only when it is new or its `Arc` identity changed — holding
 /// the `Arc` in the cache is what makes `Arc::ptr_eq` a sound identity test
-/// (§6.2). `to_upload` is ordered newest-frame-first (the newest volume
-/// among `entries`) so the displayed frame is never the one that waits;
-/// evictions are never rate-limited — freeing is free, and a bounded cache
-/// must be allowed to shrink promptly. Pure: no device, no queue.
+/// (§6.2). `to_upload` keeps `entries`' own order, which `residency` makes
+/// its priority order (displayed grid, then the focus frame, then the tail),
+/// so the frame on screen is never the one that waits; evictions are never
+/// rate-limited — freeing is free, and a bounded cache must be allowed to
+/// shrink promptly. Pure: no device, no queue.
 pub fn plan_sync(
     cached: &HashMap<GridKey, Arc<SweepGrid>>,
     entries: &[(GridKey, Arc<SweepGrid>)],
     max_uploads: usize,
 ) -> SyncPlan {
-    let newest_volume = entries.iter().map(|(key, _)| key.0).max();
-
     let mut needs_upload: Vec<GridKey> = entries
         .iter()
         .filter(|(key, grid)| !matches!(cached.get(key), Some(existing) if Arc::ptr_eq(existing, grid)))
         .map(|(key, _)| *key)
         .collect();
-    needs_upload.sort_by_key(|key| (Some(key.0) != newest_volume, *key));
 
     let more_pending = needs_upload.len() > max_uploads;
     needs_upload.truncate(max_uploads);
@@ -187,7 +212,7 @@ fn view_uniform_bytes(
     m_per_px: f64,
     viewport: (f32, f32),
 ) -> [u8; VIEW_UNIFORM_SIZE] {
-    let is_ground = matches!(grid.product, DisplayProduct::EchoTops | DisplayProduct::Vil);
+    let is_ground = grid.product.is_derived();
     let f32s: [f32; 12] = [
         center_m.0 as f32,
         center_m.1 as f32,
@@ -343,24 +368,22 @@ impl RadarRenderer {
     }
 
     /// Upload textures for every grid `residency` says should be resident
-    /// this frame for `(product, elevation_number)`, evict what it dropped,
-    /// and return any events (a grid too large for the device, the LUT
-    /// cache bounded) plus whether the upload budget still has work left
-    /// (§3.7) — the caller requests an immediate redraw when it does, so
-    /// the tail fills over a few frames rather than stalling one. Runs only
-    /// when `(revision, product, elevation_number)` changed — the caller
-    /// checks.
+    /// this frame for `sel`, evict what it dropped, and return any events (a
+    /// grid too large for the device, the LUT cache bounded) plus whether
+    /// the upload budget still has work left (§3.7) — the caller requests an
+    /// immediate redraw when it does, so the tail fills over a few frames
+    /// rather than stalling one. Runs only when `revision` or
+    /// [`Selection::key`] changed — the caller checks.
     pub fn sync(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         snapshot: &StateSnapshot,
-        product: DisplayProduct,
-        elevation_number: u8,
+        sel: &Selection,
         palettes: &std::collections::BTreeMap<DisplayProduct, Palette>,
     ) -> (Vec<Event>, bool) {
         let mut events = Vec::new();
-        let entries = residency(&snapshot.frames, product, elevation_number, HISTORY_GPU_BUDGET_BYTES);
+        let entries = residency(&snapshot.frames, sel, HISTORY_GPU_BUDGET_BYTES);
         let cached: HashMap<GridKey, Arc<SweepGrid>> =
             self.grids.iter().map(|(k, v)| (*k, Arc::clone(&v.source))).collect();
         let plan = plan_sync(&cached, &entries, MAX_UPLOADS_PER_FRAME);
@@ -469,8 +492,8 @@ impl RadarRenderer {
     /// is the only way to observe the §2.2 regression from outside the
     /// module: a pure test can't reach it, because it's a property of what
     /// `sync` already put in the cache, not of `plan_sync` in isolation.
-    fn plan_for_test(&self, snapshot: &StateSnapshot, product: DisplayProduct, elevation_number: u8) -> SyncPlan {
-        let entries = residency(&snapshot.frames, product, elevation_number, HISTORY_GPU_BUDGET_BYTES);
+    fn plan_for_test(&self, snapshot: &StateSnapshot, sel: &Selection) -> SyncPlan {
+        let entries = residency(&snapshot.frames, sel, HISTORY_GPU_BUDGET_BYTES);
         let cached: HashMap<GridKey, Arc<SweepGrid>> =
             self.grids.iter().map(|(k, v)| (*k, Arc::clone(&v.source))).collect();
         plan_sync(&cached, &entries, usize::MAX)
@@ -522,60 +545,39 @@ fn upload_grid(device: &wgpu::Device, queue: &wgpu::Queue, grid: Arc<SweepGrid>)
 mod tests {
     use std::sync::Arc;
 
-    use super::*;
+    use super::super::test_support::{frame, frame_with_derived, grid, snapshot, volume};
     use super::super::view::Camera;
+    use super::*;
+    use radar_workstation::compute::cut::cut_key;
     use radar_workstation::compute::SweepGrid;
 
-    fn grid(product: DisplayProduct, elevation_number: u8) -> Arc<SweepGrid> {
-        Arc::new(SweepGrid {
-            product,
-            azimuth_count: 4,
-            gate_count: 4,
-            first_gate_m: 0,
-            gate_width_m: 250,
-            elevation_number,
-            elevation_deg: elevation_number as f32 * 0.5,
-            nyquist_velocity_mps: Some(8.0),
-            scale: 2.0,
-            offset: 66.0,
-            cells: vec![0u8; 16],
-            filled_azimuths: 0,
-        })
+    const REF: DisplayProduct = DisplayProduct::Reflectivity;
+    const VEL: DisplayProduct = DisplayProduct::Velocity;
+
+    fn sel(product: DisplayProduct, cut_deg: f32) -> Selection<'static> {
+        Selection { product, cut: Some(cut_key(cut_deg)), focus: None, displayed: None }
     }
 
-    fn volume(scan_time_ms: u32) -> VolumeId {
-        VolumeId { julian_date: 20_000, scan_time_ms }
-    }
-
-    /// A retained frame holding one sweep — the unit `residency` operates
-    /// on. Built through the same `Frame`/`DisplaySweep` types the library
-    /// uses, not a hand-rolled stand-in.
-    fn frame_with_sweep(scan_time_ms: u32, vcp_number: u16, elevation_number: u8, grids: Vec<Arc<SweepGrid>>) -> Arc<Frame> {
-        let v = volume(scan_time_ms);
-        let mut frame = Frame::new(v, vcp_number, std::time::Instant::now());
-        frame.insert_sweep(radar_workstation::state::DisplaySweep {
-            elevation_number,
-            elevation_deg: elevation_number as f32 * 0.5,
-            volume: v,
-            vcp_number,
-            received: std::time::Instant::now(),
-            grids,
-        });
-        Arc::new(frame)
+    /// Upload everything `entries` names into `cached`, as `sync` would.
+    fn upload_all(cached: &mut HashMap<GridKey, Arc<SweepGrid>>, entries: &[(GridKey, Arc<SweepGrid>)]) {
+        for key in plan_sync(cached, entries, usize::MAX).to_upload {
+            let grid = entries.iter().find(|(k, _)| *k == key).unwrap().1.clone();
+            cached.insert(key, grid);
+        }
     }
 
     #[test]
     fn derived_products_key_without_an_elevation() {
         let v = volume(100);
-        assert_eq!(grid_key(v, &grid(DisplayProduct::EchoTops, 0)), (v, DisplayProduct::EchoTops, None));
-        assert_eq!(grid_key(v, &grid(DisplayProduct::Reflectivity, 3)), (v, DisplayProduct::Reflectivity, Some(3)));
+        assert_eq!(grid_key(v, &grid(DisplayProduct::EchoTops, 0, 0.0)), (v, DisplayProduct::EchoTops, None));
+        assert_eq!(grid_key(v, &grid(REF, 3, 1.3)), (v, REF, Some(3)));
     }
 
     #[test]
     fn nothing_to_do_when_the_cache_already_holds_the_same_arcs() {
         let v = volume(100);
-        let r1 = grid(DisplayProduct::Reflectivity, 1);
-        let v1 = grid(DisplayProduct::Velocity, 1);
+        let r1 = grid(REF, 1, 0.5);
+        let v1 = grid(VEL, 1, 0.5);
         let cached: HashMap<GridKey, Arc<SweepGrid>> =
             [(grid_key(v, &r1), Arc::clone(&r1)), (grid_key(v, &v1), Arc::clone(&v1))].into_iter().collect();
         let entries = vec![(grid_key(v, &r1), r1), (grid_key(v, &v1), v1)];
@@ -587,62 +589,77 @@ mod tests {
 
     #[test]
     fn a_product_switch_and_a_sweep_switch_upload_nothing() {
-        // FR-RP-7: the snapshot's grid set is identical before and after a
-        // selection change — only ViewState moves — so plan_sync is empty.
-        let v = volume(100);
-        let grids = [
-            grid(DisplayProduct::Reflectivity, 1),
-            grid(DisplayProduct::Reflectivity, 2),
-            grid(DisplayProduct::Velocity, 1),
-        ];
-        let cached: HashMap<GridKey, Arc<SweepGrid>> =
-            grids.iter().map(|g| (grid_key(v, g), Arc::clone(g))).collect();
-        let entries: Vec<_> = grids.iter().map(|g| (grid_key(v, g), Arc::clone(g))).collect();
-        let plan = plan_sync(&cached, &entries, usize::MAX);
-        assert!(plan.to_upload.is_empty(), "a switch must upload nothing: {plan:?}");
-        assert!(plan.to_evict.is_empty());
+        // FR-RP-7: every grid of the newest (focus) frame is resident, so a
+        // selection change within it uploads nothing.
+        let frames = vec![frame(100, 35, &[(1, 0.5, &[REF, VEL]), (2, 1.3, &[REF])])];
+        let mut cached = HashMap::new();
+        upload_all(&mut cached, &residency(&frames, &sel(REF, 0.5), usize::MAX));
+        for next in [sel(VEL, 0.5), sel(REF, 1.3)] {
+            let plan = plan_sync(&cached, &residency(&frames, &next, usize::MAX), usize::MAX);
+            assert!(plan.to_upload.is_empty(), "a switch must upload nothing: {plan:?}");
+        }
     }
 
     #[test]
     fn a_replaced_arc_is_re_uploaded_and_a_dropped_key_is_evicted() {
         let v = volume(100);
-        let old_r = grid(DisplayProduct::Reflectivity, 1);
-        let stale_v = grid(DisplayProduct::Velocity, 1);
+        let old_r = grid(REF, 1, 0.5);
+        let stale_v = grid(VEL, 1, 0.5);
         let cached: HashMap<GridKey, Arc<SweepGrid>> =
             [(grid_key(v, &old_r), old_r), (grid_key(v, &stale_v), stale_v)].into_iter().collect();
 
-        let new_r = grid(DisplayProduct::Reflectivity, 1); // same key, different Arc
+        let new_r = grid(REF, 1, 0.5); // same key, different Arc
         let entries = vec![(grid_key(v, &new_r), new_r)];
         let plan = plan_sync(&cached, &entries, usize::MAX);
-        assert_eq!(plan.to_upload, vec![(v, DisplayProduct::Reflectivity, Some(1))]);
-        assert_eq!(plan.to_evict, vec![(v, DisplayProduct::Velocity, Some(1))]);
+        assert_eq!(plan.to_upload, vec![(v, REF, Some(1))]);
+        assert_eq!(plan.to_evict, vec![(v, VEL, Some(1))]);
     }
 
     #[test]
     fn residency_holds_every_grid_of_the_newest_frame() {
-        let newest =
-            frame_with_sweep(200, 35, 1, vec![grid(DisplayProduct::Reflectivity, 1), grid(DisplayProduct::Velocity, 1)]);
-        let entries = residency(&[newest], DisplayProduct::Reflectivity, 1, usize::MAX);
+        let newest = frame(200, 35, &[(1, 0.5, &[REF, VEL])]);
+        let entries = residency(&[newest], &sel(REF, 0.5), usize::MAX);
         assert_eq!(entries.len(), 2, "every grid of the newest frame must be resident, not just the selection");
     }
 
     #[test]
     fn residency_holds_only_the_selected_grid_of_older_frames() {
-        let older =
-            frame_with_sweep(100, 35, 1, vec![grid(DisplayProduct::Reflectivity, 1), grid(DisplayProduct::Velocity, 1)]);
-        let newest = frame_with_sweep(200, 35, 1, vec![grid(DisplayProduct::Reflectivity, 1)]);
-        let entries = residency(&[older, newest], DisplayProduct::Reflectivity, 1, usize::MAX);
+        let older = frame(100, 35, &[(1, 0.5, &[REF, VEL])]);
+        let newest = frame(200, 35, &[(1, 0.5, &[REF])]);
+        let entries = residency(&[older, newest], &sel(REF, 0.5), usize::MAX);
         assert_eq!(entries.len(), 2, "newest frame's one grid + the older frame's selected grid");
-        assert!(entries.iter().all(|(k, _)| k.1 == DisplayProduct::Reflectivity));
+        assert!(entries.iter().all(|(k, _)| k.1 == REF));
+    }
+
+    #[test]
+    fn residency_selects_a_split_cuts_surveillance_ref_in_the_tail() {
+        // Elevations 1 (surveillance) and 2 (Doppler) share 0.5°; D-3 picks
+        // the longer range. Same range here, so the higher number would win —
+        // give the surveillance half more gates to make the rule bite.
+        let mut older = (*frame(100, 35, &[(2, 0.5, &[REF, VEL])])).clone();
+        let mut surveillance = (*grid(REF, 1, 0.5)).clone();
+        surveillance.gate_count = 8;
+        surveillance.cells = vec![0; 32];
+        older.insert_sweep(radar_workstation::state::DisplaySweep {
+            elevation_number: 1,
+            elevation_deg: 0.52,
+            cut_deg: 0.5,
+            volume: volume(100),
+            vcp_number: 35,
+            received: std::time::Instant::now(),
+            grids: vec![Arc::new(surveillance)],
+        });
+        let newest = frame(200, 35, &[(1, 0.5, &[REF])]);
+        let entries = residency(&[Arc::new(older), newest], &sel(REF, 0.5), usize::MAX);
+        assert!(entries.iter().any(|(k, _)| *k == (volume(100), REF, Some(1))), "the surveillance REF is the tail entry");
+        assert!(!entries.iter().any(|(k, _)| *k == (volume(100), REF, Some(2))));
     }
 
     #[test]
     fn residency_drops_the_oldest_frames_first_under_the_budget() {
-        let oldest = frame_with_sweep(100, 35, 1, vec![grid(DisplayProduct::Reflectivity, 1)]); // 16 bytes
-        let middle = frame_with_sweep(200, 35, 1, vec![grid(DisplayProduct::Reflectivity, 1)]); // 16 bytes
-        let newest = frame_with_sweep(300, 35, 1, vec![grid(DisplayProduct::Reflectivity, 1)]); // always resident
+        let frames: Vec<_> = [100, 200, 300].iter().map(|&t| frame(t, 35, &[(1, 0.5, &[REF])])).collect();
         // Budget for the tail fits exactly one 16-byte grid.
-        let entries = residency(&[oldest, middle, newest], DisplayProduct::Reflectivity, 1, 16);
+        let entries = residency(&frames, &sel(REF, 0.5), 16);
         let volumes: Vec<VolumeId> = entries.iter().map(|(k, _)| k.0).collect();
         assert!(volumes.contains(&volume(300)), "the newest frame must always be present");
         assert!(!volumes.contains(&volume(100)), "the oldest retained frame must drop first under budget");
@@ -651,61 +668,99 @@ mod tests {
 
     #[test]
     fn residency_never_drops_the_newest_frame() {
-        let older = frame_with_sweep(100, 35, 1, vec![grid(DisplayProduct::Reflectivity, 1)]);
-        let newest =
-            frame_with_sweep(200, 35, 1, vec![grid(DisplayProduct::Reflectivity, 1), grid(DisplayProduct::Velocity, 1)]);
-        let entries = residency(&[older, newest], DisplayProduct::Reflectivity, 1, 0);
+        let older = frame(100, 35, &[(1, 0.5, &[REF])]);
+        let newest = frame(200, 35, &[(1, 0.5, &[REF, VEL])]);
+        let entries = residency(&[older, newest], &sel(REF, 0.5), 0);
         assert_eq!(entries.len(), 2, "the newest frame's grids must stay resident even at a zero tail budget");
         assert!(entries.iter().all(|(k, _)| k.0 == volume(200)));
     }
 
     #[test]
     fn residency_of_a_derived_product_selects_it_from_every_frame() {
-        let mut older = Frame::new(volume(100), 35, std::time::Instant::now());
-        older.set_derived(vec![grid(DisplayProduct::Vil, 0)]);
-        let mut newest = Frame::new(volume(200), 35, std::time::Instant::now());
-        newest.set_derived(vec![grid(DisplayProduct::Vil, 0)]);
-        let entries = residency(&[Arc::new(older), Arc::new(newest)], DisplayProduct::Vil, 0, usize::MAX);
+        let frames = vec![frame_with_derived(100, 35, &[DisplayProduct::Vil]), frame_with_derived(200, 35, &[DisplayProduct::Vil])];
+        let vil = Selection { product: DisplayProduct::Vil, cut: None, focus: None, displayed: None };
+        let entries = residency(&frames, &vil, usize::MAX);
         assert_eq!(entries.len(), 2, "a derived-product selection must form a loop across every retained frame");
         assert!(entries.iter().all(|(k, _)| k.1 == DisplayProduct::Vil && k.2.is_none()));
     }
 
     #[test]
     fn a_selection_absent_from_an_older_frame_is_simply_absent() {
-        let older = frame_with_sweep(100, 35, 1, vec![grid(DisplayProduct::Velocity, 1)]); // no reflectivity
-        let newest = frame_with_sweep(200, 35, 1, vec![grid(DisplayProduct::Reflectivity, 1)]);
-        let entries = residency(&[older, newest], DisplayProduct::Reflectivity, 1, usize::MAX);
+        let older = frame(100, 35, &[(1, 0.5, &[VEL])]); // no reflectivity
+        let newest = frame(200, 35, &[(1, 0.5, &[REF])]);
+        let entries = residency(&[older, newest], &sel(REF, 0.5), usize::MAX);
         assert_eq!(entries.len(), 1, "the older frame has no matching grid: simply absent, no placeholder, no panic");
     }
 
+    // --- Part C (ADR-0031 D-5, plan §5.3) ---
+
+    fn paused_on(frames: &[Arc<Frame>], product: DisplayProduct, cut_deg: f32, focus: VolumeId) -> Selection<'_> {
+        let f = frames.iter().find(|f| f.volume == focus).unwrap();
+        let displayed = f.grid_at_cut(product, Some(cut_key(cut_deg))).map(|g| (focus, g));
+        Selection { product, cut: Some(cut_key(cut_deg)), focus: Some(focus), displayed }
+    }
+
     #[test]
-    fn walking_the_selection_across_every_frame_uploads_nothing_once_resident() {
-        // §1 acceptance criterion 6: what Part C's playback will do.
-        let frames: Vec<Arc<Frame>> =
-            (0..5).map(|i| frame_with_sweep(100 + i * 100, 35, 1, vec![grid(DisplayProduct::Reflectivity, 1)])).collect();
-        let entries = residency(&frames, DisplayProduct::Reflectivity, 1, usize::MAX);
-        assert_eq!(entries.len(), frames.len(), "every frame's selected grid must be resident under an unbounded budget");
+    fn a_product_or_tilt_switch_while_paused_on_an_older_frame_uploads_nothing_for_it() {
+        let frames: Vec<_> =
+            [100, 200, 300].iter().map(|&t| frame(t, 35, &[(1, 0.5, &[REF, VEL]), (2, 1.3, &[REF])])).collect();
+        let pinned = volume(100);
+        let mut cached = HashMap::new();
+        upload_all(&mut cached, &residency(&frames, &paused_on(&frames, REF, 0.5, pinned), usize::MAX));
 
-        let mut cached: HashMap<GridKey, Arc<SweepGrid>> = HashMap::new();
-        let plan = plan_sync(&cached, &entries, usize::MAX);
-        for key in &plan.to_upload {
-            let grid = entries.iter().find(|(k, _)| k == key).unwrap().1.clone();
-            cached.insert(*key, grid);
+        for (product, cut) in [(VEL, 0.5), (REF, 1.3)] {
+            let plan = plan_sync(&cached, &residency(&frames, &paused_on(&frames, product, cut, pinned), usize::MAX), usize::MAX);
+            assert!(
+                plan.to_upload.iter().all(|k| k.0 != pinned),
+                "FR-TL-10: the paused frame is fully resident, so a switch uploads nothing for it: {plan:?}"
+            );
         }
+    }
 
-        // Playback walks the *selection* across frames — it never changes
-        // what `residency` says should be resident, so recomputing the plan
-        // against the very same entries (what every later frame of
-        // playback does) must upload nothing.
-        let plan = plan_sync(&cached, &entries, usize::MAX);
-        assert!(plan.to_upload.is_empty(), "playback must be upload-free once the tail is resident: {plan:?}");
+    #[test]
+    fn walking_playback_across_the_window_uploads_nothing_once_resident() {
+        let frames: Vec<_> = (0..5).map(|i| frame(100 + i * 100, 35, &[(1, 0.5, &[REF])])).collect();
+        let mut cached = HashMap::new();
+        upload_all(&mut cached, &residency(&frames, &sel(REF, 0.5), usize::MAX));
+
+        // Playing: focus is the newest (D-5), and the displayed grid steps
+        // through every frame's D-3 selection.
+        for f in &frames {
+            let displayed = f.grid_at_cut(REF, Some(cut_key(0.5))).map(|g| (f.volume, g));
+            let playing = Selection { displayed, ..sel(REF, 0.5) };
+            let plan = plan_sync(&cached, &residency(&frames, &playing, usize::MAX), usize::MAX);
+            assert!(plan.to_upload.is_empty() && plan.to_evict.is_empty(), "FR-TL-9: playback is upload-free: {plan:?}");
+        }
+    }
+
+    #[test]
+    fn a_focus_change_never_evicts_the_newest_frames_selected_grid() {
+        let frames: Vec<_> = (0..4).map(|i| frame(100 + i * 100, 35, &[(1, 0.5, &[REF, VEL])])).collect();
+        let newest = frames.last().unwrap().volume;
+        for focus in frames.iter().map(|f| f.volume) {
+            let entries = residency(&frames, &paused_on(&frames, REF, 0.5, focus), 0);
+            assert!(
+                entries.iter().any(|(k, _)| *k == (newest, REF, Some(1))),
+                "focus {focus:?}: the newest frame's selected grid must stay resident even at a zero tail budget"
+            );
+        }
+    }
+
+    #[test]
+    fn a_carried_forward_displayed_grid_is_resident() {
+        // Live: the newest frame has not closed 1.3°, so the displayed grid
+        // is the older frame's — it must be resident even at a zero budget.
+        let frames = vec![frame(100, 35, &[(2, 1.3, &[REF])]), frame(200, 35, &[(1, 0.5, &[REF])])];
+        let shown = frames[0].grid_at_cut(REF, Some(cut_key(1.3))).unwrap();
+        let live = Selection { displayed: Some((volume(100), shown)), ..sel(REF, 1.3) };
+        let entries = residency(&frames, &live, 0);
+        assert_eq!(entries.first().map(|(k, _)| *k), Some((volume(100), REF, Some(2))), "displayed uploads first");
     }
 
     #[test]
     fn a_product_switch_uploads_the_tail_at_the_rate_limit_and_reports_more_pending() {
-        let frames: Vec<Arc<Frame>> =
-            (0..6).map(|i| frame_with_sweep(100 + i * 100, 35, 1, vec![grid(DisplayProduct::Reflectivity, 1)])).collect();
-        let entries = residency(&frames, DisplayProduct::Reflectivity, 1, usize::MAX);
+        let frames: Vec<_> = (0..6).map(|i| frame(100 + i * 100, 35, &[(1, 0.5, &[REF])])).collect();
+        let entries = residency(&frames, &sel(REF, 0.5), usize::MAX);
         let cached: HashMap<GridKey, Arc<SweepGrid>> = HashMap::new(); // nothing cached yet, as if just switched product
         let plan = plan_sync(&cached, &entries, 4);
         assert_eq!(plan.to_upload.len(), 4, "the rate limit must cap uploads in one call");
@@ -713,19 +768,15 @@ mod tests {
     }
 
     #[test]
-    fn the_newest_frames_grids_are_uploaded_before_the_tail() {
-        let older: Vec<Arc<Frame>> =
-            (0..5).map(|i| frame_with_sweep(100 + i * 100, 35, 1, vec![grid(DisplayProduct::Reflectivity, 1)])).collect();
-        let newest =
-            frame_with_sweep(1000, 35, 1, vec![grid(DisplayProduct::Reflectivity, 1), grid(DisplayProduct::Velocity, 1)]);
-        let mut frames = older;
-        frames.push(Arc::clone(&newest));
-        let entries = residency(&frames, DisplayProduct::Reflectivity, 1, usize::MAX);
+    fn the_focus_frames_grids_are_uploaded_before_the_tail() {
+        let mut frames: Vec<_> = (0..5).map(|i| frame(100 + i * 100, 35, &[(1, 0.5, &[REF])])).collect();
+        frames.push(frame(1000, 35, &[(1, 0.5, &[REF, VEL])]));
+        let entries = residency(&frames, &sel(REF, 0.5), usize::MAX);
         let cached: HashMap<GridKey, Arc<SweepGrid>> = HashMap::new();
         let plan = plan_sync(&cached, &entries, 2);
         assert!(
-            plan.to_upload.iter().all(|k| k.0 == newest.volume),
-            "the newest frame's grids must upload before any of the tail: {plan:?}"
+            plan.to_upload.iter().all(|k| k.0 == volume(1000)),
+            "the focus (newest) frame's grids must upload before any of the tail: {plan:?}"
         );
     }
 
@@ -757,7 +808,7 @@ mod tests {
 
     #[test]
     fn view_uniform_bytes_pack_geometry_at_the_wgsl_offsets() {
-        let g = grid(DisplayProduct::Reflectivity, 2);
+        let g = grid(REF, 2, 1.0);
         let bytes = view_uniform_bytes(&g, (100.0, -50.0), 62.5, (1280.0, 800.0));
         assert_eq!(bytes.len(), VIEW_UNIFORM_SIZE);
         let f = |off: usize| f32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
@@ -769,7 +820,7 @@ mod tests {
         assert_eq!(u(36), 4, "gate_count at offset 36");
         assert_eq!(u(52), 0, "is_ground_range 0 for a base product at offset 52");
 
-        let derived = grid(DisplayProduct::EchoTops, 0);
+        let derived = grid(DisplayProduct::EchoTops, 0, 0.0);
         let db = view_uniform_bytes(&derived, (0.0, 0.0), 1.0, (1.0, 1.0));
         assert_eq!(u32::from_le_bytes(db[52..56].try_into().unwrap()), 1, "is_ground_range 1 for a derived product");
     }
@@ -835,20 +886,25 @@ mod tests {
         let mut renderer = RadarRenderer::new(&device, format, false, 2048);
 
         // A grid that is all "real data" (raw 200) so the whole disc paints.
-        let mut g = (*grid(DisplayProduct::Reflectivity, 1)).clone();
+        let mut f = (*frame(0, 35, &[(1, 0.5, &[REF])])).clone();
+        let mut sweep = f.sweeps[&1].clone();
+        let mut g = (*sweep.grids[0]).clone();
         g.cells = vec![200u8; g.cells.len()];
         let g = Arc::new(g);
+        sweep.grids = vec![Arc::clone(&g)];
+        f.insert_sweep(sweep);
 
         let (palettes, _) = radar_workstation::compute::palette::load_all();
-        let snapshot = fake_snapshot(vec![g.clone()]);
-        renderer.sync(&device, &queue, &snapshot, DisplayProduct::Reflectivity, 1, &palettes);
+        let snapshot = snapshot(vec![Arc::new(f)]);
+        let selection = Selection { displayed: Some((volume(0), &g)), ..sel(REF, 0.5) };
+        renderer.sync(&device, &queue, &snapshot, &selection, &palettes);
 
         // The direct regression for §2.2: syncing the very same snapshot a
         // second time must find everything already cached under the same
         // `Arc` identity, and therefore plan zero uploads — no pure test can
         // catch this, since it is a property of what `sync` actually put in
         // the cache the first time.
-        let second_plan = renderer.plan_for_test(&snapshot, DisplayProduct::Reflectivity, 1);
+        let second_plan = renderer.plan_for_test(&snapshot, &selection);
         assert!(second_plan.to_upload.is_empty(), "a synced grid must never be re-uploaded: {second_plan:?}");
 
         let size = 64u32;
@@ -889,23 +945,6 @@ mod tests {
         // Centre pixel is inside the disc and carries data -> not background.
         let centre = pixel(&readback, size, size / 2, size / 2);
         assert_ne!(centre, [0, 0, 0, 255], "centre pixel should carry radar data, not background");
-    }
-
-    /// A `StateSnapshot` carrying one frame — the shape every consumer sees
-    /// post-ADR-0030 — built from the same `Frame`/`DisplaySweep` types the
-    /// library uses, so this stays a single definition of "one frame with
-    /// these grids" rather than a second hand-rolled one.
-    fn fake_snapshot(grids: Vec<Arc<SweepGrid>>) -> radar_workstation::state::StateSnapshot {
-        let frame = frame_with_sweep(0, 35, 1, grids);
-        radar_workstation::state::StateSnapshot {
-            site: radar_workstation::sites::by_id("KDOX").unwrap(),
-            sweeps: frame.sweeps.values().cloned().collect(),
-            derived: vec![],
-            last_complete: None,
-            frames: vec![frame],
-            revision: 1,
-            ingest: radar_workstation::ingest::s3_poll::IngestStatus::default(),
-        }
     }
 
     fn read_texture(

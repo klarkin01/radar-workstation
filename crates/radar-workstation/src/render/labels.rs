@@ -110,7 +110,7 @@ mod tests {
     const AVAIL: [f32; 4] = [0.0, 0.0, 1280.0, 780.0]; // status bar takes the bottom 20px
 
     fn view() -> ViewState {
-        ViewState::initial(VP, DisplayProduct::Reflectivity)
+        ViewState::initial(VP, DisplayProduct::Reflectivity, crate::render::timeline::Timeline::from_config(&Default::default()))
     }
 
     #[test]

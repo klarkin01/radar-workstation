@@ -1,6 +1,6 @@
 # Implementation Plan — Stage 6a Part A: Stop displaying stale data
 
-**Status:** proposed, not started
+**Status:** Implemented 2026-09-03 (commit `c83c049`) — see §9 Results
 **Date:** 2026-09-03
 **Parent:** `docs/plans/stage-6a-time-handling.md` §1 (findings) and §3 Part A
 (A1–A5). This document is the executable form of Part A and nothing else.
@@ -538,3 +538,47 @@ aws s3api list-objects-v2 --bucket unidata-nexrad-level2-chunks \
 `git add`, `git commit`, `git push`, or `git checkout -b`.** Leave all changes
 in the working tree and report what was changed, what passed, and anything left
 undone. The developer reviews and commits.
+
+---
+
+## 9. Results
+
+*Added 2026-11-21 by the checkpoint session (`stage-6a-checkpoint.md` step A1). The code
+landed in `c83c049` (2026-09-03) without a Results section. Everything below was measured
+on branch `time_handling` at `343c44a`, which also contains Part B, on the ADR-0024
+hybrid-GPU development machine (NVIDIA RTX 4070 SUPER driving the display).*
+
+### §5 validation
+
+| Check | Result |
+|---|---|
+| `cargo test --workspace` | **421 passed, 0 failed, 24 ignored** |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean |
+| `cargo test -p radar-workstation -- --ignored --nocapture` | **16 / 16 pass**: 7 live poller tests (lib), 6 GPU offscreen tests (bin), `polls_a_real_site_to_one_complete_volume`, and both `pipeline_spawn_*` tests. The lib suite took 1,015 s, mostly `does_not_stall_when_forced_past_the_newest_real_volume` (slow by design) |
+| A5: `cold_start_anchor_is_within_one_vcp_cycle_of_now` | **passes** against live KDOX |
+| `cargo deny check` | **FAILS (advisories)**. Bans, licenses and sources are ok. See below |
+| `cargo audit` | **FAILS: 6 vulnerabilities, 2 allowed warnings.** See below |
+| Live headless run, KDOX | Anchored to the live volume on cold start and advanced through 5 consecutive volume boundaries in 45 min (VCP 35, ~7.5 min per volume) with `ingest=Polling` throughout. No re-anchor was needed |
+| Live windowed run, KDOX, 40 min | Started on the NVIDIA adapter (`matched connected display`) and ran for the full 40 min without error. **The on-screen checks in §5 (scan time near UTC now, `age` not accented, `poll Ns ago` separate) were not confirmed by eye.** This session had no way to see the screen, because GNOME refuses screenshot requests from it. The readout logic is covered by `render::ui`'s `data_age_*` and `age_is_alarming_*` unit tests. The developer should still look at a live window once |
+
+**Supply-chain advisories (new since Part A landed, not caused by it).** The RustSec
+database now flags crates already in `Cargo.lock`. Part A changed no dependencies.
+
+| Crate (locked) | Advisories | Fixed in |
+|---|---|---|
+| `rustls` 0.23.41 | RUSTSEC-2026-0285, -0346, -0348, -0349 | ≥ 0.23.46 |
+| `rustls-webpki` 0.103.13 | RUSTSEC-2026-0382 | ≥ 0.103.16 |
+| `webpki-roots` 1.0.8 | RUSTSEC-2026-0381 | ≥ 1.0.10 |
+| `tokio` 1.52.3 | RUSTSEC-2026-0386 (unsound: `AsyncFd::new`) | see advisory |
+| `rustix` 1.1.4 | RUSTSEC-2026-0486 | see advisory |
+
+All three TLS crates sit on the `http-ingest` S3 path. The fix is probably a lockfile-only
+`cargo update` of existing dependencies, with no new crates. That is version management,
+so the developer decides it. It was not done here. **It blocks the merge (checkpoint A8)**,
+because `cargo deny check` is a required gate.
+
+**A correction to §5 and to Part B §6.** The command
+`cargo run --release -- KDOX --headless < /dev/null` exits immediately. Headless mode shuts
+down on stdin EOF (`headless.rs`), and `/dev/null` is at EOF from the start. To run it
+unattended, keep stdin open, e.g. `tail -f /dev/null | radar-workstation KDOX --headless`.
+`QUICK-START.md` documents this.

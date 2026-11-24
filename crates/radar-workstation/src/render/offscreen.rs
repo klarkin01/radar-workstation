@@ -313,7 +313,7 @@ fn write_scene_ppm(site_id: &str, m_per_px: f64, out_name: &str) {
 #[ignore = "requires a GPU adapter; writes target/*.ppm for manual inspection"]
 fn kdox_230km_no_radar_data() {
     // 230 km fitted to a 512x512 viewport's short axis.
-    let view = ViewState::initial((512.0, 512.0), DisplayProduct::Reflectivity);
+    let view = ViewState::initial((512.0, 512.0), DisplayProduct::Reflectivity, super::timeline::Timeline::from_config(&Default::default()));
     write_scene_ppm("KDOX", view.m_per_px, "overlay_kdox_230km.ppm");
 }
 
@@ -326,6 +326,6 @@ fn krlx_60_m_per_px_max_zoom() {
 #[test]
 #[ignore = "requires a GPU adapter; writes target/*.ppm for manual inspection"]
 fn pabc_230km_road_less_site() {
-    let view = ViewState::initial((512.0, 512.0), DisplayProduct::Reflectivity);
+    let view = ViewState::initial((512.0, 512.0), DisplayProduct::Reflectivity, super::timeline::Timeline::from_config(&Default::default()));
     write_scene_ppm("PABC", view.m_per_px, "overlay_pabc_230km.ppm");
 }

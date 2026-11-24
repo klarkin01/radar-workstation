@@ -1,6 +1,6 @@
 # Implementation Plan — Stage 0 and Stage 1: Close the Acquisition Path
 
-**Status:** Drafted, not started
+**Status:** Implemented 2026-07-31 — see §8 Results
 **Drafted:** 2026-07-30
 **Implements:** `docs/project-inventory.md` §6, Stage 0 (item 1) and Stage 1 (items 2–5)
 **Baseline commit:** `668b1ca` (working tree: `.gitignore` modified, `.github/` untracked,

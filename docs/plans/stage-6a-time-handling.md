@@ -1,6 +1,6 @@
 # Plan — Time handling: staleness, history, and timeline controls
 
-**Status:** proposed, not started
+**Status:** in progress — Parts A, B done; C next (see `stage-6a-checkpoint.md`)
 **Date:** 2026-09-04
 **Scope:** why displayed data is hours stale today, and the sequence of work
 needed to give the application a time axis — history retention, animation/loop,
@@ -113,6 +113,15 @@ retention.
 
 ### Part A — Stop displaying stale data
 
+**Done (2026-09-03).** Executed as
+`docs/plans/stage-6a-part-a-stale-data.md`, which is the record of what was
+actually decided and built — read it, not the five sketches below, which are
+left as originally written. In one line: A1 became errata on ADR-0011/0014;
+A2/A3 are `ingest::volume_seq` (`VolumeSeq`, with no `Ord`, and
+`VolumeWindow`'s largest-gap ordering) and the rewired `S3Poller`; A4 is the
+status bar's scan-age readout, with the poll readout relabelled "poll Ns ago";
+A5 is the live `cold_start_anchor_is_within_one_vcp_cycle_of_now` test.
+
 **A1. Record the wrap as a format finding.**
 Correct `CLAUDE.md`'s "monotonically increasing per-site integer" to "cyclic
 1–999 counter", correct the 24-hour retention claim to "observed ~48 h, not
@@ -208,6 +217,15 @@ the 128 MB GPU target, and confirm that playback at the target frame rate does
 zero uploads in steady state once the loop is resident.
 
 ### Part C — Timeline controls
+
+**Done (2026-11-22).** Executed as `docs/plans/stage-6a-part-c-timeline.md`, which is
+the record of what was actually decided and built. Read it, not the sketches below, which
+are left as originally written per this document's own preamble. In one line: the
+semantics became [ADR-0031](../adr/0031-timeline-semantics.md) and FR-TL-1 to FR-TL-10.
+C1's `Pinned(VolumeId)` became `render::timeline::Mode::{Live, Paused, Playing}`, and the
+pure resolver is `timeline::resolve`. The tilt selection became a commanded cut angle
+(`compute::cut::CutKey`), not an elevation number. Residency follows the focus frame
+(ADR-0031 §5), and the age readout always measures the live feed (ADR-0031 §6).
 
 **C1. Add timeline state to `ViewState`.**
 A `Timeline` field holding the selection mode (`Live` — always the newest frame,
@@ -317,14 +335,35 @@ to live. Small, but it is what makes D2/D3 usable, and it is the last piece of
 
 - **What is a frame?** (B1) Volume is proposed; per-sweep animation is the
   alternative and is what some operators expect for a fast tilt.
+  *Answered for storage by Q25 / ADR-0030 §1: a retained frame is one volume.
+  Still open for playback: whether the loop steps volumes, or sweeps at a fixed
+  angle (SAILS/MRLE), and what "the selected tilt" means across frames. The
+  Part C plan must decide this (`stage-6a-checkpoint.md` §5.2, CK-20).*
+  *Answered for playback by ADR-0031 §1–§2: the loop steps volumes. A SAILS/MRLE
+  re-scan shows as that volume's newest closure at the angle. "The selected tilt" is the
+  Message 5 commanded cut angle.*
 - **What is retained, and how much?** (B1/B2) All products for N volumes, or
   the selected product deeper? The answer changes both memory and how product
   switching behaves mid-loop.
+  *Answered by Q25 / ADR-0030 §3: every product, as whole frames, bounded by
+  `history.frames` and `history.budget_mb`. A per-product history was
+  considered and rejected (ADR-0030, Alternatives).*
 - **What happens to the loop on a VCP change?** (B1) Elevation sets differ
   between patterns; a loop that silently mixes them is misleading.
+  *Answered for retention by ADR-0030 §4: a VCP change is retained, and only
+  the live fold stops at the boundary. Still open for playback: a loop that
+  crosses the boundary must not show a different angle under one unchanged
+  `elevation_number` (CK-20).*
+  *Answered for playback by ADR-0031 §2 and §4: a loop crosses the boundary. At a cut
+  both patterns fly it plays both sides. At a cut only one flies, the other pattern's
+  frames are hollow, say so, and are skipped. The loop is not bounded at the boundary
+  (ADR-0031, Considered Alternatives).*
 - **Does the timeline survive a site change?** (B1, interacts with Stage 7's
   FR-DA-4.)
+  *Answered by ADR-0030 §4: no. A site change clears the ring.*
 - **Is historical mode v1.0 scope, or post-v1.0?** (D2–D4) The loop (C) is
   clearly v1.0. Arbitrary-time archive playback is a larger surface and might
   reasonably be deferred — but it should be deferred deliberately, in an ADR,
   the way tiles were.
+  *Still open (CK-21). `stage-6a-checkpoint.md` §6 recommends putting D1
+  (backfill) in v1.0, with D2–D4 decided by an ADR.*

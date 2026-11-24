@@ -1,6 +1,6 @@
 # Implementation Plan — Stage 5: Map Underlays
 
-**Status:** Drafted — not yet implemented
+**Status:** Implemented 2026-09-02 — see §18 Results
 **Drafted:** 2026-09-02
 **Implements:** `docs/project-inventory.md` §6, Stage 5 (items 19–22)
 **Baseline commit:** `7ada4c3` (branch `map_underlays`; the working tree carries

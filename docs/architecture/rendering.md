@@ -275,21 +275,45 @@ Each elevation sweep is a separate texture. The active sweep is selected by the 
 Switching sweeps is a GPU state change (swap the active texture) — it does not require
 re-fetching or re-computing data.
 
-### GPU residency across retained history (Stage 6a Part B, ADR-0030)
+### GPU residency across retained history (Stage 6a Parts B–C, ADR-0030, ADR-0031)
 
 FR-RP-7 ("product and sweep switches are GPU state changes only") is unchanged for the
 *displayed* frame, but is now a statement about one frame among several retained ones,
-not the whole cache: `render::radar::residency` is a pure function of `(frames,
-selection, budget)` that says every grid of the newest retained frame, plus the selected
-`(product, elevation_number)` grid of every other retained frame, must be GPU-resident —
-oldest frames dropping out first under a ~76 MB tail budget (128 MB target, less the
-~11.46 MB overlay, less the newest frame's own grids). `plan_sync` diffs that against
-the cache and is the only thing that decides GPU contents; a switch never re-uploads the
-displayed frame, and playback of an already-resident selection uploads nothing (both are
-pure-tested, not just believed). Uploads that must happen are rate-limited to 4 per
-frame (~5 MB, well under budget) so a product switch with a full tail resident fills over
-a few frames rather than stalling one; the render loop requests an immediate redraw while
-work remains.
+not the whole cache. `render::radar::residency` is a pure function of `(frames,
+selection, budget)`. Since Stage 6a Part C it plans around the **focus frame**
+(ADR-0031 §5): the pinned frame while paused, the newest while live or playing
+(`render::timeline::residency_focus`). In upload-priority order, these must be resident:
+
+1. the displayed grid (in `Live` it may be carried forward from an older frame);
+2. every grid of the focus frame;
+3. the newest frame's selected grid;
+4. the selected grid of every other retained frame, chosen by the one grid-selection
+   rule (`compute::cut::best_at_cut` through `Frame::grid_at_cut`, ADR-0031 §3), keyed by
+   the commanded cut angle, not `elevation_number`.
+
+Only item 4 is budgeted, with the oldest frames dropping out first under a ~76 MB tail
+budget (128 MB target, less the ~11.46 MB overlay, less the focus frame's own grids).
+Items 1–3 are never dropped. `plan_sync` diffs that plan against the cache and is the
+only thing that decides GPU contents. These properties are pure-tested, not just
+believed:
+
+- a product or tilt switch never re-uploads the frame on screen, including a paused
+  older frame (FR-TL-10);
+- playback of an already-resident selection uploads nothing (FR-TL-9);
+- a focus change never evicts the newest frame's selected grid.
+
+Uploads that must happen are rate-limited to 4 per frame (~5 MB, well under budget), in
+residency's priority order. A product switch with a full tail resident therefore fills
+over a few frames rather than stalling one, and the render loop requests an immediate
+redraw while work remains.
+
+### Timeline pacing (Stage 6a Part C, ADR-0031)
+
+While playing, the render loop redraws once per frame step
+(`ControlFlow::WaitUntil(next_step)` from `render::timeline::tick`), never continuously.
+A stopped timeline adds no deadline, so it paces exactly as before (the 2 Hz idle tick
+plus input and egui repaint requests). The playback clock is the render loop's own, not
+a task's.
 
 ---
 

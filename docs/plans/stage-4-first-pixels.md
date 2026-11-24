@@ -1,6 +1,6 @@
 # Implementation Plan — Stage 4: First Pixels
 
-**Status:** Drafted — not yet implemented
+**Status:** Implemented 2026-08-28 — see §16 Results
 **Drafted:** 2026-08-28
 **Implements:** `docs/project-inventory.md` §6, Stage 4 (items 14–18)
 **Baseline commit:** `bc040f6` (working tree clean, branch `compute_layer`)

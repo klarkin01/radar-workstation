@@ -7,7 +7,13 @@ same use case as [GR2Analyst](https://www.grlevelx.com/) (Windows-only, $250/lic
 
 ## Status
 
-**Stage 5 complete** (`docs/plans/stage-5-map-underlays.md`).
+**Stage 5 complete** (`docs/plans/stage-5-map-underlays.md`), and **Stage 6a Parts A–C
+complete** (`docs/plans/stage-6a-time-handling.md`): ingest is wrap-safe across the chunk
+bucket's 999 → 1 volume counter, the app keeps a bounded history of recent volumes, and a
+timeline loops, steps and pauses over it (`Space`, `[` `]`, `End`) behind an unmissable
+LIVE / PAUSED / LOOP badge, with the status bar's age always measuring the live feed
+([ADR-0031](docs/adr/0031-timeline-semantics.md)). Part C's windowed validation run is
+recorded in its plan's §10. Backfill and archive playback are Part D.
 `cargo run --release -- KDOX` opens a window and draws the radar over a map: it polls the
 live chunk stream, decodes and assembles volumes, **grids every in-scope product for
 every sweep and derives Echo Tops/VIL for every completed volume**, and draws the
@@ -36,12 +42,22 @@ CI). Here is what exists and what doesn't:
   [ADR-0023](docs/adr/0023-radar-sampling-in-screen-space.md)), the map underlay bundle
   and its reader/projection ([ADR-0025](docs/adr/0025-bundled-overlay-geometry.md),
   [ADR-0028](docs/adr/0028-city-labels.md), [ADR-0029](docs/adr/0029-primary-roads-simplification.md)),
-  the tokio runtime/task-supervision skeleton, the bundled WSR-88D site list, and
+  wrap-aware volume selection and the scan-age readout
+  ([`stage-6a-part-a-stale-data.md`](docs/plans/stage-6a-part-a-stale-data.md)),
+  volume history retention ([ADR-0030](docs/adr/0030-volume-history-retention.md)), the
+  timeline over it ([ADR-0031](docs/adr/0031-timeline-semantics.md)), the
+  tokio runtime/task-supervision skeleton, the bundled WSR-88D site list, and
   configuration persistence ([ADR-0019](docs/adr/0019-config-format.md)) — all in
   `crates/radar-workstation`.
-- **Design-only, not yet code:** map imagery tiles (deferred post-v1.0,
-  [ADR-0027](docs/adr/0027-tile-image-decoding.md)), placefiles (Stage 6), runtime site
-  change (Stage 7).
+- **Design-only, not yet code:** backfill and archive playback (Stage 6a Part D), map
+  imagery tiles (deferred post-v1.0, [ADR-0027](docs/adr/0027-tile-image-decoding.md)),
+  placefiles (Stage 6), runtime site change (Stage 7).
+
+History retention is bounded by two config keys, `history.frames` (default 12) and
+`history.budget_mb` (default 320). Retained volumes cost 28–40 MB each, so the default
+adds up to 320 MB per instance. `history.budget_mb = 0` brings back the Stage 5
+footprint. The loop plays the newest `timeline.loop_frames` (default 12) of them. Every config key is listed in
+[`QUICK-START.md`](QUICK-START.md#configuration).
 
 For something else you can run today, see `utility/` — `fetch-sample` and
 `decode-sample` (fetch and decode real chunk data from S3) and `radar-viz` (render a
@@ -55,22 +71,10 @@ cargo run --release -- KDOX          # open the radar window for site KDOX
 cargo run --release -- KDOX --headless   # terminal state-transition loop, no window
 ```
 
-| Key | Action |
-|---|---|
-| `1`–`7` | product: reflectivity, velocity, spectrum width, ZDR, CC, echo tops, VIL |
-| `PageUp` / `PageDown` | next / previous elevation |
-| Arrow keys / left-drag | pan |
-| `+` / `-` / wheel | zoom (wheel zooms about the cursor) |
-| `Home` | reset view (site-centred, 230 km) — product and tilt kept |
-| `R` | toggle range rings and spokes |
-| `H` | toggle primary roads |
-| `F1` or `?` | key-help overlay |
-| `Ctrl+Q` | quit |
-
-Window geometry, the active product, and both layer toggles (`R`, `H`) persist to the
-config file on a clean exit. A machine with no display or no working GPU adapter exits
-non-zero and tells you to use `--headless` — it never silently falls back to the
-terminal loop.
+[`QUICK-START.md`](QUICK-START.md) is the operator guide. It has the keyboard map, what
+the status bar shows, and every configuration key. A machine with no display or no
+working GPU adapter exits non-zero and tells you to use `--headless`. It never silently
+falls back to the terminal loop.
 
 ## Build and test
 
@@ -100,6 +104,7 @@ cargo install --locked cargo-audit --version 0.22.2
 | `crates/radar-workstation` | The application: chunk ingest, S3 polling, volume assembly, compute layer, shared state, the winit/wgpu/egui render loop, runtime/supervision, site list, and configuration |
 | `crates/nexrad-decoder` | Custom NEXRAD Level II Message 31 decoder, zero third-party dependencies |
 | `crates/http-ingest` | Workspace-local HTTP/1.1 client purpose-built for the S3 acquisition path ([ADR-0014](docs/adr/0014-http-ingest-own-the-boundary.md)) |
+| `crates/fuzz-support` | Dev-only seeded mutator for parser hardening tests. A `[dev-dependencies]` path dependency only, never in a shipped binary |
 | `utility/` | Development-only tools: not part of the product, no stability guarantee — see its own README |
 | `docs/` | Design philosophy, requirements, architecture, and ADRs — see [`docs/README.md`](docs/README.md) |
 

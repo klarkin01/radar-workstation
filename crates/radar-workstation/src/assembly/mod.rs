@@ -29,6 +29,46 @@ use context::VolumeContext;
 /// worth it.
 const WATCHDOG_TIMEOUT_DEFAULT: Duration = Duration::from_secs(12 * 60);
 
+/// How far a Message 5 commanded angle may sit from the sweep's measured
+/// (median) angle before [`cut_angle`] refuses it (ADR-0031 D-2). Measured
+/// angles drift up to ~0.08° from commanded (`nexrad_decoder::VcpElevationCut`);
+/// adjacent cuts in any WSR-88D VCP are ≥ 0.4° apart, so 0.25° accepts drift
+/// and rejects a Message 5 that indexes a different cut.
+pub const CUT_ANGLE_TOLERANCE_DEG: f32 = 0.25;
+
+/// A sweep's representative measured angle: the median of its radials'
+/// elevations, or `fallback` for an empty sweep. Not the first radial's
+/// angle (which `Sweep::elevation_deg` records): a sweep's first radials can
+/// still be settling — measured 2026-11-22 on KATX VCP 215, elevation 1's
+/// first radial read 0.2829° against a 0.4834° commanded cut, while the
+/// Doppler half (antenna already settled) read 0.4834°. [`cut_angle`]'s
+/// tolerance check needs the angle the sweep was actually flown at.
+fn median_elevation_deg(radials: &[Radial], fallback: f32) -> f32 {
+    let mut angles: Vec<f32> = radials.iter().map(|r| r.elevation_deg).filter(|a| a.is_finite()).collect();
+    if angles.is_empty() {
+        return fallback;
+    }
+    let mid = angles.len() / 2;
+    let (_, median, _) = angles.select_nth_unstable_by(mid, f32::total_cmp);
+    *median
+}
+
+/// A sweep's tilt identity (ADR-0031 D-2): the Message 5 commanded angle for
+/// `elevation_number` (1-based into `vcp.elevations`) when one exists and lies
+/// within [`CUT_ANGLE_TOLERANCE_DEG`] of `measured_deg`, else `measured_deg`
+/// itself. The fallback almost never matches a commanded angle across
+/// frames, so a sweep without a trustworthy Message 5 fails conservatively:
+/// it is reported as lacking the tilt, never shown under another angle's
+/// selection. Pure.
+pub fn cut_angle(vcp: Option<&VcpDefinition>, elevation_number: u8, measured_deg: f32) -> f32 {
+    let index = (elevation_number as usize).checked_sub(1);
+    vcp.zip(index)
+        .and_then(|(vcp, i)| vcp.elevations.get(i))
+        .map(|cut| cut.elevation_deg)
+        .filter(|commanded| (commanded - measured_deg).abs() <= CUT_ANGLE_TOLERANCE_DEG)
+        .unwrap_or(measured_deg)
+}
+
 pub struct AssemblyConfig {
     pub watchdog_timeout: Duration,
 }
@@ -69,7 +109,11 @@ pub enum AssemblyEvent {
     /// which is always populated by the time any sweep can close (the first
     /// radial of the volume sets it before any elevation-closure signal is
     /// possible).
-    SweepClosed { sweep: Arc<Sweep>, volume: VolumeId, vcp_number: u16 },
+    ///
+    /// `cut_deg` is the sweep's commanded cut angle ([`cut_angle`], ADR-0031
+    /// D-2): the tilt identity the timeline matches across volumes. The
+    /// sweep's own measured `elevation_deg` stays the input to beam geometry.
+    SweepClosed { sweep: Arc<Sweep>, volume: VolumeId, vcp_number: u16, cut_deg: f32 },
     VolumeClosed { volume: VolumeScan },
     /// Radials arrived for an elevation number whose sweep is already
     /// closed. `count` radials were discarded, unmutated, for that one
@@ -298,11 +342,13 @@ impl VolumeAssembler {
 
     fn close_sweep(&mut self, builder: SweepBuilder, complete: bool, events: &mut Vec<AssemblyEvent>) {
         let elevation_number = builder.elevation_number;
+        let measured_deg = median_elevation_deg(&builder.radials, builder.elevation_deg);
+        let cut_deg = cut_angle(self.context.vcp.as_ref(), elevation_number, measured_deg);
         let sweep = Arc::new(builder.close(complete));
         self.closed_elevations.insert(elevation_number);
         self.closed_sweeps.push(Arc::clone(&sweep));
         let volume = VolumeId { julian_date: self.context.julian_date, scan_time_ms: self.context.scan_time_ms };
-        events.push(AssemblyEvent::SweepClosed { sweep, volume, vcp_number: self.context.vcp_number() });
+        events.push(AssemblyEvent::SweepClosed { sweep, volume, vcp_number: self.context.vcp_number(), cut_deg });
     }
 
     fn finish_volume(&mut self, status: VolumeStatus, events: &mut Vec<AssemblyEvent>) {

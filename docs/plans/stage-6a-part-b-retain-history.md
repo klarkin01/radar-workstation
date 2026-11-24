@@ -1,7 +1,6 @@
 # Implementation Plan — Stage 6a Part B: Retain history
 
-**Status:** implemented in the working tree (2026-09-04), pending developer review and
-commit — see §10 for the measurements and the §3.5 default the developer should confirm.
+**Status:** Implemented 2026-09-04 (commit `343c44a`) — see §10 Results
 **Date:** 2026-09-04
 **Parent:** `docs/plans/stage-6a-time-handling.md` §2 (what does not exist), §3
 Part B (B1–B4), and §5 (the open questions B1 must answer). This document is
@@ -940,3 +939,61 @@ apparent application-owned heap growth — the run's own log shows only the expe
 11.46 MB overlay allocation as a large one-time cost. Recorded as measured rather than
 reconciled; see ADR-0030 §"Decision" 5 for the full note and the follow-up (re-measure on
 the ADR-0024 hybrid-GPU box) this plan does not resolve.
+
+### §6 validation outcomes (added 2026-11-21, checkpoint step A1)
+
+*Measured on `time_handling` at `343c44a`, on the same machine as the baseline above, with
+live KDOX data (VCP 35, ~7.5 min per volume). The test and supply-chain results are in
+`stage-6a-part-a-stale-data.md` §9 and are not repeated here. In short, the workspace
+suite and every `#[ignore]`d live and GPU test pass, and `cargo deny` / `cargo audit` fail
+on new RustSec advisories against already-locked TLS crates.*
+
+**Headless, three policies run at once for 45 min (5 volume boundaries).** Run with stdin
+held open. `< /dev/null` exits immediately (Part A §9).
+
+| Policy | `frames=` progression | Final `hist=` | `HistoryBudgetBound` | VmHWM | `Pss_Anon` |
+|---|---|---|---|---|---|
+| `frames = 3`, `budget_mb = 320` | 0 → 1 → 2 → 3, then **held at 3/3** for 3 more boundaries | 74 MiB | 0 | 196 MB | 165 MB |
+| default (`12` / `320`) | 0 → 1 → … → 6/12, one step per boundary | 176 MiB | 0 (6 × ~34 MiB never reached 320) | 259 MB | 252 MB |
+| `budget_mb = 0` | **held at 1/1** throughout | 5 MiB (the scanning volume only) | 0 | 121 MB | 107 MB |
+
+`frames=` climbs to the policy and stops. `hist=` tracks it at **~34 MiB per VCP-35
+frame**, consistent with the W1 row above (39.80 MB = 37.96 MiB, measured on a different
+volume). `HistoryBudgetBound` appeared at most once, in fact never, because no run reached
+its byte budget. The headless VmHWM over the `budget_mb = 0` run tracks `hist=`: +75 MB at
+74 MiB and +138 MB at 176 MiB. That gap is grids plus the snapshot/compute transients
+around them. No grid is retained outside the ring.
+
+**Windowed, two instances at once for 40 min, NVIDIA adapter.**
+
+| Policy | VmHWM | VmRSS − Pss (shared mappings) | `Pss_Anon` |
+|---|---|---|---|
+| `budget_mb = 0` | **328 MB** | ~126 MB | **155 MB** |
+| default (`12` / `320`), ~5 frames retained by the end (estimated from elapsed time; the window has no `frames=` readout) | **456 MB** | ~125 MB | **293 MB** |
+
+What this says about the < 200 MB target (§3.5). With history disabled, the windowed
+process's own anonymous memory is **155 MB, inside the target**. VmHWM is not: 328 MB, down
+from the W1 baseline's 393 MB, which was an 18-minute Stage 5 build. About 126 MB of the
+RSS is shared file and driver mappings. They are counted in full by RSS but are not owned
+by this process. Rendering accounts for +48 MB of `Pss_Anon` over headless (overlay
+buffers, egui, driver-private allocations). That supports ADR-0030 §5's hypothesis that
+the gap to 200 MB is driver mappings, and it is now a measurement rather than a guess.
+Re-running on the AMD iGPU (`RADAR_GPU=integrated`) is not possible on this box, because
+the iGPU drives no display and fails surface bring-up by design (ADR-0024). The default
+row (456 MB) is inside the amended `< 200 + 320 = 520 MB` target, with ~5 of the ~8–9
+frames the budget allows retained.
+
+**Windowed behaviour checks (FR-DA-3 carry-forward, unchanged product/tilt/colours/cursor
+readout, instant switching, the age readout's alert colour): not confirmed by eye.** This
+session could not see the screen. The properties are covered by the §5 test matrix
+(`live_sweeps_folds_newest_first_and_carries_elevations_forward`,
+`walking_the_selection_across_every_frame_uploads_nothing_once_resident`, the
+`view_state_is_unchanged…` test, and the six GPU offscreen tests, all passing). The one
+remaining step is for the developer to look at a live window.
+
+**§3.5 default budget (CK-11).** `history.frames = 12`, `history.budget_mb = 320` are
+**kept as committed**. The measurements above give no reason to change them: ~34 MiB per
+VCP-35 frame gives ~9 frames (~68 min) under 320 MB, and the windowed instance stays
+inside the amended target. **Developer sign-off is still outstanding.** This session
+recorded evidence, not the product decision. Replace this line with "confirmed
+YYYY-MM-DD" or the new number.

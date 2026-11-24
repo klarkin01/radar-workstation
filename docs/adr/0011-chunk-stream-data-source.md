@@ -18,6 +18,7 @@ Individual data chunks delivered to S3 as the radar antenna rotates. Each chunk
 represents approximately 120 radials (~100° of azimuthal coverage at one sweep). Chunks
 are available within seconds of the antenna completing that portion of the scan. Chunks
 persist for a maximum of 24 hours before being purged.
+<!-- corrected 2026-09-03: observed ~48 h, not 24 h, and not a contract either way; see Erratum -->
 
 Three chunk types exist per volume scan:
 - `-S` (start): Volume metadata — VCP definition, site calibration, clutter map, RDA
@@ -92,7 +93,7 @@ volume — a `VolumeScan` that has some sweeps fully populated and others absent
 a feature, not a limitation: users see the lowest sweep within ~60 seconds of scan start
 rather than waiting for the full volume.
 
-**24-hour chunk retention.** Chunks are purged after 24 hours. Historical analysis
+**24-hour chunk retention.** <!-- corrected 2026-09-03: observed ~48 h, not 24 h; see Erratum --> Chunks are purged after 24 hours. Historical analysis
 (loading past events) must use the assembled volume archive. The application should
 switch data sources transparently based on whether the requested time is within the
 chunk retention window.

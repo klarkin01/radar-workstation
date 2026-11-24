@@ -39,9 +39,17 @@ pub fn apply(state: &mut RadarState, event: crate::compute::StateUpdate, now: In
     use crate::compute::StateUpdate;
 
     match event {
-        StateUpdate::SweepGridded { elevation_number, elevation_deg, volume, vcp_number, grids } => {
+        StateUpdate::SweepGridded { elevation_number, elevation_deg, cut_deg, volume, vcp_number, grids } => {
             let landed = state.history.head_mut(volume, vcp_number, now).map(|frame| {
-                frame.insert_sweep(DisplaySweep { elevation_number, elevation_deg, volume, vcp_number, received: now, grids });
+                frame.insert_sweep(DisplaySweep {
+                    elevation_number,
+                    elevation_deg,
+                    cut_deg,
+                    volume,
+                    vcp_number,
+                    received: now,
+                    grids,
+                });
             });
             if landed.is_err() {
                 return (false, vec![Event::LateVolumeDiscarded { volume }]);
@@ -121,6 +129,7 @@ mod tests {
             gate_width_m: 250,
             elevation_number,
             elevation_deg: elevation_number as f32 * 0.5,
+            cut_deg: elevation_number as f32 * 0.5,
             nyquist_velocity_mps: Some(8.0),
             scale: 2.0,
             offset: 66.0,
@@ -133,6 +142,7 @@ mod tests {
         StateUpdate::SweepGridded {
             elevation_number,
             elevation_deg: elevation_number as f32 * 0.5,
+            cut_deg: elevation_number as f32 * 0.5,
             volume: volume_id(scan_time_ms),
             vcp_number,
             grids: vec![grid(DisplayProduct::Reflectivity, elevation_number)],

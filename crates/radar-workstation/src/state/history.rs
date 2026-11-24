@@ -27,6 +27,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::assembly::VolumeId;
+use crate::compute::cut::{self, CutKey};
 use crate::compute::{DisplayProduct, SweepGrid};
 use crate::event::Event;
 
@@ -110,28 +111,26 @@ impl Frame {
         self.bytes = self.bytes + new_bytes - old_bytes;
     }
 
-    /// One lookup rule for both a base product (`Some(elevation_number)`)
-    /// and a derived one (`None`) — `render::radar::grid_key` keys its GPU
-    /// cache the same way, so this is defined once and shared rather than
-    /// matched twice.
-    pub fn grid(&self, product: DisplayProduct, elevation_number: Option<u8>) -> Option<&Arc<SweepGrid>> {
-        match elevation_number {
-            Some(el) => self.sweeps.get(&el)?.grids.iter().find(|g| g.product == product),
-            None => self.derived.get(&product),
+    /// This frame's own grid for `product` at `cut` (ADR-0031 D-3): the
+    /// derived grid for Echo Tops/VIL (which have no tilt, so `cut` is
+    /// ignored), else [`cut::best_at_cut`] over this volume's own sweeps.
+    /// `None` when this volume did not scan it — never a substitute.
+    pub fn grid_at_cut(&self, product: DisplayProduct, cut: Option<CutKey>) -> Option<&Arc<SweepGrid>> {
+        if product.is_derived() {
+            return self.derived.get(&product);
         }
+        let grids = self.sweeps.values().flat_map(|s| s.grids.iter()).map(|g| (self.volume, g));
+        cut::best_at_cut(grids, product, cut?).map(|(_, g)| g)
     }
 }
 
-/// Whether `product` keys by elevation or once per volume: `None` for
-/// Echo Tops/VIL (volume-derived, one per volume), `Some(elevation_number)`
-/// for every base product (one per tilt). Shared by [`Frame::grid`]'s
-/// lookup and `render::radar::grid_key`'s GPU cache key so the rule is
-/// defined exactly once.
+/// The GPU cache key's tilt component (`render::radar::grid_key`): `None`
+/// for Echo Tops/VIL (one per volume), `Some(elevation_number)` for a base
+/// product. Keyed by elevation *number*, not cut, because two grids can
+/// share a cut within one frame (a split cut's two halves, a SAILS
+/// re-closure) and a cache key must name exactly one grid.
 pub fn key_elevation(product: DisplayProduct, elevation_number: u8) -> Option<u8> {
-    match product {
-        DisplayProduct::EchoTops | DisplayProduct::Vil => None,
-        _ => Some(elevation_number),
-    }
+    (!product.is_derived()).then_some(elevation_number)
 }
 
 /// Operator-set retention bounds (ADR-0030 §3.3). Configuration, not view
@@ -318,15 +317,18 @@ impl FrameRing {
 /// the newest frame's**. That stop is what reproduces Stage 2's
 /// `sweeps.clear()`-on-VCP-change without deleting any history (ADR-0030
 /// §3.4). Sorted by elevation number, as `RadarState.sweeps` always was.
-pub fn live_sweeps(frames: &VecDeque<Arc<Frame>>) -> Vec<DisplaySweep> {
-    let Some(newest_vcp) = frames.back().map(|f| f.vcp_number) else {
+/// Takes the ring (`&VecDeque`) or a snapshot's frames (`&Vec`) alike.
+pub fn live_sweeps<'a, I>(frames: I) -> Vec<DisplaySweep>
+where
+    I: IntoIterator<Item = &'a Arc<Frame>>,
+    I::IntoIter: DoubleEndedIterator,
+{
+    let mut newest_first = frames.into_iter().rev().peekable();
+    let Some(newest_vcp) = newest_first.peek().map(|f| f.vcp_number) else {
         return Vec::new();
     };
     let mut out: BTreeMap<u8, DisplaySweep> = BTreeMap::new();
-    for frame in frames.iter().rev() {
-        if frame.vcp_number != newest_vcp {
-            break;
-        }
+    for frame in newest_first.take_while(|f| f.vcp_number == newest_vcp) {
         for (elevation_number, sweep) in &frame.sweeps {
             out.entry(*elevation_number).or_insert_with(|| sweep.clone());
         }
@@ -334,21 +336,44 @@ pub fn live_sweeps(frames: &VecDeque<Arc<Frame>>) -> Vec<DisplaySweep> {
     out.into_values().collect()
 }
 
-/// Echo Tops / VIL from the newest frame that has them, within the newest
-/// frame's VCP. Same stop rule as [`live_sweeps`], same reason.
-pub fn live_derived(frames: &VecDeque<Arc<Frame>>) -> Vec<Arc<SweepGrid>> {
-    let Some(newest_vcp) = frames.back().map(|f| f.vcp_number) else {
-        return Vec::new();
-    };
-    for frame in frames.iter().rev() {
-        if frame.vcp_number != newest_vcp {
-            break;
-        }
-        if !frame.derived.is_empty() {
-            return frame.derived.values().cloned().collect();
-        }
+/// The frame the live view's Echo Tops / VIL come from: the newest frame
+/// that has them, within the newest frame's VCP. Same stop rule as
+/// [`live_sweeps`], same reason.
+pub fn live_derived_source<'a, I>(frames: I) -> Option<&'a Arc<Frame>>
+where
+    I: IntoIterator<Item = &'a Arc<Frame>>,
+    I::IntoIter: DoubleEndedIterator,
+{
+    let mut newest_first = frames.into_iter().rev().peekable();
+    let newest_vcp = newest_first.peek()?.vcp_number;
+    newest_first.take_while(|f| f.vcp_number == newest_vcp).find(|f| !f.derived.is_empty())
+}
+
+/// The live derived-product view: [`live_derived_source`]'s grids.
+pub fn live_derived<'a, I>(frames: I) -> Vec<Arc<SweepGrid>>
+where
+    I: IntoIterator<Item = &'a Arc<Frame>>,
+    I::IntoIter: DoubleEndedIterator,
+{
+    live_derived_source(frames).map(|f| f.derived.values().cloned().collect()).unwrap_or_default()
+}
+
+/// The live view's grid for `product` at `cut`, with the volume it came from
+/// (ADR-0031 D-3/D-4): [`cut::best_at_cut`] over the live fold `sweeps` for
+/// a base product, or the [`live_derived_source`] frame's grid for a
+/// derived one. The same rule as [`Frame::grid_at_cut`], over the fold.
+pub fn live_grid_at_cut<'a>(
+    frames: &'a [Arc<Frame>],
+    sweeps: &'a [DisplaySweep],
+    product: DisplayProduct,
+    cut: Option<CutKey>,
+) -> Option<(VolumeId, &'a Arc<SweepGrid>)> {
+    if product.is_derived() {
+        let frame = live_derived_source(frames)?;
+        return frame.derived.get(&product).map(|g| (frame.volume, g));
     }
-    Vec::new()
+    let grids = sweeps.iter().flat_map(|s| s.grids.iter().map(move |g| (s.volume, g)));
+    cut::best_at_cut(grids, product, cut?)
 }
 
 #[cfg(test)]
@@ -372,6 +397,7 @@ mod tests {
             gate_width_m: 250,
             elevation_number,
             elevation_deg: elevation_number as f32 * 0.5,
+            cut_deg: elevation_number as f32 * 0.5,
             nyquist_velocity_mps: Some(8.0),
             scale: 2.0,
             offset: 66.0,
@@ -384,6 +410,7 @@ mod tests {
         DisplaySweep {
             elevation_number,
             elevation_deg: elevation_number as f32 * 0.5,
+            cut_deg: elevation_number as f32 * 0.5,
             volume,
             vcp_number,
             received: t0(),
@@ -597,5 +624,53 @@ mod tests {
         let derived = live_derived(&frames);
         assert_eq!(derived.len(), 1, "the newest frame has no derived products yet; fall back to the older one");
         assert_eq!(derived[0].product, DisplayProduct::Vil);
+    }
+
+    #[test]
+    fn grid_at_cut_reads_only_this_frames_own_sweeps() {
+        let mut frame = Frame::new(volume_id(100), 35, t0());
+        frame.insert_sweep(sweep(1, volume_id(100), 35, vec![grid(DisplayProduct::Reflectivity, 1, 16)]));
+        assert!(frame.grid_at_cut(DisplayProduct::Reflectivity, Some(cut::cut_key(0.5))).is_some());
+        assert!(frame.grid_at_cut(DisplayProduct::Reflectivity, Some(cut::cut_key(1.0))).is_none(), "absent cut");
+        assert!(frame.grid_at_cut(DisplayProduct::Velocity, Some(cut::cut_key(0.5))).is_none(), "absent product");
+        assert!(frame.grid_at_cut(DisplayProduct::Reflectivity, None).is_none(), "no cut selected");
+    }
+
+    #[test]
+    fn grid_at_cut_of_a_derived_product_ignores_the_cut() {
+        let mut frame = Frame::new(volume_id(100), 35, t0());
+        frame.set_derived(vec![grid(DisplayProduct::Vil, 0, 16)]);
+        assert!(frame.grid_at_cut(DisplayProduct::Vil, None).is_some());
+        assert!(frame.grid_at_cut(DisplayProduct::Vil, Some(cut::cut_key(8.0))).is_some());
+    }
+
+    #[test]
+    fn live_grid_at_cut_reports_the_volume_a_carried_forward_grid_came_from() {
+        let mut ring = FrameRing::new(RetentionPolicy { frames: 4, budget_bytes: usize::MAX });
+        ring.head_mut(volume_id(100), 35, t0())
+            .unwrap()
+            .insert_sweep(sweep(2, volume_id(100), 35, vec![grid(DisplayProduct::Reflectivity, 2, 16)]));
+        ring.head_mut(volume_id(200), 35, t0())
+            .unwrap()
+            .insert_sweep(sweep(1, volume_id(200), 35, vec![grid(DisplayProduct::Reflectivity, 1, 16)]));
+        let frames = ring.snapshot_frames();
+        let sweeps = live_sweeps(&frames);
+
+        let (v, _) = live_grid_at_cut(&frames, &sweeps, DisplayProduct::Reflectivity, Some(cut::cut_key(1.0))).unwrap();
+        assert_eq!(v, volume_id(100), "elevation 2 (1.0°) is carried forward from the older frame");
+        let (v, _) = live_grid_at_cut(&frames, &sweeps, DisplayProduct::Reflectivity, Some(cut::cut_key(0.5))).unwrap();
+        assert_eq!(v, volume_id(200));
+    }
+
+    #[test]
+    fn live_derived_source_names_the_frame_live_derived_reads() {
+        let mut ring = FrameRing::new(RetentionPolicy { frames: 4, budget_bytes: usize::MAX });
+        ring.head_mut(volume_id(100), 35, t0()).unwrap().set_derived(vec![grid(DisplayProduct::Vil, 0, 16)]);
+        ring.head_mut(volume_id(200), 35, t0()).unwrap();
+        let frames = ring.snapshot_frames();
+        assert_eq!(live_derived_source(&frames).map(|f| f.volume), Some(volume_id(100)));
+        let sweeps = live_sweeps(&frames);
+        let (v, _) = live_grid_at_cut(&frames, &sweeps, DisplayProduct::Vil, None).unwrap();
+        assert_eq!(v, volume_id(100));
     }
 }

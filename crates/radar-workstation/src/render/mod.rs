@@ -3,16 +3,24 @@
 //! `snapshot()` and holds no lock. This is the module `headless::run` was a
 //! placeholder for (§3.5 keeps `headless` reachable behind `--headless`).
 //!
-//! **Spatial stability (FR-NI-4, S4-g).** `ViewState` lives in
-//! [`view`] and is mutated only by [`view`] functions called from
-//! [`input`]. No function that takes a `StateSnapshot` takes `&mut
-//! ViewState`; `tests::view_state_is_unchanged_by_any_sequence_of_state_updates`
-//! guards that boundary.
+//! **Spatial stability (FR-NI-4, S4-g; ADR-0031 D-12).** `ViewState` lives
+//! in [`view`] and changes on operator input — and, while playing, on the
+//! playback clock ([`timeline::tick`]) — never on a state update. No
+//! function that takes a `StateSnapshot` takes `&mut ViewState`;
+//! `tests::view_state_is_unchanged_by_any_sequence_of_state_updates` guards
+//! that boundary in every timeline mode.
+//!
+//! **One resolution per frame (ADR-0031 D-4).** `redraw` calls
+//! [`timeline::resolve`] once; the radar draw, residency, the status bar,
+//! the scrubber, the cursor readout and the next frame's keyboard actions
+//! all read that one [`timeline::Resolved`].
 //!
 //! **Frame pacing (§3.3).** Redraw on input, resize, egui's own repaint
 //! request, or an idle tick (2 Hz) when `revision` or the time-derived
-//! chrome text changed. `PresentMode::Fifo` so an interaction burst cannot
-//! spin the GPU past the display rate.
+//! chrome text changed. While playing, one redraw per frame step
+//! (`WaitUntil(next_step)`, D-11) — never continuous redraw — and a stopped
+//! timeline paces exactly as before. `PresentMode::Fifo` so an interaction
+//! burst cannot spin the GPU past the display rate.
 
 pub mod adapter;
 pub mod gpu;
@@ -23,6 +31,9 @@ mod offscreen;
 pub mod overlay;
 pub mod radar;
 pub mod reference;
+#[cfg(test)]
+mod test_support;
+pub mod timeline;
 pub mod ui;
 pub mod view;
 
@@ -38,11 +49,12 @@ use winit::keyboard::{Key, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use radar_workstation::assembly::VolumeId;
+use radar_workstation::compute::cut::CutKey;
 use radar_workstation::compute::palette::{self, Palette};
-use radar_workstation::compute::{DisplayProduct, SweepGrid};
+use radar_workstation::compute::DisplayProduct;
 use radar_workstation::event::Event;
 use radar_workstation::sites::Site;
-use radar_workstation::state::{AppState, StateSnapshot};
+use radar_workstation::state::AppState;
 
 use self::gpu::Gpu;
 use self::input::Action;
@@ -50,8 +62,9 @@ use self::input::Action;
 pub use self::gpu::RenderError;
 use self::labels::PlacedLabel;
 use self::overlay::OverlayRenderer;
-use self::radar::RadarRenderer;
+use self::radar::{GridKey, RadarRenderer, Selection};
 use self::reference::ReferenceRenderer;
+use self::timeline::{Resolved, Timeline};
 use self::view::ViewState;
 
 const IDLE_TICK: Duration = Duration::from_millis(500);
@@ -67,6 +80,18 @@ pub struct PersistedView {
     pub product: DisplayProduct,
     pub show_highways: bool,
     pub show_reference: bool,
+    /// `timeline.loop_frames`, changed by `,` / `.` (D-13).
+    pub loop_frames: usize,
+}
+
+/// The view a launch starts from, from configuration (`main`).
+pub struct InitialView {
+    pub size: (u32, u32),
+    pub product: DisplayProduct,
+    pub show_highways: bool,
+    pub show_reference: bool,
+    /// Always `Live` (D-7); carries the loop length and pacing preferences.
+    pub timeline: Timeline,
 }
 
 /// Run the render loop until the window closes or `Ctrl+Q`. Returns the
@@ -78,11 +103,9 @@ pub fn run(
     state: Arc<AppState>,
     site: &'static Site,
     runtime: tokio::runtime::Handle,
-    initial_size: (u32, u32),
-    initial_product: DisplayProduct,
-    initial_show_highways: bool,
-    initial_show_reference: bool,
+    initial: InitialView,
 ) -> Result<PersistedView, RenderError> {
+    let initial_size = initial.size;
     let event_loop = EventLoop::new().map_err(|e| RenderError::EventLoop(e.to_string()))?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
@@ -91,9 +114,9 @@ pub fn run(
         state.report(event);
     }
 
-    let mut view = ViewState::initial((initial_size.0 as f32, initial_size.1 as f32), initial_product);
-    view.show_highways = initial_show_highways;
-    view.show_reference = initial_show_reference;
+    let mut view = ViewState::initial((initial_size.0 as f32, initial_size.1 as f32), initial.product, initial.timeline);
+    view.show_highways = initial.show_highways;
+    view.show_reference = initial.show_reference;
 
     let mut app = App {
         state,
@@ -112,6 +135,8 @@ pub fn run(
         initial_size,
         last_uploaded_selection: None,
         history_upload_pending: false,
+        resolved: Resolved::default(),
+        play_deadline: None,
         last_drawn_revision: None,
         last_chrome_text: String::new(),
         show_help: false,
@@ -165,8 +190,13 @@ pub fn run(
         product: app.view.product,
         show_highways: app.view.show_highways,
         show_reference: app.view.show_reference,
+        loop_frames: app.view.timeline.loop_frames,
     })
 }
+
+/// What residency was last synced for: the revision plus
+/// [`Selection::key`] (ADR-0030 §3.6, ADR-0031 D-5).
+type UploadKey = (u64, DisplayProduct, Option<CutKey>, Option<VolumeId>, Option<GridKey>);
 
 struct App {
     state: Arc<AppState>,
@@ -186,17 +216,21 @@ struct App {
     overlay: Option<OverlayRenderer>,
     view: ViewState,
     initial_size: (u32, u32),
-    /// `(revision, product, elevation_number)` — the residency selection
-    /// last synced to the GPU (ADR-0030 §3.6): a product or elevation
-    /// switch alone must still re-plan residency (the tail depends on the
-    /// selection), even though `revision` did not change.
-    last_uploaded_selection: Option<(u64, DisplayProduct, u8)>,
+    /// The residency selection last synced to the GPU (ADR-0030 §3.6): a
+    /// product, tilt, focus or displayed-grid change alone must still
+    /// re-plan residency, even though `revision` did not change.
+    last_uploaded_selection: Option<UploadKey>,
     /// Set when the last `sync` call left `SyncPlan::more_pending` — the
     /// history tail is still uploading under the per-frame rate limit
     /// (ADR-0030 §3.7). Drives an immediate redraw *and* another `sync`
     /// call next frame even though `last_uploaded_selection` hasn't
     /// changed, until the tail catches up.
     history_upload_pending: bool,
+    /// The last frame's timeline resolution (D-4) — what keyboard actions
+    /// between frames act on, since it is what the operator is looking at.
+    resolved: Resolved,
+    /// The playback clock's next step while playing (D-11), else `None`.
+    play_deadline: Option<Instant>,
     last_drawn_revision: Option<u64>,
     last_chrome_text: String,
     show_help: bool,
@@ -247,6 +281,8 @@ impl App {
 
     fn apply_action(&mut self, action: Action, event_loop: &ActiveEventLoop) {
         let vp = self.viewport();
+        let tl = &mut self.view.timeline;
+        let r = &self.resolved;
         match action {
             Action::SelectProduct(p) => self.view.product = p,
             Action::ElevationUp => self.step_elevation(1),
@@ -259,62 +295,24 @@ impl App {
             Action::ToggleHighways => self.view.show_highways = !self.view.show_highways,
             Action::ToggleHelp => self.show_help = !self.show_help,
             Action::Quit => event_loop.exit(),
+            Action::PlayPause => timeline::toggle_play(tl, r, Instant::now()),
+            Action::StepBackward => timeline::step(tl, r, false),
+            Action::StepForward => timeline::step(tl, r, true),
+            Action::JumpToLive => timeline::jump_to_live(tl),
+            Action::LoopShorter => timeline::adjust_loop(tl, -1),
+            Action::LoopLonger => timeline::adjust_loop(tl, 1),
         }
     }
 
-    /// Move the selection by `dir` steps through the elevations present, in
-    /// angle order. Never changes the selection to something absent silently
-    /// — if there is nothing to step to, the selection stays put (§3.8).
+    /// Move the tilt by one distinct commanded angle among those the
+    /// current resolution's source carries (ADR-0031 D-2): a split cut's two
+    /// halves are one angle, so PageUp never visits the second half. Never
+    /// changes the selection to something absent silently — if there is
+    /// nothing to step to, the selection stays put (§3.8).
     fn step_elevation(&mut self, dir: i32) {
-        let snapshot = self.state.snapshot();
-        let mut elevations: Vec<(u8, f32)> =
-            snapshot.sweeps.iter().map(|s| (s.elevation_number, s.elevation_deg)).collect();
-        elevations.sort_by(|a, b| a.1.total_cmp(&b.1));
-        if elevations.is_empty() {
-            return;
+        if let Some(next) = timeline::step_cut(&self.resolved.cuts, self.resolved.cut, dir) {
+            self.view.cut = Some(next);
         }
-        let current = elevations.iter().position(|(n, _)| *n == self.view.elevation_number);
-        let next_idx = match current {
-            Some(i) => i as i32 + dir,
-            None => 0,
-        };
-        if let Some((n, _)) = next_idx.try_into().ok().and_then(|i: usize| elevations.get(i)) {
-            self.view.elevation_number = *n;
-        }
-    }
-
-    /// The grid `Arc` for the current selection, plus its angle and the
-    /// `VolumeId` of the frame it came from — `radar::RadarRenderer::draw`'s
-    /// cache key now includes it (ADR-0030). Also sets the first-run
-    /// default (§3.8). Returns an owned `Arc` clone (a refcount bump) so the
-    /// caller has no borrow entangled with `self`.
-    fn resolve_selection(&mut self, snapshot: &StateSnapshot) -> (Option<Arc<SweepGrid>>, Option<f32>, Option<VolumeId>) {
-        if self.view.elevation_number == 0 {
-            if let Some(lowest) =
-                snapshot.sweeps.iter().min_by(|a, b| a.elevation_deg.total_cmp(&b.elevation_deg))
-            {
-                self.view.elevation_number = lowest.elevation_number;
-            }
-        }
-
-        if matches!(self.view.product, DisplayProduct::EchoTops | DisplayProduct::Vil) {
-            let g = snapshot.derived.iter().find(|g| g.product == self.view.product).cloned();
-            let deg = g.as_ref().map(|g| g.elevation_deg);
-            // `snapshot.derived` is the live fold's pick — "the newest frame
-            // that has it" (`history::live_derived`) — which need not be the
-            // literal newest retained frame. Relocate it by `Arc` identity
-            // rather than re-deriving the fold's own rule a second time.
-            let volume = g.as_ref().and_then(|g| {
-                snapshot.frames.iter().rev().find_map(|frame| {
-                    frame.derived.get(&g.product).filter(|cached| Arc::ptr_eq(cached, g)).map(|_| frame.volume)
-                })
-            });
-            return (g, deg, volume);
-        }
-
-        let sweep = snapshot.sweeps.iter().find(|s| s.elevation_number == self.view.elevation_number);
-        let grid = sweep.and_then(|s| s.grids.iter().find(|g| g.product == self.view.product).cloned());
-        (grid, sweep.map(|s| s.elevation_deg), sweep.map(|s| s.volume))
     }
 
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
@@ -325,7 +323,11 @@ impl App {
 
         let state = Arc::clone(&self.state);
         let snapshot = state.snapshot();
-        let (selected_grid, selected_deg, selected_volume) = self.resolve_selection(&snapshot);
+        // The playback clock first (it acts on what was on screen), then
+        // this frame's one resolution (D-4, D-11).
+        self.play_deadline = timeline::tick(&mut self.view.timeline, &self.resolved, Instant::now());
+        self.resolved = timeline::resolve(&self.view.timeline, self.view.product, self.view.cut, &snapshot);
+        let resolved = self.resolved.clone();
 
         let window = self.window.clone().unwrap();
         let egui_ctx = self.egui_ctx.clone();
@@ -335,7 +337,6 @@ impl App {
         let site = self.site;
         let cursor_pos = self.cursor_pos;
         let recent = state.recent_events(1).pop().map(|(_, s)| s);
-        let displayed_scan = self.displayed_scan(&snapshot);
         let palette = self.palettes.get(&view.product);
 
         // City/site labels (§9.2): the declutter pass is recomputed only
@@ -365,14 +366,20 @@ impl App {
         let reference = self.reference.as_ref().unwrap();
         let overlay = self.overlay.as_ref();
 
-        let upload_key = (snapshot.revision, view.product, view.elevation_number);
+        let selection = Selection {
+            product: view.product,
+            cut: resolved.cut,
+            focus: timeline::residency_focus(&resolved),
+            displayed: resolved.source.zip(resolved.grid.as_ref()),
+        };
+        let (product, cut, focus, displayed) = selection.key();
+        let upload_key = (snapshot.revision, product, cut, focus, displayed);
         // Re-sync when the selection changed *or* the last sync left the
         // history tail mid-upload (ADR-0030 §3.7) — `last_uploaded_selection`
         // alone would never call `sync` again once it matches, even though
         // the tail rate limit means one call is not always enough.
         if self.last_uploaded_selection != Some(upload_key) || self.history_upload_pending {
-            let (events, more_pending) =
-                radar.sync(&gpu.device, &gpu.queue, &snapshot, view.product, view.elevation_number, &self.palettes);
+            let (events, more_pending) = radar.sync(&gpu.device, &gpu.queue, &snapshot, &selection, &self.palettes);
             for event in events {
                 state.report(event);
             }
@@ -428,9 +435,7 @@ impl App {
             site,
             snapshot: &snapshot,
             view: &view,
-            selected_grid: selected_grid.as_deref(),
-            selected_elevation_deg: selected_deg,
-            displayed_scan,
+            resolved: &resolved,
             palette,
             cursor_world,
             recent_event: recent,
@@ -440,7 +445,8 @@ impl App {
             viewport: vp,
             placed_labels: &self.placed_labels,
         };
-        let full_output = egui_ctx.run_ui(raw_input, |ui| ui::draw(ui, &chrome));
+        let mut chrome_output = ui::ChromeOutput::default();
+        let full_output = egui_ctx.run_ui(raw_input, |ui| chrome_output = ui::draw(ui, &chrome));
         egui_state.handle_platform_output(&window, full_output.platform_output);
         let tris = egui_ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
 
@@ -480,7 +486,7 @@ impl App {
             if let Some(overlay) = overlay {
                 overlay.draw(&gpu.queue, &mut pass, camera, view.show_highways);
             }
-            if let (Some(grid), Some(volume)) = (selected_grid.as_deref(), selected_volume) {
+            if let (Some(grid), Some(volume)) = (resolved.grid.as_deref(), resolved.source) {
                 radar.draw(&gpu.device, &gpu.queue, &mut pass, grid, volume, camera);
             }
             if view.show_reference {
@@ -535,27 +541,27 @@ impl App {
             .unwrap_or(IDLE_TICK);
         let delay = if self.history_upload_pending { Duration::ZERO } else { egui_delay.min(IDLE_TICK) };
         self.next_deadline = Instant::now() + delay;
-    }
 
-    /// Identity of the sweep currently on screen, for the data-age readout
-    /// (plan §1.4). The `find` is the same one `resolve_selection` uses; the
-    /// VCP comes from the same `DisplaySweep` so the two cannot drift apart.
-    fn displayed_scan(&self, snapshot: &StateSnapshot) -> Option<ui::DisplayedScan> {
-        snapshot
-            .sweeps
-            .iter()
-            .find(|s| s.elevation_number == self.view.elevation_number)
-            .map(|s| ui::DisplayedScan { volume: s.volume, vcp_number: s.vcp_number })
+        // A scrubber click or drag is operator input (D-12): applied after
+        // the frame that saw it, then shown on the next one.
+        if let Some(volume) = chrome_output.scrub_to {
+            if self.view.timeline.mode != timeline::Mode::Paused(volume) {
+                timeline::pin(&mut self.view.timeline, volume);
+                window.request_redraw();
+            }
+        }
     }
 
     /// The time-derived chrome text, compared frame to frame so the data-age
     /// and poll-health readouts tick even when `revision` is unchanged (§5).
-    fn chrome_age_text(&self, snapshot: &StateSnapshot) -> String {
+    /// The age is the live feed's (D-9), from the last frame's resolution —
+    /// the volume it names only changes with `revision`, which redraws anyway.
+    fn chrome_age_text(&self, snapshot: &radar_workstation::state::StateSnapshot) -> String {
         let poll = match snapshot.ingest.last_success {
             Some(t) => Instant::now().saturating_duration_since(t).as_secs() as i64,
             None => -1,
         };
-        let data = match self.displayed_scan(snapshot) {
+        let data = match self.resolved.live_scan {
             Some(scan) => {
                 now_unix()
                     - radar_workstation::time::unix_secs_from_nexrad(
@@ -567,6 +573,13 @@ impl App {
         };
         format!("{poll}/{data}")
     }
+}
+
+/// When the event loop should next wake (D-11): the frame-pacing deadline,
+/// or the playback clock's next step if that is sooner. A stopped timeline
+/// (`play_deadline == None`) wakes exactly when it did before Part C.
+fn wake_at(next_deadline: Instant, play_deadline: Option<Instant>) -> Instant {
+    play_deadline.map_or(next_deadline, |d| d.min(next_deadline))
 }
 
 /// Wall-clock UTC seconds since the Unix epoch; a pre-epoch clock maps to `0`.
@@ -786,7 +799,10 @@ impl ApplicationHandler for App {
         let snapshot = self.state.snapshot();
         let age_text = self.chrome_age_text(&snapshot);
         let revision_changed = self.last_drawn_revision != Some(snapshot.revision);
-        if revision_changed || age_text != self.last_chrome_text {
+        let now = Instant::now();
+        // While playing, the step is due: one redraw per frame step (D-11).
+        let play_step_due = self.play_deadline.is_some_and(|d| d <= now);
+        if revision_changed || age_text != self.last_chrome_text || play_step_due {
             self.last_chrome_text = age_text;
             if let Some(w) = &self.window {
                 w.request_redraw();
@@ -796,126 +812,126 @@ impl ApplicationHandler for App {
         // egui's own repaint request when sooner). If it has already passed
         // — no frame ran this cycle — fall back to the 2 Hz idle tick rather
         // than spinning.
-        let now = Instant::now();
         if self.next_deadline <= now {
             self.next_deadline = now + IDLE_TICK;
         }
-        event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_deadline));
+        let play_deadline = self.play_deadline.filter(|d| *d > now);
+        event_loop.set_control_flow(ControlFlow::WaitUntil(wake_at(self.next_deadline, play_deadline)));
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use tokio::sync::watch;
 
-    use radar_workstation::assembly::{AssemblyEvent, VolumeId};
-    use radar_workstation::compute::{DisplayProduct, StateUpdate, SweepGrid};
+    use radar_workstation::assembly::AssemblyEvent;
+    use radar_workstation::compute::cut::cut_key;
+    use radar_workstation::compute::{DisplayProduct, StateUpdate};
     use radar_workstation::ingest::s3_poll::IngestStatus;
     use radar_workstation::state::{AppState, VolumeSummary};
 
     use super::labels;
+    use super::test_support::{grid, volume};
+    use super::timeline::{self, Mode, Timeline};
     use super::view::ViewState;
 
-    fn grid(product: DisplayProduct, el: u8) -> Arc<SweepGrid> {
-        Arc::new(SweepGrid {
-            product,
-            azimuth_count: 4,
-            gate_count: 4,
-            first_gate_m: 0,
-            gate_width_m: 250,
+    fn sweep_gridded(el: u8, cut_deg: f32, scan_time_ms: u32, vcp_number: u16) -> StateUpdate {
+        StateUpdate::SweepGridded {
             elevation_number: el,
-            elevation_deg: el as f32 * 0.5,
-            nyquist_velocity_mps: Some(8.0),
-            scale: 2.0,
-            offset: 66.0,
-            cells: vec![0u8; 16],
-            filled_azimuths: 0,
-        })
+            elevation_deg: cut_deg + 0.02,
+            cut_deg,
+            volume: volume(scan_time_ms),
+            vcp_number,
+            grids: vec![grid(DisplayProduct::Reflectivity, el, cut_deg)],
+        }
     }
 
-    /// FR-NI-4 / S4-g: no sequence of state updates can move the view. The
-    /// guarantee is structural — nothing wires `ViewState` to `AppState` —
-    /// and this test is the boundary marker for the next contributor.
-    /// Extended per §9.4 (ADR-0028 §5): the same guarantee for the label
-    /// declutter pass, rather than a second standalone test — a new scan, a
-    /// product switch, or a sweep switch must not change which labels are
-    /// placed.
+    /// A representative sequence of state updates: sweeps, derived
+    /// products, a completed volume, a second volume, a VCP change that
+    /// drops the elevation set, and an informational event.
+    fn state_updates() -> Vec<StateUpdate> {
+        let mut updates: Vec<StateUpdate> =
+            [(1u8, 0.5f32), (2, 0.9), (3, 1.3), (6, 3.1)].iter().map(|&(el, cut)| sweep_gridded(el, cut, 1, 35)).collect();
+        updates.push(StateUpdate::DerivedComputed {
+            volume: volume(1),
+            vcp_number: 35,
+            grids: vec![grid(DisplayProduct::EchoTops, 0, 0.0)],
+        });
+        updates.push(StateUpdate::VolumeClosed {
+            summary: VolumeSummary {
+                volume: volume(1),
+                vcp_number: 35,
+                status: nexrad_decoder::VolumeStatus::Complete,
+                latitude: 38.8,
+                longitude: -75.4,
+                site_amsl_m: 15,
+            },
+        });
+        updates.push(sweep_gridded(1, 0.5, 2, 35));
+        updates.push(sweep_gridded(1, 0.5, 3, 212));
+        updates.push(StateUpdate::Info(AssemblyEvent::MissingStartChunk));
+        updates
+    }
+
+    /// FR-NI-4 / S4-g, ADR-0031 D-12: no sequence of state updates can move
+    /// the view — in any timeline mode. The guarantee is structural
+    /// (`timeline::resolve` takes `&Timeline`; nothing wires `ViewState` to
+    /// `AppState`), and this test is the boundary marker for the next
+    /// contributor. The playback clock (`tick`) is the one non-input writer
+    /// and is deliberately not run here. Extended per §9.4 (ADR-0028 §5):
+    /// the same guarantee for the label declutter pass.
     #[tokio::test]
     async fn view_state_is_unchanged_by_any_sequence_of_state_updates() {
-        let (_tx, rx) = watch::channel(IngestStatus::default());
-        let state = AppState::new(
-            radar_workstation::sites::by_id("KDOX").unwrap(),
-            rx,
-            radar_workstation::state::RetentionPolicy::default(),
-        );
-
-        let mut view = ViewState::initial((1280.0, 800.0), DisplayProduct::Reflectivity);
-        super::view::pan_by_pixels(&mut view, 137.0, -88.0);
-        super::view::zoom_about(&mut view, 400.0, 300.0, 0.37, (1280.0, 800.0));
-        view.product = DisplayProduct::Velocity;
-        view.elevation_number = 5;
-        view.show_reference = false;
-        let before = view;
-
-        let candidates = [
-            labels::LabelCandidate { world: [0.0, 0.0], rank: 0, text: "KDOX" },
-            labels::LabelCandidate { world: [40_000.0, 15_000.0], rank: 1, text: "Dover" },
+        let modes = [
+            Mode::Live,
+            Mode::Paused(volume(1)),
+            Mode::Playing { at: volume(2), next_step: Instant::now() + Duration::from_secs(1) },
         ];
-        let avail = [0.0, 0.0, 1280.0, 780.0];
-        let labels_before = labels::select(&candidates, &before, (1280.0, 800.0), avail);
-
-        let vol = VolumeId { julian_date: 20_000, scan_time_ms: 1 };
-        for el in [1u8, 2, 3, 6] {
-            state.apply_event(
-                StateUpdate::SweepGridded {
-                    elevation_number: el,
-                    elevation_deg: el as f32 * 0.5,
-                    volume: vol,
-                    vcp_number: 35,
-                    grids: vec![grid(DisplayProduct::Reflectivity, el)],
-                },
-                Instant::now(),
+        for mode in modes {
+            let (_tx, rx) = watch::channel(IngestStatus::default());
+            let state = AppState::new(
+                radar_workstation::sites::by_id("KDOX").unwrap(),
+                rx,
+                radar_workstation::state::RetentionPolicy::default(),
             );
-        }
-        state.apply_event(
-            StateUpdate::DerivedComputed {
-                volume: vol,
-                vcp_number: 35,
-                grids: vec![grid(DisplayProduct::EchoTops, 0)],
-            },
-            Instant::now(),
-        );
-        state.apply_event(
-            StateUpdate::VolumeClosed {
-                summary: VolumeSummary {
-                    volume: vol,
-                    vcp_number: 35,
-                    status: nexrad_decoder::VolumeStatus::Complete,
-                    latitude: 38.8,
-                    longitude: -75.4,
-                    site_amsl_m: 15,
-                },
-            },
-            Instant::now(),
-        );
-        // A VCP change that drops the elevation set.
-        state.apply_event(
-            StateUpdate::SweepGridded {
-                elevation_number: 1,
-                elevation_deg: 0.5,
-                volume: VolumeId { julian_date: 20_000, scan_time_ms: 2 },
-                vcp_number: 212,
-                grids: vec![grid(DisplayProduct::Reflectivity, 1)],
-            },
-            Instant::now(),
-        );
-        state.apply_event(StateUpdate::Info(AssemblyEvent::MissingStartChunk), Instant::now());
 
-        assert_eq!(view, before, "no state update may perturb ViewState");
-        let labels_after = labels::select(&candidates, &view, (1280.0, 800.0), avail);
-        assert_eq!(labels_after, labels_before, "no state update may perturb the placed-label set");
+            let tl = Timeline { mode, ..Timeline::new(6, Duration::from_millis(250), Duration::from_millis(1500)) };
+            let mut view = ViewState::initial((1280.0, 800.0), DisplayProduct::Reflectivity, tl);
+            super::view::pan_by_pixels(&mut view, 137.0, -88.0);
+            super::view::zoom_about(&mut view, 400.0, 300.0, 0.37, (1280.0, 800.0));
+            view.product = DisplayProduct::Velocity;
+            view.cut = Some(cut_key(3.1));
+            view.show_reference = false;
+            let before = view;
+
+            let candidates = [
+                labels::LabelCandidate { world: [0.0, 0.0], rank: 0, text: "KDOX" },
+                labels::LabelCandidate { world: [40_000.0, 15_000.0], rank: 1, text: "Dover" },
+            ];
+            let avail = [0.0, 0.0, 1280.0, 780.0];
+            let labels_before = labels::select(&candidates, &before, (1280.0, 800.0), avail);
+
+            for update in state_updates() {
+                state.apply_event(update, Instant::now());
+                // What every redraw does with each new snapshot.
+                let _ = timeline::resolve(&view.timeline, view.product, view.cut, &state.snapshot());
+            }
+
+            assert_eq!(view, before, "{mode:?}: no state update may perturb ViewState");
+            let labels_after = labels::select(&candidates, &view, (1280.0, 800.0), avail);
+            assert_eq!(labels_after, labels_before, "{mode:?}: no state update may perturb the placed-label set");
+        }
+    }
+
+    #[test]
+    fn a_stopped_timeline_wakes_exactly_as_before() {
+        let next = Instant::now() + Duration::from_millis(500);
+        assert_eq!(super::wake_at(next, None), next, "no playback deadline: idle pacing is unchanged (FR-TL-9)");
+        let sooner = Instant::now() + Duration::from_millis(250);
+        assert_eq!(super::wake_at(next, Some(sooner)), sooner, "playing: wake for the next frame step");
+        let later = next + Duration::from_secs(1);
+        assert_eq!(super::wake_at(next, Some(later)), next);
     }
 }

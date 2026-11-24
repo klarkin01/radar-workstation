@@ -1,6 +1,6 @@
 # Implementation Plan — Stage 3: The Compute Layer
 
-**Status:** Drafted — not yet implemented
+**Status:** Implemented 2026-08-05 — see §15 Results
 **Drafted:** 2026-08-04
 **Implements:** `docs/project-inventory.md` §6, Stage 3 (items 10–13)
 **Baseline commit:** `41ed906` (working tree clean, branch `runtime`)
