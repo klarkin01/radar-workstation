@@ -153,7 +153,8 @@ provinces, coastline, and TIGER primary roads, baked and projected per site load
 
 So the question is what compositing layer 2 adds *on top of* a complete vector reference
 map. It is not "where am I," "what county is this," or "what road is that" — those are
-layers 3, 4, 5, and 8, all of which ship in v1.0. It is terrain: ridges, valleys, and
+layers 4, 5, 6, and 8 (numbered per [ADR-0032](0032-map-vectors-over-radar.md); 3, 4, 5
+and 8 when this was written), all of which ship in v1.0. It is terrain: ridges, valleys, and
 shadowing behind a storm, and aerial imagery at close zoom. That is genuine analytical
 content for an operator reasoning about upslope enhancement or a line crossing the
 Appalachians. It is also the *only* thing on the list that requires putting a new

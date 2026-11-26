@@ -13,7 +13,10 @@ bucket's 999 → 1 volume counter, the app keeps a bounded history of recent vol
 timeline loops, steps and pauses over it (`Space`, `[` `]`, `End`) behind an unmissable
 LIVE / PAUSED / LOOP badge, with the status bar's age always measuring the live feed
 ([ADR-0031](docs/adr/0031-timeline-semantics.md)). Part C's windowed validation run is
-recorded in its plan's §10. Backfill and archive playback are Part D.
+recorded in its plan's §10. **Part D1, launch backfill, is done**: once the live volume
+has arrived, the loop is filled from the chunk bucket in about a minute rather than over
+40–60 minutes of watching ([ADR-0033](docs/adr/0033-launch-backfill.md)). Archive
+playback (D2–D4) is not started.
 `cargo run --release -- KDOX` opens a window and draws the radar over a map: it polls the
 live chunk stream, decodes and assembles volumes, **grids every in-scope product for
 every sweep and derives Echo Tops/VIL for every completed volume**, and draws the
@@ -45,18 +48,21 @@ CI). Here is what exists and what doesn't:
   wrap-aware volume selection and the scan-age readout
   ([`stage-6a-part-a-stale-data.md`](docs/plans/stage-6a-part-a-stale-data.md)),
   volume history retention ([ADR-0030](docs/adr/0030-volume-history-retention.md)), the
-  timeline over it ([ADR-0031](docs/adr/0031-timeline-semantics.md)), the
+  timeline over it ([ADR-0031](docs/adr/0031-timeline-semantics.md)), launch backfill
+  of that history ([ADR-0033](docs/adr/0033-launch-backfill.md)), the
   tokio runtime/task-supervision skeleton, the bundled WSR-88D site list, and
   configuration persistence ([ADR-0019](docs/adr/0019-config-format.md)) — all in
   `crates/radar-workstation`.
-- **Design-only, not yet code:** backfill and archive playback (Stage 6a Part D), map
+- **Design-only, not yet code:** archive playback (Stage 6a Part D2–D4), map
   imagery tiles (deferred post-v1.0, [ADR-0027](docs/adr/0027-tile-image-decoding.md)),
   placefiles (Stage 6), runtime site change (Stage 7).
 
 History retention is bounded by two config keys, `history.frames` (default 12) and
 `history.budget_mb` (default 320). Retained volumes cost 28–40 MB each, so the default
 adds up to 320 MB per instance. `history.budget_mb = 0` brings back the Stage 5
-footprint. The loop plays the newest `timeline.loop_frames` (default 12) of them. Every config key is listed in
+footprint. The loop plays the newest `timeline.loop_frames` (default 12) of them. At launch, the
+history is backfilled from the bucket on a second connection; `history.backfill = false`
+turns that off. Every config key is listed in
 [`QUICK-START.md`](QUICK-START.md#configuration).
 
 For something else you can run today, see `utility/` — `fetch-sample` and

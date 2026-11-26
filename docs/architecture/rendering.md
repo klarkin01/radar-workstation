@@ -130,24 +130,31 @@ Layers are composited by wgpu in this order, back to front:
 |---|---|---|---|
 | 1 | Background | Solid color | Dark by default. Always present. |
 | 2 | Terrain imagery | XYZ tile cache | **Unpopulated in v1.0** — the tile subsystem is deferred to post-v1.0 (ADR-0027). The slot is retained so the order is not re-litigated when it returns; nothing draws here today. Optional and toggleable when built. |
-| 3 | County boundaries | Baked overlay bundle (Natural Earth 10m) | Always visible. ADR-0025. |
-| 4 | State / country boundaries | Baked overlay bundle (Natural Earth 10m) | Always visible. Distinguished from counties by colour/opacity contrast, not line width — wgpu `LineList` primitives have no width control, so both are 1 px. |
-| 5 | Major highways | Baked overlay bundle (TIGER/Line Primary Roads, Douglas–Peucker ε = 30 m) | Toggleable (`H`, persisted). Shown at all zoom levels. Simplified at bake time — 30 m is half a pixel at `view::MIN_M_PER_PX` and 8.3× finer than a 250 m gate; the source carries a vertex every 87.7 m. **13 of 163 sites have no coverage** (overseas DoD, interior Alaska, outer Hawaii) — TIGER is a US product; those sites' road layer draws nothing and reports nothing (confirmed by offscreen render, PABC). ADR-0029. |
-| 6 | Radar data | Selected gridded product texture | The primary content. Alpha-composited over map layers. |
-| 6a | Reference geometry | Range rings, azimuth spokes, active site marker (Stage 4) | `LineList` in world metres through the view uniform. Toggled by `R`, persisted. Chrome of the same kind as the radar image; drawn with it. Ring labels drawn by egui. |
+| 3 | Radar data | Selected gridded product texture | The primary content. Alpha-composited over layers 1–2; no-data is transparent (FR-DR-4). |
+| 4 | County boundaries | Baked overlay bundle (Natural Earth 10m) | Always visible, drawn over the radar (ADR-0032). The least prominent line. ADR-0025. |
+| 5 | State / country boundaries | Baked overlay bundle (Natural Earth 10m) | Always visible, drawn over the radar (ADR-0032). Distinguished from counties by colour/opacity contrast, not line width — wgpu `LineList` primitives have no width control, so both are 1 px. |
+| 6 | Major highways | Baked overlay bundle (TIGER/Line Primary Roads, Douglas–Peucker ε = 30 m) | Toggleable (`H`, persisted). Shown at all zoom levels. Simplified at bake time — 30 m is half a pixel at `view::MIN_M_PER_PX` and 8.3× finer than a 250 m gate; the source carries a vertex every 87.7 m. **13 of 163 sites have no coverage** (overseas DoD, interior Alaska, outer Hawaii) — TIGER is a US product; those sites' road layer draws nothing and reports nothing (confirmed by offscreen render, PABC). Drawn over the radar (ADR-0032). ADR-0029. |
+| 6a | Reference geometry | Range rings, azimuth spokes, active site marker (Stage 4) | `LineList` in world metres through the view uniform. Toggled by `R`, persisted. Drawn above the map lines, so a boundary never covers a range ring or the site marker. Ring labels drawn by egui. |
 | 7 | Placefile overlays | Parsed placefile data | **Stage 6.** Drawn per-placefile in user-configured order. |
 | 8 | Radar site markers | Bundled site list | Every other bundled site (the active site's marker is layer 6a), projected against the active site at renderer init (Stage 5). Not clickable; runtime site selection is Stage 7. ICAO labels share layer 9's declutter pass, entering at rank 0. |
 | 9 | City labels | Baked overlay bundle (Natural Earth 10m `populated_places`) | Drawn by egui at `Order::Background`, which *is* compositing slot 9 — layers 1–8 are all wgpu and layer 10 is egui chrome, so there is no wgpu layer above this one. One screen-space declutter pass shared with layer 8's site labels (site labels win any collision — ADR-0028 §5 erratum, S5-g). No toggle. |
 
 egui UI chrome is composited on top of all wgpu layers by the egui render pass.
 
-**Stage 5 status:** layers 1, 3, 4, 5, 6, 6a, 8, and 9 all have a data source and a
+**Map lines over radar (ADR-0032, 2026-11-24).** Until ADR-0032, counties, states and
+highways were layers 3–5 *under* the radar (layer 6), and any echo hid them. They now
+draw over it, slightly transparent (alpha 0.80–0.90), in colours chosen by measured
+contrast against every bundled palette: near-white states/coastline, rose highways, mid-grey
+counties as the least prominent line. Pass 1's order is written once, in
+`render::Scene::draw`, which the offscreen read-back tests also call.
+
+**Stage 5 status** (layer numbers as amended by ADR-0032)**:** layers 1, 3, 4, 5, 6, 6a, 8, and 9 all have a data source and a
 renderer (`render::overlay`, `render::labels`) as of `docs/plans/stage-5-map-underlays.md`.
 **Layer 2 has no v1.0 data source at all** — the tile subsystem is deferred to post-v1.0
 by ADR-0027 (closing Q18), so v1.0's basemap is vector-only. Layer 7 (placefiles) is
 Stage 6, gated on Q6. The two-pass frame (pass 1: clear + scene; pass 2: egui) did not
-change when layers 3–5, 8, and 9 landed — they slot into pass 1 in this order, before and
-after the radar draw as the table above shows.
+change when layers 4–6, 8, and 9 landed — they slot into pass 1 in this order, after the
+radar draw as the table above shows.
 
 ---
 
@@ -362,7 +369,7 @@ City Labels below.
 *Added 2026-08-30, [ADR-0028](../adr/0028-city-labels.md), resolving Q19.*
 
 Labels are the one overlay layer that is text rather than geometry, so they take a
-different path from layers 3–5 while sharing their bundle and their projection pass.
+different path from layers 4–6 while sharing their bundle and their projection pass.
 
 **Source and bundle.** Natural Earth 10m `populated_places`, filtered to the same 700 km
 site footprint as the geometry layers: 1,216 of 7,342 records, ~27 KiB. The bundle carries

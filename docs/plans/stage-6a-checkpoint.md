@@ -83,7 +83,8 @@ Diff: 36 files, +4,709 / −560. Nothing is pushed beyond the local branch.
 | B: §3.5 default budget sign-off | **unconfirmed on paper** (CK-11) | Part B §3.5 asked the developer to confirm `frames = 12`, `budget_mb = 320`. It was committed, but nothing records the decision |
 | B: §6 windowed/headless validation | **unrecorded** (CK-10) | Part B §10 holds the W1 measurements only |
 | C1–C6 timeline | **not started** | no `Timeline`, no new `Action`, no FR-TL-*; code has forward-pointing notes at `render/radar.rs:58` and `state/mod.rs:150` |
-| D1–D4 backfill / archive / jump-to-time | not started; v1.0 scope is undecided (CK-21) | `Bucket::Archive` still unconstructed |
+| D1 launch backfill | done (2026-11-25), in v1.0 per CK-21 | ADR-0033, FR-DA-11, `ingest/backfill.rs`, `FrameRing::behind_mut`; measured in ADR-0033 §8 |
+| D2–D4 archive / jump-to-time | not started; v1.0 scope still undecided (CK-21) | `Bucket::Archive` still unconstructed |
 
 ### 2.4 Open measurement debt
 
@@ -382,6 +383,6 @@ Two habits would have prevented most of §3:
 | A8 PR `time_handling` → `main` | the main-branch wrap bug | Part C |
 | B: FR-TL-* and the CK-20 decision (ADR-0031?) — **done 2026-11-22** (ADR-0031, FR-TL-*) | CK-20, CK-24 | Part C plan |
 | B: draft `stage-6a-part-c-timeline.md` — **done; implemented 2026-11-22** | CK-22, -23, -25, -26 | Part C |
-| C: Part D scope ADR; D1 plan after Part C | CK-21 | — |
+| C: Part D scope ADR; D1 plan after Part C — **D1 done 2026-11-25** (ADR-0033); the D2–D4 ADR is still open | CK-21 | — |
 | C: Q21, Q22, Q24 answered in parallel | Stage 6 | Stage 6 parser |
 | C: memory measurement split heap / driver | §2.4 | Stage 8 |

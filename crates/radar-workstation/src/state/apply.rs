@@ -32,46 +32,62 @@ use crate::event::Event;
 
 use super::{DisplaySweep, RadarState};
 
+/// Where a [`StateUpdate`](crate::compute::StateUpdate) came from. Only the
+/// ring insert cares (ADR-0033): live data creates frames at the head
+/// ([`FrameRing::head_mut`](super::history::FrameRing::head_mut)) and treats
+/// anything older as late; launch backfill creates them *behind* the head
+/// ([`FrameRing::behind_mut`](super::history::FrameRing::behind_mut)). Every
+/// other rule — replace-don't-merge, `TimedOut`/`Superseded` clear nothing,
+/// the trim after every change — is the same for both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    Live,
+    Backfill,
+}
+
+/// Apply one live compute-layer update to `state` — [`apply_from`] with
+/// [`Origin::Live`].
+pub fn apply(state: &mut RadarState, event: crate::compute::StateUpdate, now: Instant) -> (bool, Vec<Event>) {
+    apply_from(state, event, now, Origin::Live)
+}
+
 /// Apply one compute-layer update to `state`. Returns whether anything
 /// changed (i.e. whether `revision` was bumped) and any events the caller
-/// (`AppState::apply_event`) should report.
-pub fn apply(state: &mut RadarState, event: crate::compute::StateUpdate, now: Instant) -> (bool, Vec<Event>) {
+/// (`AppState::apply_event_from`) should report.
+///
+/// A backfilled update the ring will not admit (`NotAdmitted`) is dropped
+/// without an event: the ring has filled, and the backfill task reports
+/// that stop once, before its next volume — not once per sweep here.
+pub fn apply_from(
+    state: &mut RadarState,
+    event: crate::compute::StateUpdate,
+    now: Instant,
+    origin: Origin,
+) -> (bool, Vec<Event>) {
     use crate::compute::StateUpdate;
 
     match event {
         StateUpdate::SweepGridded { elevation_number, elevation_deg, cut_deg, volume, vcp_number, grids } => {
-            let landed = state.history.head_mut(volume, vcp_number, now).map(|frame| {
-                frame.insert_sweep(DisplaySweep {
-                    elevation_number,
-                    elevation_deg,
-                    cut_deg,
-                    volume,
-                    vcp_number,
-                    received: now,
-                    grids,
-                });
+            let Some(frame) = frame_for(state, origin, volume, vcp_number, now) else {
+                return refused(origin, volume);
+            };
+            frame.insert_sweep(DisplaySweep {
+                elevation_number,
+                elevation_deg,
+                cut_deg,
+                volume,
+                vcp_number,
+                received: now,
+                grids,
             });
-            if landed.is_err() {
-                return (false, vec![Event::LateVolumeDiscarded { volume }]);
-            }
-            let mut events = Vec::new();
-            if let Some(event) = state.history.trim() {
-                events.push(event);
-            }
-            state.revision += 1;
-            (true, events)
+            trimmed(state)
         }
         StateUpdate::DerivedComputed { volume, vcp_number, grids } => {
-            let landed = state.history.head_mut(volume, vcp_number, now).map(|frame| frame.set_derived(grids));
-            if landed.is_err() {
-                return (false, vec![Event::LateVolumeDiscarded { volume }]);
-            }
-            let mut events = Vec::new();
-            if let Some(event) = state.history.trim() {
-                events.push(event);
-            }
-            state.revision += 1;
-            (true, events)
+            let Some(frame) = frame_for(state, origin, volume, vcp_number, now) else {
+                return refused(origin, volume);
+            };
+            frame.set_derived(grids);
+            trimmed(state)
         }
         StateUpdate::VolumeClosed { summary } => {
             // TimedOut / Superseded volumes clear nothing (ADR-0012): a
@@ -98,6 +114,37 @@ pub fn apply(state: &mut RadarState, event: crate::compute::StateUpdate, now: In
         // is where they reach the event log.
         StateUpdate::Info(_) => (false, Vec::new()),
     }
+}
+
+/// The frame a sweep or derived set for `volume` lands in, per `origin`.
+fn frame_for(
+    state: &mut RadarState,
+    origin: Origin,
+    volume: crate::assembly::VolumeId,
+    vcp_number: u16,
+    now: Instant,
+) -> Option<&mut super::history::Frame> {
+    match origin {
+        Origin::Live => state.history.head_mut(volume, vcp_number, now).ok(),
+        Origin::Backfill => state.history.behind_mut(volume, vcp_number, now).ok(),
+    }
+}
+
+/// The result of an update the ring would not take: a live one is reported
+/// as `LateVolumeDiscarded`; a backfilled one is silent (see [`apply_from`]).
+fn refused(origin: Origin, volume: crate::assembly::VolumeId) -> (bool, Vec<Event>) {
+    match origin {
+        Origin::Live => (false, vec![Event::LateVolumeDiscarded { volume }]),
+        Origin::Backfill => (false, Vec::new()),
+    }
+}
+
+/// After a frame changed: trim the ring, bump `revision`, and pass on the
+/// budget-bound edge event if the trim produced one.
+fn trimmed(state: &mut RadarState) -> (bool, Vec<Event>) {
+    let events = state.history.trim().into_iter().collect();
+    state.revision += 1;
+    (true, events)
 }
 
 #[cfg(test)]
@@ -402,5 +449,40 @@ mod tests {
             state.history.newest().unwrap().derived.contains_key(&DisplayProduct::Vil),
             "FR-DA-5: last good data stays displayed"
         );
+    }
+
+    #[test]
+    fn a_backfilled_sweep_lands_behind_the_live_head_and_is_not_reported_late() {
+        let mut state = new_state();
+        apply(&mut state, sweep_gridded(1, 200, 35), t0());
+        let (changed, events) = apply_from(&mut state, sweep_gridded(1, 100, 35), t0(), Origin::Backfill);
+        assert!(changed, "backfill fills behind the head instead of discarding");
+        assert!(events.is_empty());
+        let frames: Vec<VolumeId> = state.history.iter().map(|f| f.volume).collect();
+        assert_eq!(frames, vec![volume_id(100), volume_id(200)]);
+        assert_eq!(live_sweeps(&state)[0].volume, volume_id(200), "the live view is unchanged");
+    }
+
+    #[test]
+    fn a_backfilled_sweep_the_ring_refuses_is_dropped_silently() {
+        let mut state =
+            RadarState::new(crate::sites::by_id("KDOX").unwrap(), RetentionPolicy { frames: 1, budget_bytes: usize::MAX });
+        apply(&mut state, sweep_gridded(1, 200, 35), t0());
+        let revision = state.revision;
+        let (changed, events) = apply_from(&mut state, sweep_gridded(1, 100, 35), t0(), Origin::Backfill);
+        assert!(!changed);
+        assert!(events.is_empty(), "the backfill task reports the stop once, not apply per sweep");
+        assert_eq!(state.revision, revision);
+    }
+
+    #[test]
+    fn a_backfilled_volume_is_marked_complete_in_its_own_frame() {
+        let mut state = new_state();
+        apply(&mut state, sweep_gridded(1, 200, 35), t0());
+        apply_from(&mut state, sweep_gridded(1, 0, 35), t0(), Origin::Backfill);
+        let summary = volume_summary(VolumeStatus::Complete);
+        apply_from(&mut state, StateUpdate::VolumeClosed { summary }, t0(), Origin::Backfill);
+        assert!(state.history.oldest().unwrap().complete.is_some());
+        assert!(state.history.newest().unwrap().complete.is_none(), "the live head is untouched");
     }
 }

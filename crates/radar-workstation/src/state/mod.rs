@@ -40,7 +40,7 @@ use crate::event::{Event, EventLog};
 use crate::ingest::s3_poll::IngestStatus;
 use crate::sites::Site;
 
-pub use apply::apply;
+pub use apply::{apply, apply_from, Origin};
 pub use history::{Frame, RetentionPolicy};
 
 /// One elevation's most recently closed sweep, held for display as grids —
@@ -208,6 +208,13 @@ impl AppState {
     /// the byte budget starting to bind, ADR-0030) — `apply` returns them
     /// rather than reporting them itself, for the same reason.
     pub fn apply_event(&self, event: crate::compute::StateUpdate, now: Instant) -> bool {
+        self.apply_event_from(event, now, Origin::Live)
+    }
+
+    /// [`Self::apply_event`] for an update from `origin` — the launch
+    /// backfill chain passes [`Origin::Backfill`] (ADR-0033); nothing else
+    /// about the update's handling differs.
+    pub fn apply_event_from(&self, event: crate::compute::StateUpdate, now: Instant, origin: Origin) -> bool {
         use crate::compute::StateUpdate;
         if let StateUpdate::Info(assembly_event) = &event {
             match assembly_event {
@@ -219,7 +226,7 @@ impl AppState {
                 | crate::assembly::AssemblyEvent::VolumeClosed { .. } => {}
             }
         }
-        let (changed, events) = apply(&mut self.write_radar(), event, now);
+        let (changed, events) = apply_from(&mut self.write_radar(), event, now, origin);
         for event in events {
             self.report(event);
         }
@@ -228,6 +235,15 @@ impl AppState {
 
     pub fn reset(&self, site: &'static Site) {
         self.write_radar().reset(site);
+    }
+
+    /// Whether the history ring could still keep a volume older than
+    /// everything it holds ([`history::FrameRing::has_room_behind`]). The
+    /// launch backfill task asks before each volume it fetches (ADR-0033),
+    /// so a full ring ends backfill instead of fetching volumes that would
+    /// be evicted on arrival.
+    pub fn backfill_has_room(&self) -> bool {
+        self.read_radar().history.has_room_behind()
     }
 
     /// The one place a task with an `Arc<AppState>` should report an

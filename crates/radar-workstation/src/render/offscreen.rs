@@ -1,4 +1,5 @@
-//! Offscreen visual verification for the map underlay pass (§12.2, §12.3).
+//! Offscreen visual verification for the map vector pass (§12.2, §12.3) and
+//! for those lines composited over radar data (ADR-0032).
 //! `#[ignore]`d — this environment (and CI) has no presentable display, but
 //! *offscreen* rendering with read-back works, the same path Stage 4 used
 //! to verify the radar pass (`render::radar::tests`). Run with:
@@ -12,14 +13,19 @@
 
 #![cfg(test)]
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use radar_workstation::compute::DisplayProduct;
+use radar_workstation::compute::cut::cut_key;
+use radar_workstation::compute::{palette, DisplayProduct, SweepGrid};
 use radar_workstation::sites;
 
 use super::overlay::OverlayRenderer;
+use super::radar::{RadarRenderer, Selection};
 use super::reference::ReferenceRenderer;
+use super::test_support::{frame, snapshot, volume};
 use super::view::{Camera, ViewState};
+use super::Scene;
 
 fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
@@ -109,7 +115,52 @@ fn write_ppm(path: &std::path::Path, rgba: &[u8], size: u32) {
     file.write_all(&out).expect("write ppm");
 }
 
-fn render_pass1_scene(device: &wgpu::Device, queue: &wgpu::Queue, size: u32, camera: Camera, site_id: &str) -> Vec<u8> {
+/// The cut every composite render's synthetic sweep sits on.
+const COMPOSITE_CUT_DEG: f32 = 0.5;
+
+/// A synthetic sweep reaching 230 km, split into equal azimuth sectors, one
+/// per entry of `physical` (in the product's units) — so one render puts
+/// the map lines over every listed value. Every cell is real data, so the
+/// whole disc is opaque.
+fn sector_grid(product: DisplayProduct, scale: f32, offset: f32, physical: &[f32]) -> Arc<SweepGrid> {
+    const AZIMUTHS: u16 = 360;
+    const GATES: u16 = 920; // 920 × 250 m = 230 km
+    let raws: Vec<u8> = physical.iter().map(|v| (v * scale + offset).round() as u8).collect();
+    let mut cells = Vec::with_capacity(AZIMUTHS as usize * GATES as usize);
+    for a in 0..AZIMUTHS as usize {
+        let raw = raws[a * raws.len() / AZIMUTHS as usize];
+        cells.extend(std::iter::repeat_n(raw, GATES as usize));
+    }
+    Arc::new(SweepGrid {
+        product,
+        azimuth_count: AZIMUTHS,
+        gate_count: GATES,
+        first_gate_m: 0,
+        gate_width_m: 250,
+        elevation_number: 1,
+        elevation_deg: COMPOSITE_CUT_DEG + 0.02,
+        cut_deg: COMPOSITE_CUT_DEG,
+        nyquist_velocity_mps: Some(30.0),
+        scale,
+        offset,
+        cells,
+        filled_azimuths: AZIMUTHS,
+    })
+}
+
+/// Pass 1 exactly as a frame records it (`render::Scene`), optionally over
+/// `radar_grid` (synced through the real `RadarRenderer` with the bundled
+/// palette) and optionally without the map vectors, for a with/without
+/// comparison.
+fn render_pass1_scene(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    size: u32,
+    camera: Camera,
+    site_id: &str,
+    radar_grid: Option<&Arc<SweepGrid>>,
+    draw_overlay: bool,
+) -> Vec<u8> {
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let site = sites::by_id(site_id).expect("site must be bundled");
     let bundle = radar_workstation::overlay::bundled().expect("committed bundle must parse");
@@ -117,6 +168,18 @@ fn render_pass1_scene(device: &wgpu::Device, queue: &wgpu::Queue, size: u32, cam
     assert!(events.is_empty(), "unexpected overlay events: {events:?}");
     let overlay = OverlayRenderer::new(device, format, &projected, site);
     let reference = ReferenceRenderer::new(device, format);
+    let mut radar = RadarRenderer::new(device, format, false, 2048);
+    if let Some(grid) = radar_grid {
+        let mut f = (*frame(0, 35, &[(grid.elevation_number, grid.cut_deg, &[grid.product])])).clone();
+        let mut sweep = f.sweeps[&grid.elevation_number].clone();
+        sweep.grids = vec![Arc::clone(grid)];
+        f.insert_sweep(sweep);
+        let palettes = BTreeMap::from([(grid.product, palette::bundled_default(grid.product))]);
+        let selection =
+            Selection { product: grid.product, cut: Some(cut_key(grid.cut_deg)), focus: None, displayed: Some((volume(0), grid)) };
+        let (events, more_pending) = radar.sync(device, queue, &snapshot(vec![Arc::new(f)]), &selection, &palettes);
+        assert!(events.is_empty() && !more_pending, "synthetic grid must sync in one call: {events:?}");
+    }
 
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("offscreen scene target"),
@@ -144,9 +207,14 @@ fn render_pass1_scene(device: &wgpu::Device, queue: &wgpu::Queue, size: u32, cam
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        overlay.draw(queue, &mut pass, camera, true);
-        reference.draw(queue, &mut pass, camera);
-        overlay.draw_site_markers(queue, &mut pass, camera);
+        Scene {
+            radar: &mut radar,
+            radar_grid: radar_grid.map(|g| (&**g, volume(0))),
+            overlay: draw_overlay.then_some(&overlay),
+            reference: Some(&reference),
+            show_highways: true,
+        }
+        .draw(device, queue, &mut pass, camera);
     }
     read_texture(device, queue, encoder, &target, size)
 }
@@ -303,9 +371,13 @@ fn write_scene_ppm(site_id: &str, m_per_px: f64, out_name: &str) {
     };
     let size = 512u32;
     let camera = Camera { center_m: (0.0, 0.0), m_per_px, viewport: (size as f32, size as f32) };
-    let rgba = render_pass1_scene(&device, &queue, size, camera, site_id);
+    let rgba = render_pass1_scene(&device, &queue, size, camera, site_id, None, true);
+    write_target_ppm(&rgba, size, out_name);
+}
+
+fn write_target_ppm(rgba: &[u8], size: u32, out_name: &str) {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target").join(out_name);
-    write_ppm(&path, &rgba, size);
+    write_ppm(&path, rgba, size);
     eprintln!("wrote {}", path.display());
 }
 
@@ -328,4 +400,54 @@ fn krlx_60_m_per_px_max_zoom() {
 fn pabc_230km_road_less_site() {
     let view = ViewState::initial((512.0, 512.0), DisplayProduct::Reflectivity, super::timeline::Timeline::from_config(&Default::default()));
     write_scene_ppm("PABC", view.m_per_px, "overlay_pabc_230km.ppm");
+}
+
+// --- ADR-0032: the map vectors composite *over* the radar image ---
+
+/// Renders the KDOX 230 km scene over strong reflectivity (45–75 dBZ) and
+/// over a full-range velocity sweep, with and without the map vectors.
+/// Every pixel of the disc is opaque radar data, so under the Stage 5
+/// order (vectors under the radar) the two renders would be identical
+/// inside it; here the lines must change a substantial number of pixels,
+/// by a clearly visible amount. Writes both composites to `target/` for
+/// the eye check ADR-0032 §3 records.
+#[test]
+#[ignore = "requires a GPU adapter; writes target/*.ppm for manual inspection"]
+fn map_lines_read_over_strong_echoes_and_velocity() {
+    let Some((device, queue)) = try_device() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let size = 512u32;
+    let m_per_px = super::view::fit_range(super::view::DEFAULT_RANGE_M, (size as f32, size as f32));
+    let camera = Camera { center_m: (0.0, 0.0), m_per_px, viewport: (size as f32, size as f32) };
+    let cases: [(DisplayProduct, f32, f32, &[f32], &str); 2] = [
+        (DisplayProduct::Reflectivity, 2.0, 66.0, &[45.0, 50.0, 55.0, 60.0, 65.0, 70.0, 75.0], "composite_kdox_ref_strong.ppm"),
+        (DisplayProduct::Velocity, 2.0, 129.0, &[-60.0, -40.0, -20.0, -5.0, 5.0, 20.0, 40.0, 60.0], "composite_kdox_vel.ppm"),
+    ];
+    for (product, scale, offset, values, out_name) in cases {
+        let grid = sector_grid(product, scale, offset, values);
+        let with = render_pass1_scene(&device, &queue, size, camera, "KDOX", Some(&grid), true);
+        let without = render_pass1_scene(&device, &queue, size, camera, "KDOX", Some(&grid), false);
+        write_target_ppm(&with, size, out_name);
+
+        // Largest per-channel difference at every pixel inside the disc
+        // (radar data under every one) that the vectors touched. Outside it
+        // the lines draw over the background in either order.
+        let disc_px = (super::view::DEFAULT_RANGE_M / m_per_px) as f32 - 2.0;
+        let centre = size as f32 / 2.0;
+        let mut deltas: Vec<u8> = (0..size * size)
+            .filter(|i| ((i % size) as f32 - centre).hypot((i / size) as f32 - centre) < disc_px)
+            .map(|i| {
+                let (a, b) = (pixel(&with, size, i % size, i / size), pixel(&without, size, i % size, i / size));
+                (0..3).map(|c| a[c].abs_diff(b[c])).max().unwrap()
+            })
+            .filter(|&d| d > 0)
+            .collect();
+        deltas.sort_unstable();
+        let median = deltas.get(deltas.len() / 2).copied().unwrap_or(0);
+        eprintln!("{product:?}: {} disc pixels changed by the map vectors, median channel delta {median}", deltas.len());
+        assert!(deltas.len() > 2_000, "{product:?}: map vectors hidden by the radar ({} pixels changed)", deltas.len());
+        assert!(median >= 60, "{product:?}: map vectors barely visible over the radar (median delta {median})");
+    }
 }

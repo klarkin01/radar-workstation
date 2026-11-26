@@ -24,6 +24,17 @@
 //! (ADR-0012) holds exactly as before, since the whole quartet re-enters
 //! `Idle` together.
 //!
+//! **Launch backfill (ADR-0033) is a second, separately supervised unit.**
+//! It shares no channel with the quartet: it has its own `S3Client` (a
+//! second connection to the same bucket — `http-ingest` serializes
+//! requests on one connection, so sharing the poller's would stall live
+//! polling) and its own assembler, compute stage and applier, because
+//! `VolumeAssembler` tracks one volume at a time and interleaving two
+//! volumes' chunks would corrupt both. Its chain is the same code as live
+//! data's ([`run_chain`]); only the applier's `Origin` differs. The one
+//! thing that crosses between the two units is the cold start's listing and
+//! anchor, handed over once through an [`AnchorSlot`].
+//!
 //! **`Handle`, not `Runtime`.** The plan sketches `Pipeline::spawn(rt:
 //! &Runtime, ...)`. This takes `&tokio::runtime::Handle` instead —
 //! `Runtime::handle()` gives one, so production call sites are unaffected,
@@ -33,20 +44,23 @@
 //! second nested `Runtime`.
 
 use std::future::Future;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::runtime::Handle;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::assembly::{self, AssemblyConfig, AssemblyEvent};
 use crate::compute::{self, StateUpdate};
 use crate::event::{Event, TaskKind};
-use crate::ingest::s3_poll::{IngestStatus, S3Poller};
+use crate::ingest::backfill::{self, AnchorSlot, BackfillStatus, ColdStart, FetchPlan};
+use crate::ingest::s3_poll::{self, IngestStatus, S3Poller};
+use crate::ingest::volume_seq::VolumeSeq;
 use crate::ingest::ChunkEnvelope;
 use crate::sites::Site;
-use crate::state::AppState;
+use crate::state::{AppState, Origin};
 
 /// poller → assembly channel capacity. A volume is ~79 chunks; 32 absorbs a
 /// burst without letting a stalled consumer buffer a whole volume of raw
@@ -152,18 +166,53 @@ where
     }
 }
 
-/// One applier task: applies each compute-layer update to `state` as it
-/// arrives. Exits when `rx` closes or `shutdown` fires.
-async fn apply_loop(mut rx: mpsc::Receiver<StateUpdate>, state: Arc<AppState>, mut shutdown: watch::Receiver<bool>) {
+/// One applier task: applies each compute-layer update from `origin` to
+/// `state` as it arrives. Exits when `rx` closes or `shutdown` fires.
+/// `volumes_closed`, when given, counts every `VolumeClosed` applied — the
+/// backfill fetcher waits on it so it asks the ring for room only once the
+/// ring reflects the volume it last sent (ADR-0033).
+async fn apply_loop(
+    mut rx: mpsc::Receiver<StateUpdate>,
+    state: Arc<AppState>,
+    mut shutdown: watch::Receiver<bool>,
+    origin: Origin,
+    volumes_closed: Option<watch::Sender<usize>>,
+) {
     loop {
         tokio::select! {
             event = rx.recv() => {
                 let Some(event) = event else { return };
-                state.apply_event(event, Instant::now());
+                let closed = matches!(event, StateUpdate::VolumeClosed { .. });
+                state.apply_event_from(event, Instant::now(), origin);
+                if let (true, Some(counter)) = (closed, &volumes_closed) {
+                    counter.send_modify(|n| *n += 1);
+                }
             }
             _ = shutdown.wait_for(|s| *s) => return,
         }
     }
+}
+
+/// Assembly → compute → applier over chunks from `rx`, with fresh channels
+/// between them, joined. The one chain every chunk source runs through: the
+/// live poller, launch backfill (with its own instance — see this module's
+/// doc comment), and the `spawn_from_chunks` test seam. Ends once `rx`
+/// closes and everything behind it has drained, or on `shutdown`.
+/// `volumes_closed` is passed to [`apply_loop`].
+async fn run_chain(
+    rx: mpsc::Receiver<ChunkEnvelope>,
+    state: Arc<AppState>,
+    shutdown: watch::Receiver<bool>,
+    origin: Origin,
+    volumes_closed: Option<watch::Sender<usize>>,
+) {
+    let (event_tx, event_rx) = mpsc::channel::<AssemblyEvent>(EVENT_CHANNEL_CAPACITY);
+    let (update_tx, update_rx) = mpsc::channel::<StateUpdate>(COMPUTE_CHANNEL_CAPACITY);
+    tokio::join!(
+        assembly::run(rx, event_tx, AssemblyConfig::default(), shutdown.clone()),
+        compute::compute_loop(event_rx, update_tx, Arc::clone(&state), shutdown.clone()),
+        apply_loop(update_rx, state, shutdown, origin, volumes_closed),
+    );
 }
 
 /// Builds a fresh `S3Poller` and fresh channels, then runs the
@@ -173,33 +222,100 @@ async fn apply_loop(mut rx: mpsc::Receiver<StateUpdate>, state: Arc<AppState>, m
 /// independently. `status_tx` is a clone of the one sender created in
 /// `Pipeline::spawn` — see `S3Poller::new`'s doc comment for why every
 /// restart publishes into the same long-lived channel rather than a fresh
-/// one.
+/// one. `anchor_slot` is `Some` when launch backfill is on.
 async fn run_ingest_pipeline(
     site_id: String,
     state: Arc<AppState>,
     shutdown: watch::Receiver<bool>,
     status_tx: watch::Sender<IngestStatus>,
     poll_interval: Duration,
+    anchor_slot: Option<Arc<AnchorSlot>>,
 ) {
     let client = http_ingest::S3Client::new(http_ingest::Bucket::Chunks);
-    let poller = S3Poller::new(site_id, client, status_tx);
+    let mut poller = S3Poller::new(site_id, client, status_tx);
+    if let Some(slot) = anchor_slot {
+        poller = poller.with_anchor_slot(slot);
+    }
     let (chunk_tx, chunk_rx) = mpsc::channel::<ChunkEnvelope>(CHUNK_CHANNEL_CAPACITY);
-    let (event_tx, event_rx) = mpsc::channel::<AssemblyEvent>(EVENT_CHANNEL_CAPACITY);
-    let (update_tx, update_rx) = mpsc::channel::<StateUpdate>(COMPUTE_CHANNEL_CAPACITY);
 
     tokio::join!(
         poller.run(chunk_tx, Arc::clone(&state), shutdown.clone(), poll_interval),
-        assembly::run(chunk_rx, event_tx, AssemblyConfig::default(), shutdown.clone()),
-        compute::compute_loop(event_rx, update_tx, Arc::clone(&state), shutdown.clone()),
-        apply_loop(update_rx, state, shutdown),
+        run_chain(chunk_rx, state, shutdown, Origin::Live, None),
     );
 }
 
-/// Owns the running pipeline's task(s) and the means to stop them. A single
-/// `JoinHandle` today (the supervised ingest trio) — kept as a `Vec` since
-/// later stages (tile fetching, placefile polling) add independent tasks
-/// that don't share this trio's channel coupling and can be supervised on
-/// their own.
+/// The launch backfill unit (ADR-0033). Waits for the live poller's cold
+/// start, picks the volumes behind its anchor, then fetches them under
+/// supervision. Returns once backfill has stopped, or at once on `shutdown`
+/// before the anchor arrives. `requested` is `history.frames − 1`.
+async fn run_backfill(
+    site_id: String,
+    state: Arc<AppState>,
+    mut shutdown: watch::Receiver<bool>,
+    status_tx: watch::Sender<IngestStatus>,
+    anchor_rx: oneshot::Receiver<ColdStart>,
+    requested: usize,
+) {
+    // Live first: the poller publishes only after its first successful poll
+    // has delivered the live volume's chunks.
+    let cold_start = tokio::select! {
+        cold_start = anchor_rx => cold_start.ok(),
+        _ = shutdown.wait_for(|s| *s) => None,
+    };
+    let Some(cold_start) = cold_start else { return };
+
+    let targets: Arc<[VolumeSeq]> = s3_poll::backfill_targets(&cold_start.folders, cold_start.anchor, requested).into();
+    status_tx.send_modify(|s| s.backfill = BackfillStatus::Backfilling { done: 0, of: targets.len() });
+    let progress = Arc::new(AtomicUsize::new(0));
+
+    let attempt_state = Arc::clone(&state);
+    let attempt_shutdown = shutdown.clone();
+    supervise(TaskKind::Backfill, &state, shutdown, move || {
+        run_backfill_attempt(
+            site_id.clone(),
+            Arc::clone(&attempt_state),
+            attempt_shutdown.clone(),
+            status_tx.clone(),
+            Arc::clone(&targets),
+            requested,
+            Arc::clone(&progress),
+        )
+    })
+    .await;
+}
+
+/// One supervised backfill attempt: a fresh `S3Client` (the second
+/// connection) and a fresh chain, fetching from `progress` onwards.
+/// Reports the stop once, after the chain has drained, so the event and the
+/// `Complete` status follow the last volume into the ring.
+async fn run_backfill_attempt(
+    site_id: String,
+    state: Arc<AppState>,
+    shutdown: watch::Receiver<bool>,
+    status_tx: watch::Sender<IngestStatus>,
+    targets: Arc<[VolumeSeq]>,
+    requested: usize,
+    progress: Arc<AtomicUsize>,
+) {
+    let mut client = http_ingest::S3Client::new(http_ingest::Bucket::Chunks);
+    let (chunk_tx, chunk_rx) = mpsc::channel::<ChunkEnvelope>(CHUNK_CHANNEL_CAPACITY);
+    let (closed_tx, closed_rx) = watch::channel(0usize);
+    let mut fetch_shutdown = shutdown.clone();
+    let plan = FetchPlan { site_id: &site_id, targets: &targets, requested, progress: &progress };
+
+    let (reason, ()) = tokio::join!(
+        backfill::fetch(&mut client, plan, chunk_tx, closed_rx, &state, &status_tx, &mut fetch_shutdown),
+        run_chain(chunk_rx, Arc::clone(&state), shutdown, Origin::Backfill, Some(closed_tx)),
+    );
+
+    state.report(Event::BackfillFinished { fetched: progress.load(Ordering::SeqCst), requested, reason });
+    status_tx.send_modify(|s| s.backfill = BackfillStatus::Complete);
+}
+
+/// Owns the running pipeline's task(s) and the means to stop them: the
+/// supervised ingest quartet, plus the launch backfill unit when it is on
+/// (ADR-0033). Later stages (placefile polling) add further independent
+/// tasks the same way.
 pub struct Pipeline {
     tasks: Vec<JoinHandle<()>>,
     shutdown: watch::Sender<bool>,
@@ -216,19 +332,39 @@ impl Pipeline {
     /// is `Config::poll_interval` (S2-W4, FR-DA-2) — already clamped to
     /// `[config::POLL_INTERVAL_MIN, config::POLL_INTERVAL_MAX]` by the
     /// caller; this function does not re-validate it.
+    ///
+    /// `backfill_volumes` is how many volumes behind the live one launch
+    /// backfill fetches (ADR-0033) — `history.frames − 1`, or 0 when
+    /// `history.backfill = false`. 0 spawns no backfill task and opens no
+    /// second connection.
     pub fn spawn(
         rt: &Handle,
         site: &'static Site,
         state: Arc<AppState>,
         status_tx: watch::Sender<IngestStatus>,
         poll_interval: Duration,
+        backfill_volumes: usize,
     ) -> Self {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let site_id = site.id.to_string();
+        let mut tasks = Vec::new();
+
+        let anchor_slot = (backfill_volumes > 0).then(|| {
+            let (slot, anchor_rx) = AnchorSlot::new();
+            tasks.push(rt.spawn(run_backfill(
+                site_id.clone(),
+                Arc::clone(&state),
+                shutdown_rx.clone(),
+                status_tx.clone(),
+                anchor_rx,
+                backfill_volumes,
+            )));
+            slot
+        });
+
         let supervised_state = Arc::clone(&state);
         let supervised_shutdown = shutdown_rx.clone();
-
-        let handle = rt.spawn(async move {
+        tasks.push(rt.spawn(async move {
             let factory_state = Arc::clone(&supervised_state);
             let factory_shutdown = supervised_shutdown.clone();
             supervise(TaskKind::IngestPipeline, &supervised_state, supervised_shutdown, move || {
@@ -238,39 +374,44 @@ impl Pipeline {
                     factory_shutdown.clone(),
                     status_tx.clone(),
                     poll_interval,
+                    anchor_slot.clone(),
                 )
             })
             .await;
-        });
+        }));
 
-        Self { tasks: vec![handle], shutdown: shutdown_tx }
+        Self { tasks, shutdown: shutdown_tx }
     }
 
     /// Test seam (§4.5): skips `S3Poller` entirely, feeding chunks from
     /// `rx` (which the caller retains the paired `Sender` for) directly
-    /// into assembly. Runs assembly, compute, and the applier once, joined,
-    /// with their own shutdown arms — not wrapped in `supervise`, because
-    /// `rx` is a single-use resource (an `mpsc::Receiver` cannot be
-    /// recreated after a panic drops it, the same reason the production
-    /// quartet must restart as a unit rather than independently).
-    /// Panic-survival is exercised generically instead, against `supervise`
-    /// directly with a synthetic repeatable task factory — see `tests::`
-    /// below.
+    /// into a live [`run_chain`], and — when `backfill_rx` is `Some` —
+    /// chunks from it into a second, backfill-origin chain (ADR-0033),
+    /// skipping the backfill fetcher the same way. Not wrapped in
+    /// `supervise`, because each `Receiver` is a single-use resource (it
+    /// cannot be recreated after a panic drops it, the same reason the
+    /// production quartet must restart as a unit rather than
+    /// independently). Panic-survival is exercised generically instead,
+    /// against `supervise` directly with a synthetic repeatable task
+    /// factory — see `tests::` below.
     #[cfg(test)]
-    fn spawn_from_chunks(rt: &Handle, rx: mpsc::Receiver<ChunkEnvelope>, state: Arc<AppState>) -> Self {
+    fn spawn_from_chunks(
+        rt: &Handle,
+        rx: mpsc::Receiver<ChunkEnvelope>,
+        backfill_rx: Option<mpsc::Receiver<ChunkEnvelope>>,
+        state: Arc<AppState>,
+    ) -> Self {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let applier_shutdown = shutdown_rx.clone();
-        let compute_state = Arc::clone(&state);
-        let compute_shutdown = shutdown_rx.clone();
 
         let handle = rt.spawn(async move {
-            let (event_tx, event_rx) = mpsc::channel::<AssemblyEvent>(EVENT_CHANNEL_CAPACITY);
-            let (update_tx, update_rx) = mpsc::channel::<StateUpdate>(COMPUTE_CHANNEL_CAPACITY);
-            tokio::join!(
-                assembly::run(rx, event_tx, AssemblyConfig::default(), shutdown_rx),
-                compute::compute_loop(event_rx, update_tx, compute_state, compute_shutdown),
-                apply_loop(update_rx, state, applier_shutdown),
-            );
+            let backfill_state = Arc::clone(&state);
+            let backfill_shutdown = shutdown_rx.clone();
+            let backfill = async move {
+                if let Some(backfill_rx) = backfill_rx {
+                    run_chain(backfill_rx, backfill_state, backfill_shutdown, Origin::Backfill, None).await;
+                }
+            };
+            tokio::join!(run_chain(rx, state, shutdown_rx, Origin::Live, None), backfill);
         });
 
         Self { tasks: vec![handle], shutdown: shutdown_tx }
@@ -389,7 +530,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_from_chunks_joins_promptly_on_shutdown() {
         let (chunk_tx, chunk_rx) = mpsc::channel(CHUNK_CHANNEL_CAPACITY);
-        let pipeline = Pipeline::spawn_from_chunks(&Handle::current(), chunk_rx, test_app_state());
+        let pipeline = Pipeline::spawn_from_chunks(&Handle::current(), chunk_rx, None, test_app_state());
         drop(chunk_tx); // nothing to feed; the pipeline should still shut down cleanly
 
         let result = tokio::time::timeout(Duration::from_secs(5), pipeline.shutdown()).await;
@@ -399,7 +540,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_from_chunks_shutdown_is_safe_after_the_pipeline_already_exited() {
         let (chunk_tx, chunk_rx) = mpsc::channel(CHUNK_CHANNEL_CAPACITY);
-        let pipeline = Pipeline::spawn_from_chunks(&Handle::current(), chunk_rx, test_app_state());
+        let pipeline = Pipeline::spawn_from_chunks(&Handle::current(), chunk_rx, None, test_app_state());
         // Closing the sender makes assembly::run's rx.recv() return None,
         // ending the pipeline on its own before shutdown() is ever called.
         drop(chunk_tx);
@@ -407,5 +548,105 @@ mod tests {
 
         let result = tokio::time::timeout(Duration::from_secs(5), pipeline.shutdown()).await;
         assert!(result.is_ok(), "shutdown on an already-exited pipeline must not hang or panic");
+    }
+
+    // --- launch backfill through the test seam (ADR-0033) ---
+
+    const START_OF_VOLUME: &[u8] = include_bytes!("../../nexrad-decoder/tests/fixtures/kdox_vcp35_start_of_volume.bin");
+    const END_OF_VOLUME: &[u8] = include_bytes!("../../nexrad-decoder/tests/fixtures/kdox_vcp35_end_of_volume.bin");
+    const LIVE_SCAN_MS: u32 = 64_800_000;
+    const VOLUME_MS: u32 = 300_000;
+
+    /// A fixture Message 31 restamped with `scan_time_ms` — the collection
+    /// time sits after the 12-byte CTM header, the 16-byte message header
+    /// and the 4-byte radar id (`docs/architecture/nexrad-binary-format.md`).
+    /// The first radial's time is what makes a `VolumeId`, so restamping
+    /// turns one fixture into as many distinct volumes as a test needs.
+    fn stamped(message: &[u8], scan_time_ms: u32) -> Vec<u8> {
+        let mut m = message.to_vec();
+        m[32..36].copy_from_slice(&scan_time_ms.to_be_bytes());
+        m
+    }
+
+    /// One whole (tiny) volume as a single real `-E` chunk: a negative
+    /// length prefix, then a BZh9 block of the start-of-volume radial
+    /// (elevation 1) and the end-of-volume radial (elevation 16). Decodes
+    /// through the production `chunk`/decoder/assembly path into two
+    /// gridded sweeps and a closed volume.
+    fn whole_volume_chunk(scan_time_ms: u32) -> ChunkEnvelope {
+        use std::io::Write as _;
+        let mut stream = stamped(START_OF_VOLUME, scan_time_ms);
+        stream.extend(stamped(END_OF_VOLUME, scan_time_ms));
+        let mut encoder = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::best());
+        encoder.write_all(&stream).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let mut raw = (-(compressed.len() as i32)).to_be_bytes().to_vec();
+        raw.extend(compressed);
+        ChunkEnvelope { kind: crate::chunk::ChunkKind::End, raw_bytes: bytes::Bytes::from(raw) }
+    }
+
+    async fn wait_for_frames(state: &AppState, n: usize) -> crate::state::StateSnapshot {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let snapshot = state.snapshot();
+                if snapshot.frames.len() >= n {
+                    return snapshot;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("the ring never reached {n} frame(s)"))
+    }
+
+    fn scan_times(snapshot: &crate::state::StateSnapshot) -> Vec<u32> {
+        snapshot.frames.iter().map(|f| f.volume.scan_time_ms).collect()
+    }
+
+    #[tokio::test]
+    async fn backfilled_volumes_land_behind_the_live_head_in_volume_order() {
+        let state = test_app_state();
+        let (live_tx, live_rx) = mpsc::channel(CHUNK_CHANNEL_CAPACITY);
+        let (backfill_tx, backfill_rx) = mpsc::channel(CHUNK_CHANNEL_CAPACITY);
+        let pipeline = Pipeline::spawn_from_chunks(&Handle::current(), live_rx, Some(backfill_rx), Arc::clone(&state));
+
+        live_tx.send(whole_volume_chunk(LIVE_SCAN_MS)).await.unwrap();
+        wait_for_frames(&state, 1).await;
+        // Newest first, as `backfill::fetch` sends them.
+        backfill_tx.send(whole_volume_chunk(LIVE_SCAN_MS - VOLUME_MS)).await.unwrap();
+        backfill_tx.send(whole_volume_chunk(LIVE_SCAN_MS - 2 * VOLUME_MS)).await.unwrap();
+        let snapshot = wait_for_frames(&state, 3).await;
+        pipeline.shutdown().await;
+
+        assert_eq!(
+            scan_times(&snapshot),
+            vec![LIVE_SCAN_MS - 2 * VOLUME_MS, LIVE_SCAN_MS - VOLUME_MS, LIVE_SCAN_MS],
+            "three frames, oldest first"
+        );
+        assert!(
+            snapshot.sweeps.iter().all(|s| s.volume.scan_time_ms == LIVE_SCAN_MS),
+            "the live view still comes from the live head"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutting_down_mid_backfill_leaves_a_consistent_ring() {
+        let state = test_app_state();
+        let (live_tx, live_rx) = mpsc::channel(CHUNK_CHANNEL_CAPACITY);
+        let (backfill_tx, backfill_rx) = mpsc::channel(CHUNK_CHANNEL_CAPACITY);
+        let pipeline = Pipeline::spawn_from_chunks(&Handle::current(), live_rx, Some(backfill_rx), Arc::clone(&state));
+
+        live_tx.send(whole_volume_chunk(LIVE_SCAN_MS)).await.unwrap();
+        wait_for_frames(&state, 1).await;
+        for k in 1..=4 {
+            backfill_tx.send(whole_volume_chunk(LIVE_SCAN_MS - k * VOLUME_MS)).await.unwrap();
+        }
+        let result = tokio::time::timeout(Duration::from_secs(5), pipeline.shutdown()).await;
+        assert!(result.is_ok(), "shutdown must not wait for backfill to finish");
+
+        let times = scan_times(&state.snapshot());
+        assert_eq!(times.last(), Some(&LIVE_SCAN_MS), "the live head is still the head");
+        assert!(times.windows(2).all(|w| w[0] < w[1]), "strictly oldest → newest, whatever landed: {times:?}");
+        assert!(times.len() <= 5);
     }
 }

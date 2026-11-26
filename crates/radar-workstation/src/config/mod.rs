@@ -35,7 +35,7 @@ const POLL_INTERVAL_KEY: &str = "ingest.poll_interval_seconds";
 pub const WINDOW_WIDTH_KEY: &str = "window.width";
 pub const WINDOW_HEIGHT_KEY: &str = "window.height";
 pub const VIEW_PRODUCT_KEY: &str = "view.product";
-/// FR-DR-3/FR-CP-1 (S5-f): layer 5 (primary roads) and the reference
+/// FR-DR-3/FR-CP-1 (S5-f): layer 6 (primary roads) and the reference
 /// geometry (range rings/spokes) toggles, persisted the same one-line way
 /// `view.product` already is.
 pub const VIEW_HIGHWAYS_KEY: &str = "view.highways";
@@ -45,6 +45,10 @@ pub const VIEW_REFERENCE_KEY: &str = "view.reference";
 /// written back — like `ingest.poll_interval_seconds`, unlike `view.*`.
 pub const HISTORY_FRAMES_KEY: &str = "history.frames";
 pub const HISTORY_BUDGET_MB_KEY: &str = "history.budget_mb";
+/// ADR-0033: launch backfill on or off. Read-only, like the other
+/// `history.*` keys. `false` is for operators on metered or locked-down
+/// links — it removes backfill's second connection to the bucket.
+pub const HISTORY_BACKFILL_KEY: &str = "history.backfill";
 /// Out-of-range values fall back to the default and report
 /// `ConfigValueInvalid`, the same "reject, don't clamp" precedent the
 /// window-geometry keys set (§10): the operator asked for a specific
@@ -99,6 +103,9 @@ pub struct Config {
     /// from whichever of the two is absent (ADR-0030).
     pub history_frames: Option<usize>,
     pub history_budget_mb: Option<usize>,
+    /// `None` when the file carried no valid `history.backfill` — `main`
+    /// treats that as `true` (ADR-0033).
+    pub history_backfill: Option<bool>,
     /// `None` when the file carried no valid `timeline.*` value — the
     /// render loop's `Timeline::from_config` applies the `TIMELINE_*_DEFAULT`.
     pub timeline_loop_frames: Option<usize>,
@@ -118,6 +125,7 @@ impl Default for Config {
             show_reference: None,
             history_frames: None,
             history_budget_mb: None,
+            history_backfill: None,
             timeline_loop_frames: None,
             timeline_frame_ms: None,
             timeline_dwell_ms: None,
@@ -194,6 +202,7 @@ fn apply_key(config: &mut Config, key: &str, value: String, events: &mut Vec<Eve
         HISTORY_BUDGET_MB_KEY => {
             config.history_budget_mb = parse_in_range(key, &value, HISTORY_BUDGET_MB_RANGE, events);
         }
+        HISTORY_BACKFILL_KEY => config.history_backfill = parse_bool(key, &value, events),
         TIMELINE_LOOP_FRAMES_KEY => {
             config.timeline_loop_frames = parse_in_range(key, &value, TIMELINE_LOOP_FRAMES_RANGE, events);
         }
@@ -428,6 +437,21 @@ mod tests {
         assert!(events.is_empty(), "{events:?}");
         assert_eq!(config.history_frames, Some(8));
         assert_eq!(config.history_budget_mb, Some(96));
+    }
+
+    #[test]
+    fn history_backfill_loads_and_rejects_a_non_boolean() {
+        let path = temp_config_path("history-backfill");
+        std::fs::write(&path, "history.backfill = false\n").unwrap();
+        let (config, events) = load(&path);
+        assert_eq!(config.history_backfill, Some(false));
+        assert!(events.is_empty());
+
+        std::fs::write(&path, "history.backfill = sometimes\n").unwrap();
+        let (config, events) = load(&path);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(config.history_backfill, None, "an invalid value falls back to the default");
+        assert!(matches!(events.as_slice(), [Event::ConfigValueInvalid { .. }]));
     }
 
     #[test]

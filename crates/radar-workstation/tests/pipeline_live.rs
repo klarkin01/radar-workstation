@@ -38,6 +38,7 @@ async fn pipeline_spawn_produces_a_visible_sweep_within_the_deadline() {
         Arc::clone(&state),
         status_tx,
         radar_workstation::ingest::s3_poll::DEFAULT_POLL_INTERVAL,
+        0,
     );
 
     let result = tokio::time::timeout(DEADLINE, async {
@@ -85,6 +86,7 @@ async fn pipeline_spawn_produces_a_gridded_reflectivity_sweep_without_starving_t
         Arc::clone(&state),
         status_tx,
         radar_workstation::ingest::s3_poll::DEFAULT_POLL_INTERVAL,
+        0,
     );
 
     // Watch ingest health concurrently with waiting for the first grid —

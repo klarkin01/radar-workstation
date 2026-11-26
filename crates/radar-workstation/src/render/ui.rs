@@ -15,6 +15,7 @@ use radar_workstation::compute::cut::CutKey;
 use radar_workstation::compute::grid::azimuth_slot;
 use radar_workstation::compute::palette::Palette;
 use radar_workstation::compute::{geometry, DisplayProduct, SweepGrid};
+use radar_workstation::ingest::backfill::BackfillStatus;
 use radar_workstation::ingest::s3_poll::{IngestState, IngestStatus};
 use radar_workstation::sites::Site;
 use radar_workstation::state::StateSnapshot;
@@ -239,6 +240,16 @@ fn ingest_label(status: &IngestStatus) -> (String, bool) {
     }
 }
 
+/// "Backfill k/N" while launch backfill runs (ADR-0033), so the operator
+/// can always see why the loop is growing; nothing once it has stopped (the
+/// reason is an event) or when it is off.
+fn backfill_label(status: &IngestStatus) -> Option<String> {
+    match status.backfill {
+        BackfillStatus::Backfilling { done, of } => Some(format!("Backfill {done}/{of}")),
+        BackfillStatus::Off | BackfillStatus::Complete => None,
+    }
+}
+
 pub fn draw(ui: &mut egui::Ui, input: &ChromeInput) -> ChromeOutput {
     let ctx = ui.ctx().clone();
     status_bar(ui, input);
@@ -252,7 +263,7 @@ pub fn draw(ui: &mut egui::Ui, input: &ChromeInput) -> ChromeOutput {
     }
     // City/site labels (layer 9, §9.3): no toggle, unlike range rings — a
     // site marker has no way to be read without its identifier, and FR-DR-3
-    // only marks layer 5 (highways) toggleable.
+    // only marks layer 6 (highways) toggleable.
     city_labels(&ctx, input.placed_labels);
     if input.snapshot.sweeps.is_empty() {
         loading_indicator(&ctx, input);
@@ -413,6 +424,10 @@ fn status_bar(root: &mut egui::Ui, input: &ChromeInput) {
             if alert {
                 ui.colored_label(ACCENT, label);
             } else {
+                ui.label(label);
+            }
+            if let Some(label) = backfill_label(&input.snapshot.ingest) {
+                ui.separator();
                 ui.label(label);
             }
 
@@ -614,6 +629,16 @@ mod tests {
         let g = grid(DisplayProduct::EchoTops);
         // ground 2 km -> gate 2 directly, no slant correction.
         assert_eq!(sample_at(&g, 2_000.0, 10.0), CursorSample::Value(-32.0));
+    }
+
+    #[test]
+    fn backfill_progress_shows_only_while_backfilling() {
+        let mut status = IngestStatus::default();
+        assert_eq!(backfill_label(&status), None, "off by default");
+        status.backfill = BackfillStatus::Backfilling { done: 3, of: 11 };
+        assert_eq!(backfill_label(&status).as_deref(), Some("Backfill 3/11"));
+        status.backfill = BackfillStatus::Complete;
+        assert_eq!(backfill_label(&status), None, "gone once it finishes");
     }
 
     #[test]

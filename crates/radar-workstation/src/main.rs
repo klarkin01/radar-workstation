@@ -100,7 +100,11 @@ fn main() -> ExitCode {
         state.report(event);
     }
 
-    let pipeline = Pipeline::spawn(runtime.handle(), site, Arc::clone(&state), status_tx, cfg.poll_interval);
+    // ADR-0033: launch backfill fills the ring behind the live volume, on
+    // by default. `--headless` runs the same pipeline, so it backfills too.
+    let backfill_volumes = retention_policy.backfill_volumes(cfg.history_backfill.unwrap_or(true));
+    let pipeline =
+        Pipeline::spawn(runtime.handle(), site, Arc::clone(&state), status_tx, cfg.poll_interval, backfill_volumes);
 
     let exit = if args.headless {
         // The one call Stage 2 left as a placeholder for the render loop —
