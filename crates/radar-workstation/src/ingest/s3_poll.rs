@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use quick_xml::events::Event;
@@ -7,6 +9,7 @@ use tokio::sync::{mpsc, watch};
 use crate::chunk::ChunkKind;
 use crate::state::AppState;
 
+use super::backfill::{AnchorSlot, BackfillStatus, ColdStart};
 use super::volume_seq::{self, VolumeSeq, VolumeWindow};
 use super::ChunkEnvelope;
 
@@ -125,6 +128,10 @@ pub struct IngestStatus {
     /// sentinel, and no longer republished as `new_target - 1` on a re-anchor
     /// (plan §2.3).
     pub current_volume: Option<VolumeSeq>,
+    /// Launch backfill's progress (ADR-0033). Written by the backfill task,
+    /// not the poller — both publish into this one channel with
+    /// `send_modify`, each touching only its own fields.
+    pub backfill: BackfillStatus,
 }
 
 impl Default for IngestStatus {
@@ -134,6 +141,7 @@ impl Default for IngestStatus {
             last_success: None,
             last_error: None,
             current_volume: None,
+            backfill: BackfillStatus::Off,
         }
     }
 }
@@ -179,6 +187,13 @@ pub struct S3Poller {
     /// Consecutive `poll_once` failures. Reset to 0 on any success.
     consecutive_errors: u32,
     status_tx: watch::Sender<IngestStatus>,
+    /// Where the cold start's listing and anchor go for launch backfill
+    /// (ADR-0033). `None` when backfill is off.
+    anchor_slot: Option<Arc<AnchorSlot>>,
+    /// The cold start's listing and anchor, held until the poll that made
+    /// them has delivered its chunks — so backfill's first request goes out
+    /// only after the live volume's have (live first, ADR-0033).
+    pending_cold_start: Option<ColdStart>,
 }
 
 impl S3Poller {
@@ -201,7 +216,17 @@ impl S3Poller {
             seen_any_key_in_current_volume: false,
             consecutive_errors: 0,
             status_tx,
+            anchor_slot: None,
+            pending_cold_start: None,
         }
+    }
+
+    /// Hand the cold start's listing and anchor to launch backfill through
+    /// `slot` (ADR-0033). The slot is shared by every poller a supervised
+    /// restart builds; only the first cold start that succeeds publishes.
+    pub fn with_anchor_slot(mut self, slot: Arc<AnchorSlot>) -> Self {
+        self.anchor_slot = Some(slot);
+        self
     }
 
     /// Runs the polling loop, sending each new chunk over `tx` and
@@ -238,6 +263,9 @@ impl S3Poller {
                             return;
                         }
                     }
+                    if let (Some(slot), Some(cold_start)) = (&self.anchor_slot, self.pending_cold_start.take()) {
+                        slot.publish(cold_start);
+                    }
                 }
                 Err(e) => {
                     self.consecutive_errors += 1;
@@ -263,21 +291,26 @@ impl S3Poller {
         let target = match self.target {
             Some(t) => t,
             None => {
-                let folders = self.list_volume_folders(app_state, &prefix).await?;
+                let folders = list_volume_folders(&mut self.client, app_state, &prefix).await?;
                 self.report_ambiguity(app_state, &folders);
                 // Cold start: anchor to the newest retained volume (partial,
-                // and therefore the lowest-latency choice) rather than
-                // replaying the full retention window (E-10).
+                // and therefore the lowest-latency choice) so the first
+                // render is the live volume (E-10). The poller itself never
+                // walks backwards; when launch backfill is on, the volumes
+                // behind this anchor are fetched by the backfill task on its
+                // own connection (ADR-0033), from this same listing.
                 let t = cold_start_target(&folders);
                 self.target = Some(t);
+                if self.anchor_slot.is_some() {
+                    self.pending_cold_start = Some(ColdStart { folders, anchor: t });
+                }
                 t
             }
         };
         let volume_prefix = format!("{prefix}{target}/");
 
         let start_after = self.last_seen_key.clone();
-        let (keys, _pages) =
-            self.list_all_keys_after(&volume_prefix, start_after.as_deref()).await?;
+        let (keys, _pages) = list_all_keys_after(&mut self.client, &volume_prefix, start_after.as_deref()).await?;
 
         if keys.is_empty() {
             self.consecutive_empty_polls += 1;
@@ -288,29 +321,12 @@ impl S3Poller {
         self.consecutive_empty_polls = 0;
         self.seen_any_key_in_current_volume = true;
 
-        let mut to_fetch: Vec<(String, ChunkKind)> = Vec::with_capacity(keys.len());
-        for key in &keys {
-            match chunk_kind_from_key(key) {
-                Some(kind) => to_fetch.push((key.clone(), kind)),
-                None => app_state.report(crate::event::Event::UnrecognizedKeySuffix { key: key.clone() }),
-            }
-        }
-
-        // Fetched sequentially (ADR-0014: the http-ingest client serializes
-        // requests on a single connection, no connection pool). last_seen_key
-        // and last_completed_volume only advance once every fetch in the
-        // batch has succeeded, so a transient fetch failure causes the whole
-        // batch to be retried on the next poll rather than silently skipping
-        // chunks whose keys were already passed. With sequential fetching
-        // this falls out naturally: the first `?` aborts before either
-        // assignment below.
-        let mut envelopes = Vec::with_capacity(to_fetch.len());
-        let mut saw_end = false;
-        for (key, kind) in &to_fetch {
-            let raw_bytes = self.client.get_object(key).await.map_err(PollError::Http)?;
-            saw_end |= *kind == ChunkKind::End;
-            envelopes.push(ChunkEnvelope { kind: *kind, raw_bytes });
-        }
+        // last_seen_key and last_completed_volume only advance once every
+        // fetch in the batch has succeeded, so a transient fetch failure
+        // causes the whole batch to be retried on the next poll rather than
+        // silently skipping chunks whose keys were already passed: the `?`
+        // aborts before either assignment below.
+        let (envelopes, saw_end) = fetch_keys(&mut self.client, app_state, &keys).await?;
 
         self.last_seen_key = keys.into_iter().next_back();
         if saw_end {
@@ -350,7 +366,7 @@ impl S3Poller {
         let should_relist = !poll_state.seen_any_key_in_current_volume
             && poll_state.consecutive_empty_polls >= REANCHOR_EMPTY_POLLS;
         let listing = if should_relist {
-            let folders = self.list_volume_folders(app_state, prefix).await?;
+            let folders = list_volume_folders(&mut self.client, app_state, prefix).await?;
             self.report_ambiguity(app_state, &folders);
             Some(folders)
         } else {
@@ -418,91 +434,116 @@ impl S3Poller {
             }
         }
     }
+}
 
-    /// Lists the numeric volume-sequence subdirectories directly under `prefix`
-    /// (e.g. `KDOX/166/`, `KDOX/167/`), using S3's `delimiter=/` so the response
-    /// is `CommonPrefixes` rather than a flat, potentially enormous object listing.
-    async fn list_volume_folders(
-        &mut self,
-        app_state: &AppState,
-        prefix: &str,
-    ) -> Result<Vec<VolumeSeq>, PollError> {
-        let mut folders = Vec::new();
-        let mut continuation_token: Option<String> = None;
+/// Lists the numeric volume-sequence subdirectories directly under `prefix`
+/// (e.g. `KDOX/166/`, `KDOX/167/`), using S3's `delimiter=/` so the response
+/// is `CommonPrefixes` rather than a flat, potentially enormous object listing.
+/// Free, not a method, so launch backfill (ADR-0033) shares it on its own
+/// client rather than a copy of it.
+pub(super) async fn list_volume_folders(
+    client: &mut http_ingest::S3Client,
+    app_state: &AppState,
+    prefix: &str,
+) -> Result<Vec<VolumeSeq>, PollError> {
+    let mut folders = Vec::new();
+    let mut continuation_token: Option<String> = None;
 
-        loop {
-            let body = self
-                .client
-                .list_prefix(prefix, None, continuation_token.as_deref(), Some("/"))
-                .await
-                .map_err(PollError::Http)?;
+    loop {
+        let body = client
+            .list_prefix(prefix, None, continuation_token.as_deref(), Some("/"))
+            .await
+            .map_err(PollError::Http)?;
 
-            let page = parse_list_xml(&body)?;
-            for common_prefix in &page.common_prefixes {
-                match parse_volume_folder(prefix, common_prefix) {
-                    Some(volume) => folders.push(volume),
-                    None => app_state
-                        .report(crate::event::Event::UnrecognizedVolumeFolder { entry: common_prefix.clone() }),
-                }
+        let page = parse_list_xml(&body)?;
+        for common_prefix in &page.common_prefixes {
+            match parse_volume_folder(prefix, common_prefix) {
+                Some(volume) => folders.push(volume),
+                None => app_state
+                    .report(crate::event::Event::UnrecognizedVolumeFolder { entry: common_prefix.clone() }),
             }
-
-            if !page.is_truncated {
-                break;
-            }
-            continuation_token = page.next_token;
         }
 
-        Ok(folders)
-    }
-
-    /// Lists every key under `prefix` (one volume-sequence directory) that sorts
-    /// after `start_after`, paging via continuation token. `None` lists the whole
-    /// directory. Keys inside one volume directory use a fixed-width timestamp
-    /// plus zero-padded sequence number, so lexical order matches chronological
-    /// order here — unlike the volume-sequence directory names themselves
-    /// (see `list_volume_folders`).
-    ///
-    /// Returns the collected keys plus the number of S3 list pages fetched — the
-    /// page count is measurement instrumentation for the W1 cold-start timing
-    /// harness (see `mod tests`), not needed by `poll_once` itself.
-    async fn list_all_keys_after(
-        &mut self,
-        prefix: &str,
-        start_after: Option<&str>,
-    ) -> Result<(Vec<String>, usize), PollError> {
-        let mut all_keys = Vec::new();
-        let mut continuation_token: Option<String> = None;
-        let mut first_page = true;
-        let mut pages = 0usize;
-
-        loop {
-            // start-after is only valid on the first page; continuation-token
-            // encodes position implicitly on subsequent pages and must not
-            // be combined with it.
-            let body = self
-                .client
-                .list_prefix(
-                    prefix,
-                    if first_page { start_after } else { None },
-                    continuation_token.as_deref(),
-                    None,
-                )
-                .await
-                .map_err(PollError::Http)?;
-            pages += 1;
-
-            let page = parse_list_xml(&body)?;
-            all_keys.extend(page.keys);
-
-            if !page.is_truncated {
-                break;
-            }
-            continuation_token = page.next_token;
-            first_page = false;
+        if !page.is_truncated {
+            break;
         }
-
-        Ok((all_keys, pages))
+        continuation_token = page.next_token;
     }
+
+    Ok(folders)
+}
+
+/// Lists every key under `prefix` (one volume-sequence directory) that sorts
+/// after `start_after`, paging via continuation token. `None` lists the whole
+/// directory. Keys inside one volume directory use a fixed-width timestamp
+/// plus zero-padded sequence number, so lexical order matches chronological
+/// order here — unlike the volume-sequence directory names themselves
+/// (see `list_volume_folders`).
+///
+/// Returns the collected keys plus the number of S3 list pages fetched — the
+/// page count is measurement instrumentation for the W1 cold-start timing
+/// harness (see `mod tests`), not needed by `poll_once` itself.
+pub(super) async fn list_all_keys_after(
+    client: &mut http_ingest::S3Client,
+    prefix: &str,
+    start_after: Option<&str>,
+) -> Result<(Vec<String>, usize), PollError> {
+    let mut all_keys = Vec::new();
+    let mut continuation_token: Option<String> = None;
+    let mut first_page = true;
+    let mut pages = 0usize;
+
+    loop {
+        // start-after is only valid on the first page; continuation-token
+        // encodes position implicitly on subsequent pages and must not
+        // be combined with it.
+        let body = client
+            .list_prefix(
+                prefix,
+                if first_page { start_after } else { None },
+                continuation_token.as_deref(),
+                None,
+            )
+            .await
+            .map_err(PollError::Http)?;
+        pages += 1;
+
+        let page = parse_list_xml(&body)?;
+        all_keys.extend(page.keys);
+
+        if !page.is_truncated {
+            break;
+        }
+        continuation_token = page.next_token;
+        first_page = false;
+    }
+
+    Ok((all_keys, pages))
+}
+
+/// Fetches `keys` in order, one at a time, and reports any whose suffix is
+/// not a known chunk kind (skipped, not fetched). Returns the envelopes and
+/// whether an `-E` chunk was among them. Sequential by design (ADR-0014:
+/// the http-ingest client serializes requests on a single connection, no
+/// connection pool); the first failure aborts the whole batch. Shared by
+/// the live poller and launch backfill (ADR-0033).
+pub(super) async fn fetch_keys(
+    client: &mut http_ingest::S3Client,
+    app_state: &AppState,
+    keys: &[String],
+) -> Result<(Vec<ChunkEnvelope>, bool), PollError> {
+    let mut envelopes = Vec::with_capacity(keys.len());
+    let mut saw_end = false;
+    for key in keys {
+        let Some(kind) = chunk_kind_from_key(key) else {
+            app_state.report(crate::event::Event::UnrecognizedKeySuffix { key: key.clone() });
+            continue;
+        };
+        let raw_bytes = client.get_object(key).await.map_err(PollError::Http)?;
+        saw_end |= kind == ChunkKind::End;
+        envelopes.push(ChunkEnvelope { kind, raw_bytes });
+    }
+    Ok((envelopes, saw_end))
 }
 
 /// The volume directory a cold start should begin draining: the newest
@@ -513,6 +554,32 @@ impl S3Poller {
 /// Pure function, testable offline.
 fn cold_start_target(folders: &[VolumeSeq]) -> VolumeSeq {
     VolumeWindow::from_listing(folders).map_or(VolumeSeq::MIN, |w| w.newest())
+}
+
+/// The volumes launch backfill fetches (ADR-0033): up to `n` listed volumes
+/// behind `anchor`, **newest first**, walking back through the retained arc
+/// with [`VolumeSeq::pred`] — wrap-aware, so `1 → 999` is a step, not a
+/// jump — and stopping at the arc's oldest end. A sequence number missing
+/// from `folders` (an RDA restart skips some) is passed over, not fetched;
+/// `n` larger than the listing returns everything behind the anchor. Pure,
+/// like [`cold_start_target`], whose `folders` it is given.
+pub(crate) fn backfill_targets(folders: &[VolumeSeq], anchor: VolumeSeq, n: usize) -> Vec<VolumeSeq> {
+    let Some(window) = VolumeWindow::from_listing(folders) else {
+        return Vec::new();
+    };
+    let listed: HashSet<VolumeSeq> = folders.iter().copied().collect();
+    let mut targets = Vec::new();
+    let mut v = anchor;
+    for _ in 0..window.position(anchor) {
+        if targets.len() == n {
+            break;
+        }
+        v = v.pred();
+        if listed.contains(&v) {
+            targets.push(v);
+        }
+    }
+    targets
 }
 
 /// Minimal state `next_target` needs to decide what to do about an empty
@@ -759,6 +826,50 @@ mod tests {
         // Parent §1.2 verbatim: a numeric max would return 999 (03:08Z data);
         // the wrap-aware pick returns 199, the live volume seconds old.
         assert_eq!(cold_start_target(&measured_kdox_wrap()), seq(199));
+    }
+
+    #[test]
+    fn backfill_targets_of_an_empty_listing_is_empty() {
+        assert!(backfill_targets(&[], VolumeSeq::MIN, 11).is_empty());
+    }
+
+    #[test]
+    fn backfill_targets_walk_back_from_the_anchor_newest_first() {
+        let folders: Vec<VolumeSeq> = (100..=120).map(seq).collect();
+        assert_eq!(backfill_targets(&folders, seq(120), 3), vec![seq(119), seq(118), seq(117)]);
+        assert!(backfill_targets(&folders, seq(120), 0).is_empty());
+    }
+
+    #[test]
+    fn backfill_targets_skip_sequence_numbers_missing_from_the_listing() {
+        // 92→165 is the largest observed skip; 116 and 117 are simply absent.
+        let folders: Vec<VolumeSeq> = [110, 111, 112, 113, 114, 115, 118, 119, 120].into_iter().map(seq).collect();
+        assert_eq!(backfill_targets(&folders, seq(120), 4), vec![seq(119), seq(118), seq(115), seq(114)]);
+    }
+
+    #[test]
+    fn backfill_targets_stop_at_the_oldest_retained_volume_when_n_exceeds_the_listing() {
+        let folders: Vec<VolumeSeq> = (5..=9).map(seq).collect();
+        assert_eq!(backfill_targets(&folders, seq(9), 100), vec![seq(8), seq(7), seq(6), seq(5)]);
+        assert!(backfill_targets(&[seq(9)], seq(9), 100).is_empty(), "nothing behind a lone anchor");
+    }
+
+    #[test]
+    fn backfill_targets_cross_the_measured_wrap() {
+        let folders = measured_kdox_wrap();
+        let anchor = cold_start_target(&folders);
+        assert_eq!(anchor, seq(199));
+        let eleven = backfill_targets(&folders, anchor, 11);
+        assert_eq!(eleven, (188..=198).rev().map(seq).collect::<Vec<_>>());
+
+        // Everything behind the live volume: 198..1, then across the wrap to
+        // 999..749, then the lone 659 — and never 999's "numerically larger"
+        // neighbours ahead of 1.
+        let all = backfill_targets(&folders, anchor, usize::MAX);
+        assert_eq!(all.len(), folders.len() - 1);
+        assert_eq!(all[197], seq(1));
+        assert_eq!(all[198], seq(999), "1 → 999 is one step back, not a jump");
+        assert_eq!(all.last(), Some(&seq(659)), "the oldest retained volume is last");
     }
 
     #[test]
@@ -1048,7 +1159,7 @@ mod tests {
         let app_state = test_app_state();
 
         let start = Instant::now();
-        let folders = poller.list_volume_folders(&app_state, &prefix).await.expect("list folders");
+        let folders = list_volume_folders(&mut poller.client, &app_state, &prefix).await.expect("list folders");
         let t_list = start.elapsed();
 
         let window = VolumeWindow::from_listing(&folders);
@@ -1075,6 +1186,67 @@ mod tests {
             poller.last_completed_volume,
             envelopes.len()
         );
+    }
+
+    /// The kernel's peak resident set for this process (`VmHWM`), in KiB.
+    fn peak_rss_kib() -> Option<u64> {
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        let line = status.lines().find(|l| l.starts_with("VmHWM:"))?;
+        line.split_whitespace().nth(1)?.parse().ok()
+    }
+
+    /// ADR-0033's measurement: a `history.frames = 12` launch backfill
+    /// through the production `Pipeline::spawn`, timed from spawn, with
+    /// time-to-first-live-sweep alongside it (backfill must not delay it)
+    /// and the process's peak RSS against "< 200 MB + `history.budget_mb`".
+    /// No GPU in this process, so the RSS is the pipeline and ring alone —
+    /// the windowed app adds driver mappings on top (ADR-0030). Run with:
+    ///
+    ///   cargo test -p radar-workstation --lib -- --ignored --nocapture backfill_twelve_frames
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore]
+    async fn backfill_twelve_frames_latency_and_peak_rss() {
+        use crate::state::history::DEFAULT_HISTORY_BUDGET_BYTES;
+        use crate::state::RetentionPolicy;
+
+        let site = crate::sites::by_id(LIVE_TEST_SITE).expect("site in bundled table");
+        let policy = RetentionPolicy { frames: 12, budget_bytes: DEFAULT_HISTORY_BUDGET_BYTES };
+        let (status_tx, status_rx) = watch::channel(IngestStatus::default());
+        let state = Arc::new(AppState::new(site, status_rx.clone(), policy));
+
+        let start = Instant::now();
+        let pipeline = crate::pipeline::Pipeline::spawn(
+            &tokio::runtime::Handle::current(),
+            site,
+            Arc::clone(&state),
+            status_tx,
+            DEFAULT_POLL_INTERVAL,
+            policy.backfill_volumes(true),
+        );
+
+        let mut first_sweep = None;
+        let deadline = Duration::from_secs(15 * 60);
+        while status_rx.borrow().backfill != BackfillStatus::Complete && start.elapsed() < deadline {
+            if first_sweep.is_none() && !state.snapshot().sweeps.is_empty() {
+                first_sweep = Some(start.elapsed());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let backfill_elapsed = start.elapsed();
+        let snapshot = state.snapshot();
+        let hist_mib = snapshot.frames.iter().map(|f| f.bytes()).sum::<usize>() / (1024 * 1024);
+        let peak_rss_mib = peak_rss_kib().map(|k| k / 1024);
+        let events = state.recent_events(8);
+        pipeline.shutdown().await;
+
+        println!(
+            "backfill_twelve_frames_latency_and_peak_rss: first_sweep={first_sweep:?} \
+             backfill_complete={backfill_elapsed:?} frames={} hist={hist_mib}MiB peak_rss={peak_rss_mib:?}MiB \
+             target_rss_mib={} events={events:?}",
+            snapshot.frames.len(),
+            200 + DEFAULT_HISTORY_BUDGET_BYTES / (1024 * 1024),
+        );
+        assert_eq!(status_rx.borrow().backfill, BackfillStatus::Complete, "backfill did not finish in {deadline:?}");
     }
 
     #[tokio::test]
@@ -1202,7 +1374,7 @@ mod tests {
         let prefix = format!("{}/", poller.site_id);
         let app_state = test_app_state();
 
-        let folders = poller.list_volume_folders(&app_state, &prefix).await.expect("list folders");
+        let folders = list_volume_folders(&mut poller.client, &app_state, &prefix).await.expect("list folders");
         let newest_at_start =
             VolumeWindow::from_listing(&folders).expect("at least one volume folder").newest();
         // One past the newest real volume — indistinguishable, from the
@@ -1275,7 +1447,7 @@ mod tests {
         let prefix = format!("{}/", poller.site_id);
         let app_state = test_app_state();
 
-        let folders = poller.list_volume_folders(&app_state, &prefix).await.expect("list folders");
+        let folders = list_volume_folders(&mut poller.client, &app_state, &prefix).await.expect("list folders");
         for f in &folders {
             assert!(
                 (1..=999).contains(&f.get()),
@@ -1285,8 +1457,7 @@ mod tests {
 
         let window = VolumeWindow::from_listing(&folders).expect("at least one folder");
         let anchor = cold_start_target(&folders);
-        let (keys, _pages) = poller
-            .list_all_keys_after(&format!("{prefix}{anchor}/"), None)
+        let (keys, _pages) = list_all_keys_after(&mut poller.client, &format!("{prefix}{anchor}/"), None)
             .await
             .expect("list anchor keys");
         let newest_key = keys.last().expect("anchor directory has at least one key");

@@ -91,6 +91,15 @@ frame count is the binding constraint (resolved 2026-09-04, Q25 — see
 retained history is FR-TL-1 to FR-TL-10 (§2.11, Stage 6a Part C,
 [ADR-0031](adr/0031-timeline-semantics.md)).
 
+**FR-DA-11.** On launch, after the live volume has been fetched, the application must
+backfill the history ring with the volumes behind it from the chunk bucket, newest
+first, up to `history.frames − 1` volumes and stopping early at `history.budget_mb`.
+Backfill must not delay the live volume or displace it as the newest frame, must be
+cancellable, must show its progress in the status bar, and must report why it
+stopped. It uses a second connection to the same bucket, disclosed in
+[ADR-0033](adr/0033-launch-backfill.md) and `QUICK-START.md`, and
+`history.backfill = false` turns it off.
+
 ---
 
 ### 2.2 NEXRAD Decoding
@@ -188,14 +197,18 @@ direction from the site — the correct reference frame for single-site radar in
 **FR-DR-3.** Geospatial layers must be composited back-to-front in this order:
 1. Background (solid dark color)
 2. Terrain imagery tiles (optional, toggleable)
-3. County boundaries (always visible)
-4. State and country boundaries (always visible)
-5. Major highways (toggleable)
-6. Radar data (active product texture, alpha-composited)
+3. Radar data (active product texture, alpha-composited)
+4. County boundaries (always visible)
+5. State and country boundaries (always visible)
+6. Major highways (toggleable)
 7. Placefile overlays (in user-configured order)
 8. Radar site markers
 9. City labels (zoom-dependent)
 10. UI chrome (egui, drawn last on top of all geospatial content)
+<!-- amended 2026-11-24 ([ADR-0032](adr/0032-map-vectors-over-radar.md)): the vector map
+layers moved above the radar image. Before, counties/states/highways were layers 3–5 and
+radar was layer 6, so any echo hid the boundaries inside it. Layers 7–10 are unchanged;
+tiles, a fill rather than a line, stay under the radar. -->
 
 **FR-DR-4.** Radar data below the minimum displayable threshold must render as fully
 transparent, allowing map layers below to show through.
@@ -227,7 +240,7 @@ at `view::MIN_M_PER_PX` and 8.3× finer than a 250 m radar gate, against a sourc
 vertex every 87.7 m. "Bundled with the binary" and "available immediately at startup" are
 unchanged. Stated coverage limit: TIGER is a United States product, so 13 of the 163
 bundled sites — the five overseas DoD sites, roadless interior Alaska, outer Hawaii — draw
-no highways at all. Layer 5 is toggleable and every other overlay layer is global, so those
+no highways at all. Layer 6 (layer 5 before ADR-0032) is toggleable and every other overlay layer is global, so those
 sites degrade rather than break; no non-public-domain global road source is adopted to
 close the gap. -->
 
@@ -361,7 +374,7 @@ installation.
 **FR-CP-1.** User configuration (active site, color table selections, placefile URLs
 and polling intervals, tile provider URL, toggleable layer states) must persist across
 application restarts. <!-- amended 2026-09-02 (Stage 5, `docs/plans/stage-5-map-underlays.md`):
-"toggleable layer states" is now realized — `view.highways` (layer 5) and `view.reference`
+"toggleable layer states" is now realized — `view.highways` (layer 6 since ADR-0032) and `view.reference`
 (range rings/spokes) round-trip through `config::load`/`save`, the same line-preserving,
 atomic, one-key-per-line pattern `view.product` already used. -->
 
@@ -421,7 +434,10 @@ and are non-negotiable.
 **BC-1.** The application must never initiate a network connection that the user has
 not explicitly configured. The only permitted connections are: NEXRAD data polling
 (to the configured source), map tile fetching (to the configured tile provider), and
-placefile fetching (to user-configured URLs). Nothing else.
+placefile fetching (to user-configured URLs). Nothing else. Launch backfill (FR-DA-11,
+[ADR-0033](adr/0033-launch-backfill.md)) is NEXRAD data fetching from the configured
+source: a second, disclosed connection to the same bucket while it runs, which
+`history.backfill = false` removes.
 
 **BC-2.** The application must never transmit telemetry, usage data, crash reports,
 or any diagnostic information to any external server.
@@ -604,6 +620,9 @@ the authoritative definition of "done" for v1.0.
 - Timeline over the retained live history (FR-TL-*): live / paused / playing, step,
   loop length, an unmissable LIVE / NOT-LIVE state (Stage 6a Part C, see §2.11 and
   [ADR-0031](adr/0031-timeline-semantics.md))
+- Launch backfill of the history ring from the chunk bucket (Stage 6a Part D1, resolved
+  2026-11-25 — see FR-DA-11 and [ADR-0033](adr/0033-launch-backfill.md)), so the loop is
+  populated at launch instead of after 40–60 minutes
 
 ### Explicitly Deferred (Post-v1.0)
 
@@ -624,9 +643,9 @@ the authoritative definition of "done" for v1.0.
 - TDWR site support
 - Regional or national radar composites
 - Arbitrary-time archive playback — jumping to and rendering a past volume the live
-  chunk stream never carried (Stage 6a Part D; distinct from looping the volumes the
-  live stream already retained, which FR-DA-10/ADR-0030 make possible and Stage 6a
-  Part C delivers as playback of the live history ring)
+  chunk stream never carried (Stage 6a Part D2–D4; distinct from looping the volumes the
+  live stream already retained, which FR-DA-10/ADR-0030 make possible, Stage 6a Part C
+  plays back, and D1 backfills at launch, FR-DA-11)
 - Windows or macOS support
 - Mobile or web interface
 

@@ -205,7 +205,8 @@ bug entirely. They are there for LOD and draw-range selection later.
 
 ### 5. No tessellator
 
-`lyon` is not adopted. Layers 3–5 are strokes, not fills. Reassess only if Stage 6
+`lyon` is not adopted. Layers 4–6 (3–5 before [ADR-0032](0032-map-vectors-over-radar.md)
+renumbered them) are strokes, not fills. Reassess only if Stage 6
 placefile polygons need filled interiors (FR-PF-3); even then, ear-clipping a warning
 polygon is not a dependency.
 

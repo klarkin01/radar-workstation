@@ -1,7 +1,7 @@
-// Map underlay / site marker pass (S5-W4 §7, S5-W5 §8): a LineList in world
-// (metre) coordinates, one draw per layer, colour supplied by the uniform
-// rather than a per-vertex attribute (S5-d — four constants are not worth
-// doubling the vertex buffer's cost). The vertex transform is the same
+// Map vector / site marker pass (S5-W4 §7, S5-W5 §8; over the radar since
+// ADR-0032): a LineList in world (metre) coordinates, one draw per layer,
+// colour supplied by the uniform rather than a per-vertex attribute (S5-d —
+// four constants are not worth doubling the vertex buffer's cost). The vertex transform is the same
 // three lines as reference.wgsl's; duplicated rather than shared through a
 // WGSL include mechanism that would exist for three lines (S5-d).
 

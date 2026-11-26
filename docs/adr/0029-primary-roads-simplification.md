@@ -197,12 +197,12 @@ strictly dominates.
 Dropping sub-kilometre parts is separately worthless **for bytes** — 0.7% of points — but
 may still be worth doing for **visual clutter**, since interchange ramps are unresolvable
 below roughly 400 m/px and add nothing but ink. That is a cartography question, not a
-budget one, and it is **deferred until layer 5 has actually been drawn and looked at.**
+budget one, and it is **deferred until layer 5 (layer 6 since ADR-0032) has actually been drawn and looked at.**
 It does not reopen this ADR: it is a generator filter and a bundle regeneration.
 
 ### 4. The coverage limit is stated, not engineered around
 
-13 sites get no roads (Measurement 7). Layer 5 is toggleable and every other overlay layer
+13 sites get no roads (Measurement 7). Layer 5 (6 since ADR-0032) is toggleable and every other overlay layer
 is global, so this degrades rather than breaks — an Alaskan or Okinawan site draws
 coastline, boundaries, and labels with an empty highway layer. No fallback source is
 adopted: the candidates are not public domain, and this is not a defect worth a licence

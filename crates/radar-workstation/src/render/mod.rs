@@ -51,7 +51,7 @@ use winit::window::{Window, WindowId};
 use radar_workstation::assembly::VolumeId;
 use radar_workstation::compute::cut::CutKey;
 use radar_workstation::compute::palette::{self, Palette};
-use radar_workstation::compute::DisplayProduct;
+use radar_workstation::compute::{DisplayProduct, SweepGrid};
 use radar_workstation::event::Event;
 use radar_workstation::sites::Site;
 use radar_workstation::state::AppState;
@@ -70,6 +70,44 @@ use self::view::ViewState;
 const IDLE_TICK: Duration = Duration::from_millis(500);
 /// Dark, near-black — layer 1 of FR-DR-3.
 const BACKGROUND: wgpu::Color = wgpu::Color { r: 0.043, g: 0.047, b: 0.055, a: 1.0 };
+
+/// Pass 1's scene, above the background clear, in FR-DR-3's compositing
+/// order as amended by ADR-0032. Written once so `offscreen`'s read-back
+/// renders exactly what a frame draws.
+struct Scene<'a> {
+    radar: &'a mut RadarRenderer,
+    /// The resolved grid and the frame it came from; `None` draws no radar.
+    radar_grid: Option<(&'a SweepGrid, VolumeId)>,
+    /// `None` when the compiled-in overlay bundle failed validation.
+    overlay: Option<&'a OverlayRenderer>,
+    /// `None` when the `R` toggle is off.
+    reference: Option<&'a ReferenceRenderer>,
+    show_highways: bool,
+}
+
+impl Scene<'_> {
+    fn draw(self, device: &wgpu::Device, queue: &wgpu::Queue, pass: &mut wgpu::RenderPass<'_>, camera: view::Camera) {
+        // Layer 3: the radar image. Layer 2 (tiles) is empty in v1.0
+        // (ADR-0027).
+        if let Some((grid, volume)) = self.radar_grid {
+            self.radar.draw(device, queue, pass, grid, volume, camera);
+        }
+        // Layers 4–6: counties, states/coastline, highways — over the radar
+        // (ADR-0032), so a strong echo never hides a boundary.
+        if let Some(overlay) = self.overlay {
+            overlay.draw(queue, pass, camera, self.show_highways);
+        }
+        // Layer 6a: range rings, spokes and the active-site marker, above
+        // the boundaries.
+        if let Some(reference) = self.reference {
+            reference.draw(queue, pass, camera);
+        }
+        // Layer 8: every other bundled site (S5-W5 §8).
+        if let Some(overlay) = self.overlay {
+            overlay.draw_site_markers(queue, pass, camera);
+        }
+    }
+}
 
 /// View-derived values worth persisting on a clean shutdown (§10). The
 /// render loop owns these; `main` compares against the loaded config and
@@ -464,9 +502,8 @@ impl App {
         };
         egui_renderer.update_buffers(&gpu.device, &gpu.queue, &mut encoder, &tris, &screen_desc);
 
-        // Pass 1: clear to background, overlay (layers 3-5), radar (layer 6),
-        // reference (range rings/active marker, layer 8-ish), site markers
-        // (layer 8, S5-W5 §8).
+        // Pass 1: clear to background (layer 1), then the scene in FR-DR-3's
+        // order as amended by ADR-0032 — see `Scene::draw`.
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("scene"),
@@ -482,21 +519,14 @@ impl App {
                 multiview_mask: None,
             });
             let camera = view::Camera::from_view(&view, vp);
-            // Layers 3-5: map underlay, under the radar (S5-W4 §7).
-            if let Some(overlay) = overlay {
-                overlay.draw(&gpu.queue, &mut pass, camera, view.show_highways);
+            Scene {
+                radar,
+                radar_grid: resolved.grid.as_deref().zip(resolved.source),
+                overlay,
+                reference: view.show_reference.then_some(reference),
+                show_highways: view.show_highways,
             }
-            if let (Some(grid), Some(volume)) = (resolved.grid.as_deref(), resolved.source) {
-                radar.draw(&gpu.device, &gpu.queue, &mut pass, grid, volume, camera);
-            }
-            if view.show_reference {
-                reference.draw(&gpu.queue, &mut pass, camera);
-            }
-            // Layer 8: every other bundled site, after the radar and the
-            // active site's own marker (S5-W5 §8).
-            if let Some(overlay) = overlay {
-                overlay.draw_site_markers(&gpu.queue, &mut pass, camera);
-            }
+            .draw(&gpu.device, &gpu.queue, &mut pass, camera);
         }
 
         // Pass 2: egui chrome (layer 10).

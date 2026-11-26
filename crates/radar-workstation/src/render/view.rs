@@ -69,7 +69,7 @@ pub struct ViewState {
     /// by operator input and the playback clock only (D-12).
     pub timeline: Timeline,
     pub show_reference: bool,
-    /// Layer 5 (primary roads) toggle (FR-DR-3, S5-f). Unlike
+    /// Layer 6 (primary roads) toggle (FR-DR-3, S5-f). Unlike
     /// `show_reference`, this has no effect on the reference geometry pass
     /// — it gates `render::overlay::OverlayRenderer::draw`'s roads layer.
     pub show_highways: bool,

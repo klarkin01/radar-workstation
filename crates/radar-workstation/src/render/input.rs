@@ -40,7 +40,7 @@ pub enum Action {
     ZoomOut,
     ResetView,
     ToggleReference,
-    /// Layer 5 (primary roads), FR-DR-3 (S5-f).
+    /// Layer 6 (primary roads), FR-DR-3 as amended by ADR-0032 (S5-f).
     ToggleHighways,
     ToggleHelp,
     Quit,

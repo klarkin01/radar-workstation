@@ -86,6 +86,9 @@ leave `SITE` out, the `site` config key is used.
 - **The timeline row** above the status bar appears once two or more volumes are
   retained. It has one tick per volume. The loop window is shaded, and the volume on
   screen is ringed.
+- **`Backfill k/N`** appears for about a minute after launch while the loop is filled
+  from the bucket (see [Configuration](#configuration)). It disappears when backfill
+  stops.
 - **`poll Ns ago`** shows when the last poll of the bucket succeeded. It tells you the
   network path is healthy. It does not tell you how fresh the data is.
 - **Cursor readout.** Move the mouse over the radar display and the status bar shows
@@ -111,6 +114,7 @@ log), and that key falls back to its default. Unknown keys are ignored and kept.
 | `view.reference` | `true` / `false` (the `R` toggle) | `true` | yes | FR-DR-3 |
 | `history.frames` | integer, 1–64 (out of range → default) | `12` | no | [ADR-0030](docs/adr/0030-volume-history-retention.md) |
 | `history.budget_mb` | integer, 0–4096 (out of range → default) | `320` | no | [ADR-0030](docs/adr/0030-volume-history-retention.md) |
+| `history.backfill` | `true` / `false` (fill the loop from the bucket at launch) | `true` | no | [ADR-0033](docs/adr/0033-launch-backfill.md) |
 | `timeline.loop_frames` | integer, 2–64 (out of range → default; the `,` `.` keys) | `12` | yes | [ADR-0031](docs/adr/0031-timeline-semantics.md) |
 | `timeline.frame_ms` | integer, 50–2000 ms per loop frame (out of range → default) | `250` | no | [ADR-0031](docs/adr/0031-timeline-semantics.md) |
 | `timeline.dwell_ms` | integer, 0–10000 ms extra hold on the loop's last frame (out of range → default) | `1500` | no | [ADR-0031](docs/adr/0031-timeline-semantics.md) |
@@ -127,9 +131,23 @@ says the loop needs at least two volumes. The loop plays the newest `timeline.lo
 retained volumes, so it can never be longer than the history holds. Every launch starts
 live, and the mode is never saved.
 
+**Backfill at launch.** Once the live volume has arrived, the app fetches the volumes
+before it from the chunk bucket, newest first, until the history is full
+(`history.frames − 1` volumes, or fewer if `history.budget_mb` binds first). The loop is
+usually populated within a minute of launch. While this runs, the status bar shows
+`Backfill k/N`; when it stops, the event line says how many volumes it fetched and why.
+
+Backfill uses a **second HTTPS connection** to the same bucket the live feed uses
+(`unidata-nexrad-level2-chunks`). The connection is dropped when backfill finishes, and
+it costs about one volume download per retained volume (tens of MB at launch). On a
+metered or locked-down link, set `history.backfill = false`. The loop then fills only
+from volumes received after launch, and the app makes one connection.
+
 ## What it doesn't do yet
 
-- No backfill or archive playback. The loop covers only volumes received since launch.
+- No archive playback. The loop covers what the chunk bucket still holds, which is the
+  volumes backfilled at launch plus those received since. You cannot jump to an
+  arbitrary past time.
 - No map imagery/tiles (satellite or street-map backdrop), only vector boundaries and
   roads. This is a deliberate v1.0 scope decision, not a bug.
 - No placefiles (warning polygons, storm reports, spotter/lightning overlays).

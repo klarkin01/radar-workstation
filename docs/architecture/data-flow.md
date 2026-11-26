@@ -123,8 +123,8 @@ authoritative implementation.
    prefix with delimiter=/ (list_volume_folders) to enumerate volume-sequence directories
    as CommonPrefixes, parsed numerically
 2. Anchor cold start to the newest retained volume (cold_start_target, wrap-aware via
-   VolumeWindow), so the first poll fetches the current volume rather than replaying the
-   full retention window (observed ~48 h, not contractual)
+   VolumeWindow), so the first poll fetches the current volume. The poller never walks
+   backwards; the volumes behind the anchor are the launch backfill task's (below)
 3. Each poll, list the single volume-sequence directory `target` via ListObjectsV2, using
    start-after within that directory only — fixed-width <timestamp>-<n>-<kind> filenames
    make lexical order chronological there
@@ -162,6 +162,31 @@ bar attaches to for FR-DA-5 once shared application state exists to read it from
 On site change, the current polling task is cancelled and a new one is spawned for
 the new site. The shared state is cleared and the display resets to the new site's
 most recent available data.
+
+### Launch Backfill Task (ADR-0033)
+
+**Implemented and tested.** See `crates/radar-workstation/src/ingest/backfill.rs` and
+`pipeline::run_backfill`.
+
+```
+1. Wait for the live poller's first successful poll; it hands over its cold-start
+   folder listing and anchor once, through an AnchorSlot (the bucket is listed once)
+2. backfill_targets: walk back from the anchor with VolumeSeq::pred (wrap-aware), up to
+   history.frames − 1 listed volumes, newest first, skipping absent sequence numbers
+3. For each target: list and fetch the whole volume directory on backfill's OWN
+   S3Client (a second connection to the same bucket), retrying up to 3 times
+4. Wait for the previous volume to close in the ring, then ask the ring for room
+   (FrameRing::has_room_behind); stop if there is none
+5. Feed the chunks in key order through backfill's own assembly -> compute -> applier
+   chain (pipeline::run_chain, Origin::Backfill); the ring inserts the frame behind the
+   live head (FrameRing::behind_mut), never displacing it
+6. Stop on N volumes, an exhausted listing, a full ring, a failed volume, or shutdown,
+   and report it once as Event::BackfillFinished
+```
+
+The second connection exists only while backfill runs, and `history.backfill = false`
+removes it. Progress is published as `IngestStatus::backfill` and shown as
+"Backfill k/N".
 
 ### Volume Assembly (ADR-0012)
 
@@ -391,5 +416,6 @@ a few seconds of selection on a normal network connection.
 - Does not modify user settings.
 - Does not communicate with other running instances.
 - Does not make any network connection not explicitly initiated by polling logic
-  or user-configured placefile URLs.
+  (the live poller and, while it runs, launch backfill's second connection to the same
+  bucket, ADR-0033) or user-configured placefile URLs.
 - Does not write to any location outside the application's designated cache directory.

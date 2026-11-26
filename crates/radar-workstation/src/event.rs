@@ -8,23 +8,25 @@
 
 use crate::assembly::VolumeId;
 use crate::compute::DisplayProduct;
+use crate::ingest::backfill::BackfillStop;
 use crate::ingest::s3_poll::PollError;
 use crate::ingest::volume_seq::VolumeSeq;
 
-/// Which supervised unit an event pertains to (S2-W2 §4.3). One variant
-/// today: the poller/assembly/applier trio is supervised together, not
-/// independently — see `pipeline`'s top-level doc comment for why. Later
-/// stages (tile fetching, placefile polling) that don't share this trio's
-/// channel coupling can add their own variants.
+/// Which supervised unit an event pertains to (S2-W2 §4.3). The live
+/// poller/assembly/compute/applier quartet is supervised together, not
+/// independently — see `pipeline`'s top-level doc comment for why. Launch
+/// backfill (ADR-0033) shares no channel with it and is its own unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskKind {
     IngestPipeline,
+    Backfill,
 }
 
 impl std::fmt::Display for TaskKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::IngestPipeline => write!(f, "ingest pipeline"),
+            Self::Backfill => write!(f, "backfill"),
         }
     }
 }
@@ -98,6 +100,9 @@ pub enum Event {
     /// invariant every other function relies on. Observability, not data
     /// (ADR-0012's rule table).
     LateVolumeDiscarded { volume: VolumeId },
+    /// Launch backfill stopped (ADR-0033) — reported once per launch, with
+    /// how many of the requested volumes it fetched and why it stopped.
+    BackfillFinished { fetched: usize, requested: usize, reason: BackfillStop },
 
     // --- colour tables (S3-W3, `compute::palette`) ---
     /// A `.pal` line was neither a comment, blank, nor a recognized,
@@ -203,6 +208,9 @@ impl std::fmt::Display for Event {
                 f,
                 "discarded a sweep/derived update for volume {volume:?}, older than every retained frame"
             ),
+            Self::BackfillFinished { fetched, requested, reason } => {
+                write!(f, "backfill fetched {fetched} of {requested} volumes: {reason}")
+            }
             Self::PaletteLineUnparseable { product, line } => {
                 write!(f, "{product} palette line {line} is not valid, skipping")
             }
@@ -307,6 +315,11 @@ mod tests {
         let discarded = Event::LateVolumeDiscarded { volume: VolumeId { julian_date: 20_000, scan_time_ms: 100 } };
         let text = discarded.to_string();
         assert!(text.contains("20000") || text.contains("20_000"));
+
+        let backfill = Event::BackfillFinished { fetched: 7, requested: 11, reason: BackfillStop::HistoryFull };
+        let text = backfill.to_string();
+        assert!(text.contains("7 of 11"));
+        assert!(text.contains("history.budget_mb"));
     }
 
     fn sample_event() -> Event {

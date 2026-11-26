@@ -453,6 +453,24 @@ mod tests {
     }
 
     #[test]
+    fn a_paused_volume_stays_on_screen_when_backfill_inserts_older_frames_behind_it() {
+        // ADR-0033: backfill inserts at the front of the ring, shifting every
+        // index. The focus is a VolumeId, so the display must not move.
+        let three: Vec<_> = [200, 300, 400].into_iter().map(|t| frame(t, 35, &[(1, 0.5, &[REF])])).collect();
+        let mut four = vec![frame(100, 35, &[(1, 0.5, &[REF])])];
+        four.extend(three.iter().cloned());
+        let tl = at(Mode::Paused(volume(300)));
+
+        let before = resolve(&tl, REF, cut05(), &snapshot(three));
+        let after = resolve(&tl, REF, cut05(), &snapshot(four));
+        assert_eq!(before.focus, Some(volume(300)));
+        assert_eq!(after.focus, Some(volume(300)), "still on the volume the operator paused on");
+        assert_eq!(after.source, before.source);
+        assert_eq!(after.pinned_evicted, None);
+        assert_eq!(current_index(&after), Some(2), "its index moved; it did not");
+    }
+
+    #[test]
     fn a_derived_product_resolves_per_frame() {
         let snap = snapshot(vec![
             frame_with_derived(100, 35, &[DisplayProduct::Vil]),

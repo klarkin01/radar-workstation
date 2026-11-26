@@ -365,5 +365,6 @@ to live. Small, but it is what makes D2/D3 usable, and it is the last piece of
   clearly v1.0. Arbitrary-time archive playback is a larger surface and might
   reasonably be deferred — but it should be deferred deliberately, in an ADR,
   the way tiles were.
-  *Still open (CK-21). `stage-6a-checkpoint.md` §6 recommends putting D1
-  (backfill) in v1.0, with D2–D4 decided by an ADR.*
+  *Partly resolved (CK-21). D1 (backfill) is in v1.0 and implemented
+  (2026-11-25, [ADR-0033](../adr/0033-launch-backfill.md), FR-DA-11). D2–D4 are
+  still to be decided by an ADR.*

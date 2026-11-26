@@ -1,5 +1,6 @@
-//! The map underlay pass (layers 3–5, S5-W4 §7) and non-active radar site
-//! markers (layer 8, S5-W5 §8). One `wgpu` pipeline, one shared vertex
+//! The map vector pass (layers 4–6, S5-W4 §7; over the radar since
+//! ADR-0032) and non-active radar site markers (layer 8, S5-W5 §8). One
+//! `wgpu` pipeline, one shared vertex
 //! buffer and one shared index buffer for every geometry layer (counties,
 //! states/provinces, coastline, primary roads), a per-layer draw range plus
 //! a small per-layer uniform buffer for colour (S5-d — see that decision
@@ -29,16 +30,26 @@ const STATES_KIND: u32 = 2;
 const COASTLINE_KIND: u32 = 3;
 const ROADS_KIND: u32 = 4;
 
-/// Colours, in draw order (S5-W4 §7). These sit *under* the radar image and
-/// must not compete with it — the Instrument Principle governs the table.
-/// States/provinces and coastline share a colour deliberately: FR-DR-3
-/// treats them as one compositing layer (layer 4), and they read as the
-/// same class of feature to an operator.
+/// Colours, in draw order. These are drawn *over* the radar image
+/// (ADR-0032), so each must read against every v1.0 palette as well as
+/// against the bare background, and stay slightly transparent so the echo
+/// under a line is still legible. Tuned by CIELAB ΔE of the blended line
+/// against each palette entry (ADR-0032 §3): the near-white states line
+/// and the rose roads line hold ΔE ≥ 69 and ≥ 43 over 45–75 dBZ, where the
+/// Stage 5 grey/orange values fell to 46 and 21. No neutral line can beat
+/// a neutral palette entry — the weak case left is the near-white end of
+/// spectrum width and ZDR ≈ 0 dB, stated rather than engineered around.
+///
+/// Prominence, highest first: states/coastline, roads, counties —
+/// counties stay the least prominent line. States/provinces and coastline
+/// share a colour deliberately: FR-DR-3 treats them as one compositing
+/// layer (layer 5), and they read as the same class of feature to an
+/// operator.
 const DRAW_ORDER: [(u32, [f32; 4]); 4] = [
-    (COUNTIES_KIND, [0.36, 0.38, 0.43, 0.55]),
-    (STATES_KIND, [0.58, 0.62, 0.70, 0.75]),
-    (COASTLINE_KIND, [0.58, 0.62, 0.70, 0.75]),
-    (ROADS_KIND, [0.72, 0.55, 0.30, 0.60]),
+    (COUNTIES_KIND, [0.62, 0.64, 0.70, 0.80]),
+    (STATES_KIND, [0.88, 0.90, 0.95, 0.90]),
+    (COASTLINE_KIND, [0.88, 0.90, 0.95, 0.90]),
+    (ROADS_KIND, [0.92, 0.58, 0.72, 0.85]),
 ];
 
 /// Dimmer than the active site's marker (`reference::MARKER_COLOR`) so the
@@ -254,8 +265,9 @@ impl OverlayRenderer {
         }
     }
 
-    /// Layers 3–5: counties, states/provinces, coastline, and (when
-    /// `show_highways`) primary roads — drawn before the radar pass.
+    /// Layers 4–6: counties, states/provinces, coastline, and (when
+    /// `show_highways`) primary roads — drawn after the radar image and
+    /// before the reference geometry (ADR-0032; `render::Scene::draw`).
     pub fn draw(&self, queue: &wgpu::Queue, pass: &mut wgpu::RenderPass<'_>, camera: Camera, show_highways: bool) {
         pass.set_pipeline(&self.pipeline);
         pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);

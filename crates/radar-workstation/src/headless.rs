@@ -26,11 +26,12 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// Stage 6a Part B (ADR-0030) adds `frames=<retained>/<requested>` and
 /// `hist=<n>MiB` — the ring's depth against what was asked for, and its
 /// total byte footprint — so the ring is diagnosable before Part C draws a
-/// timeline over it.
+/// timeline over it. ADR-0033 adds `backfill=<status>`, so a headless run
+/// shows launch backfill's progress the way the status bar does.
 fn format_state_line(snapshot: &StateSnapshot, policy: RetentionPolicy) -> String {
     let hist_bytes: usize = snapshot.frames.iter().map(|f| f.bytes()).sum();
     let mut line = format!(
-        "[{}] rev={} frames={}/{} hist={}MiB sweeps={} derived={} last_complete_vcp={:?} ingest={:?}",
+        "[{}] rev={} frames={}/{} hist={}MiB sweeps={} derived={} last_complete_vcp={:?} ingest={:?} backfill={:?}",
         snapshot.site.id,
         snapshot.revision,
         snapshot.frames.len(),
@@ -40,6 +41,7 @@ fn format_state_line(snapshot: &StateSnapshot, policy: RetentionPolicy) -> Strin
         snapshot.derived.len(),
         snapshot.last_complete.map(|v| v.vcp_number),
         snapshot.ingest.state,
+        snapshot.ingest.backfill,
     );
     for sweep in &snapshot.sweeps {
         let _ = write!(line, " el={} ({:.2}°)", sweep.elevation_number, sweep.elevation_deg);

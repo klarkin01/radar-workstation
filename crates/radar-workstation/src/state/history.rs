@@ -43,7 +43,10 @@ use super::{DisplaySweep, VolumeSummary};
 pub struct Frame {
     pub volume: VolumeId,
     pub vcp_number: u16,
-    /// When this frame's first sweep was applied.
+    /// When this frame's first sweep was applied — **arrival** time, not
+    /// scan time. For a live frame the two are close; for a frame filled by
+    /// launch backfill (ADR-0033) it is when backfill fetched it, which can
+    /// be an hour after the scan. Scan time is `volume`.
     pub first_applied: Instant,
     /// This volume's own closed sweeps, by elevation number.
     pub sweeps: BTreeMap<u8, DisplaySweep>,
@@ -63,7 +66,8 @@ fn derived_bytes(derived: &BTreeMap<DisplayProduct, Arc<SweepGrid>>) -> usize {
 }
 
 impl Frame {
-    /// A frame is normally created only by `FrameRing::head_mut`; this stays
+    /// A frame is normally created only by `FrameRing::head_mut` or
+    /// `FrameRing::behind_mut`; this stays
     /// `pub` for test helpers (in this crate and in `render`'s own test
     /// suite, a different crate) that need to build one directly rather
     /// than drive a whole ring.
@@ -161,6 +165,19 @@ impl RetentionPolicy {
     /// in configuration maps to this, and the newest frame is still never
     /// evicted.
     pub const DISABLED: Self = Self { frames: 1, budget_bytes: 0 };
+
+    /// How many volumes launch backfill asks for (ADR-0033): every frame
+    /// the ring holds besides the live head, so backfill needs no count of
+    /// its own. 0 when backfill is off (`history.backfill = false`) or when
+    /// retention has no byte budget to hold a second frame. The budget can
+    /// still stop backfill sooner, at run time (`FrameRing::has_room_behind`).
+    pub fn backfill_volumes(self, enabled: bool) -> usize {
+        if enabled && self.budget_bytes > 0 {
+            self.frames.saturating_sub(1)
+        } else {
+            0
+        }
+    }
 }
 
 impl Default for RetentionPolicy {
@@ -175,6 +192,16 @@ impl Default for RetentionPolicy {
 /// relies on — reported as `Event::LateVolumeDiscarded`, not applied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LateVolume;
+
+/// [`FrameRing::behind_mut`] would not create a frame for this backfilled
+/// volume (ADR-0033): either the ring has no room behind its head (see
+/// [`FrameRing::has_room_behind`]), or the volume is newer than the head,
+/// which backfill never legitimately produces and must not be allowed to
+/// displace the live head. Not an error to report per sweep — the backfill
+/// task checks `has_room_behind` before each volume and reports its stop
+/// once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotAdmitted;
 
 /// The retained volumes, oldest first. `Arc<Frame>` so a snapshot costs one
 /// refcount bump per frame whatever each frame holds (ADR-0030 §3.2); the
@@ -193,11 +220,18 @@ pub struct FrameRing {
     /// tracked so `trim` reports `Event::HistoryBudgetBound` on the rising
     /// edge only (ADR-0030 §3.3), not once per eviction in steady state.
     budget_bound: bool,
+    /// Whether `trim` has evicted anything since construction or the last
+    /// `clear`. Once it has, the ring is at a bound, and any frame older
+    /// than everything retained would be the next eviction — so
+    /// [`Self::behind_mut`] stops admitting them (ADR-0033). Without this a
+    /// backfill frame evicted mid-fill would be re-created by its own next
+    /// sweep, and evicted again, once per sweep.
+    evicted: bool,
 }
 
 impl FrameRing {
     pub fn new(policy: RetentionPolicy) -> Self {
-        Self { frames: VecDeque::new(), policy, bytes: 0, total_pushed: 0, budget_bound: false }
+        Self { frames: VecDeque::new(), policy, bytes: 0, total_pushed: 0, budget_bound: false, evicted: false }
     }
 
     /// The frame for `volume`: the newest frame if `volume` matches it, a
@@ -217,6 +251,44 @@ impl FrameRing {
         }
         let idx = self.frames.iter().position(|f| f.volume == volume).ok_or(LateVolume)?;
         Ok(Arc::make_mut(&mut self.frames[idx]))
+    }
+
+    /// Backfill's ordered insert (ADR-0033): the frame for `volume`, created
+    /// at its `VolumeId` position if none is retained. Unlike
+    /// [`Self::head_mut`], an older volume is placed behind the head rather
+    /// than refused. Two rules keep it from disturbing live data:
+    ///
+    /// - It **never** creates a frame newer than the head of a non-empty
+    ///   ring — the live head is never displaced. (An empty ring admits the
+    ///   volume: backfill's first sweep can land before live's.)
+    /// - It refuses a new frame when [`Self::has_room_behind`] is false,
+    ///   because the next `trim` would evict it straight away.
+    ///
+    /// An already-retained frame is returned whatever its position — that
+    /// is a later sweep of a volume backfill is part-way through, or a
+    /// re-closure, and replaces in place as `head_mut` does.
+    pub fn behind_mut(&mut self, volume: VolumeId, vcp_number: u16, now: Instant) -> Result<&mut Frame, NotAdmitted> {
+        if let Some(idx) = self.frames.iter().position(|f| f.volume == volume) {
+            return Ok(Arc::make_mut(&mut self.frames[idx]));
+        }
+        let newer_than_head = self.frames.back().is_some_and(|newest| volume > newest.volume);
+        if newer_than_head || !self.has_room_behind() {
+            return Err(NotAdmitted);
+        }
+        let idx = self.frames.partition_point(|f| f.volume < volume);
+        self.frames.insert(idx, Arc::new(Frame::new(volume, vcp_number, now)));
+        self.total_pushed += 1;
+        Ok(Arc::make_mut(&mut self.frames[idx]))
+    }
+
+    /// Whether a frame older than everything retained could still be kept:
+    /// nothing has been evicted yet, and the ring is under both its frame
+    /// count and its byte budget. The backfill task asks this before each
+    /// volume it fetches (ADR-0033) — `false` is its "history is full" stop.
+    /// `bytes` is as of the last `trim`, which `apply` runs after every
+    /// change.
+    pub fn has_room_behind(&self) -> bool {
+        !self.evicted && self.frames.len() < self.policy.frames && self.bytes < self.policy.budget_bytes
     }
 
     /// The frame for `volume`, without creating one if none is retained —
@@ -249,6 +321,7 @@ impl FrameRing {
         while self.frames.len() > 1 && (self.frames.len() > self.policy.frames || self.bytes > self.policy.budget_bytes)
         {
             self.frames.pop_front();
+            self.evicted = true;
             self.recompute_bytes();
         }
 
@@ -309,6 +382,7 @@ impl FrameRing {
         self.bytes = 0;
         self.total_pushed = 0;
         self.budget_bound = false;
+        self.evicted = false;
     }
 }
 
@@ -462,6 +536,14 @@ mod tests {
     }
 
     #[test]
+    fn backfill_asks_for_every_frame_behind_the_head_and_nothing_when_off() {
+        assert_eq!(RetentionPolicy::default().backfill_volumes(true), DEFAULT_HISTORY_FRAMES - 1);
+        assert_eq!(RetentionPolicy::default().backfill_volumes(false), 0);
+        assert_eq!(RetentionPolicy::DISABLED.backfill_volumes(true), 0);
+        assert_eq!(RetentionPolicy { frames: 1, budget_bytes: usize::MAX }.backfill_volumes(true), 0);
+    }
+
+    #[test]
     fn the_frame_count_bound_evicts_the_oldest_first() {
         let policy = RetentionPolicy { frames: 2, budget_bytes: usize::MAX };
         let mut ring = FrameRing::new(policy);
@@ -534,6 +616,126 @@ mod tests {
         assert!(ring.newest().unwrap().sweeps.is_empty(), "the late sweep must not land in the head");
         let old_frame = ring.iter().find(|f| f.volume == volume_id(100)).unwrap();
         assert!(old_frame.sweeps.contains_key(&3));
+    }
+
+    fn reflectivity(ring: &mut FrameRing, scan_time_ms: u32, cells: usize) {
+        let frame = ring.behind_mut(volume_id(scan_time_ms), 35, t0()).expect("admitted");
+        frame.insert_sweep(sweep(
+            1,
+            volume_id(scan_time_ms),
+            35,
+            vec![grid(DisplayProduct::Reflectivity, 1, cells)],
+        ));
+    }
+
+    fn volumes(ring: &FrameRing) -> Vec<VolumeId> {
+        ring.iter().map(|f| f.volume).collect()
+    }
+
+    #[test]
+    fn a_backfilled_volume_is_inserted_behind_the_head_in_volume_order() {
+        let mut ring = FrameRing::new(RetentionPolicy { frames: 4, budget_bytes: usize::MAX });
+        ring.head_mut(volume_id(300), 35, t0()).unwrap();
+        reflectivity(&mut ring, 200, 16);
+        ring.trim();
+        reflectivity(&mut ring, 100, 16);
+        ring.trim();
+        assert_eq!(volumes(&ring), vec![volume_id(100), volume_id(200), volume_id(300)]);
+        assert_eq!(ring.newest().unwrap().volume, volume_id(300), "the live head is still the head");
+    }
+
+    #[test]
+    fn backfill_into_an_empty_ring_is_admitted_and_live_then_pushes_ahead_of_it() {
+        let mut ring = FrameRing::new(RetentionPolicy { frames: 4, budget_bytes: usize::MAX });
+        reflectivity(&mut ring, 200, 16);
+        ring.head_mut(volume_id(300), 35, t0()).unwrap();
+        assert_eq!(volumes(&ring), vec![volume_id(200), volume_id(300)]);
+    }
+
+    #[test]
+    fn backfill_never_creates_a_frame_newer_than_the_head() {
+        let mut ring = FrameRing::new(RetentionPolicy { frames: 4, budget_bytes: usize::MAX });
+        ring.head_mut(volume_id(200), 35, t0()).unwrap();
+        assert_eq!(ring.behind_mut(volume_id(300), 35, t0()).err(), Some(NotAdmitted));
+        assert_eq!(volumes(&ring), vec![volume_id(200)]);
+    }
+
+    #[test]
+    fn a_duplicate_backfilled_volume_reuses_its_frame() {
+        let mut ring = FrameRing::new(RetentionPolicy { frames: 4, budget_bytes: usize::MAX });
+        ring.head_mut(volume_id(300), 35, t0()).unwrap();
+        reflectivity(&mut ring, 200, 16);
+        reflectivity(&mut ring, 200, 40);
+        ring.trim();
+        assert_eq!(ring.len(), 2, "the same volume twice is one frame");
+        assert_eq!(ring.oldest().unwrap().bytes(), 40, "a re-closure replaces, it does not add");
+    }
+
+    #[test]
+    fn a_full_ring_refuses_a_new_frame_behind_the_head() {
+        let mut ring = FrameRing::new(RetentionPolicy { frames: 2, budget_bytes: usize::MAX });
+        ring.head_mut(volume_id(300), 35, t0()).unwrap();
+        reflectivity(&mut ring, 200, 16);
+        ring.trim();
+        assert!(!ring.has_room_behind());
+        assert_eq!(ring.behind_mut(volume_id(100), 35, t0()).err(), Some(NotAdmitted));
+        assert_eq!(volumes(&ring), vec![volume_id(200), volume_id(300)], "nothing displaced");
+    }
+
+    #[test]
+    fn backfill_stops_once_the_budget_binds_and_does_not_churn() {
+        // Room for two 60-byte frames, not three.
+        let mut ring = FrameRing::new(RetentionPolicy { frames: 10, budget_bytes: 130 });
+        ring.head_mut(volume_id(400), 35, t0()).unwrap().insert_sweep(sweep(
+            1,
+            volume_id(400),
+            35,
+            vec![grid(DisplayProduct::Reflectivity, 1, 60)],
+        ));
+        ring.trim();
+        reflectivity(&mut ring, 300, 60);
+        ring.trim();
+        assert!(ring.has_room_behind(), "120 of 130 bytes");
+        reflectivity(&mut ring, 200, 60);
+        let bound = ring.trim();
+        assert!(bound.is_none(), "frames=10 was never reached, so this is not the budget-bound edge");
+        assert_eq!(volumes(&ring), vec![volume_id(300), volume_id(400)], "the over-budget oldest went first");
+        assert!(!ring.has_room_behind(), "an eviction closes the ring to backfill");
+        assert_eq!(
+            ring.behind_mut(volume_id(200), 35, t0()).err(),
+            Some(NotAdmitted),
+            "the evicted volume's next sweep must not re-create it"
+        );
+    }
+
+    #[test]
+    fn steady_state_eviction_also_closes_the_ring_to_backfill() {
+        let mut ring = FrameRing::new(RetentionPolicy { frames: 2, budget_bytes: usize::MAX });
+        for t in [100, 200, 300] {
+            ring.head_mut(volume_id(t), 35, t0()).unwrap();
+            ring.trim();
+        }
+        assert!(!ring.has_room_behind());
+        ring.clear();
+        assert!(ring.has_room_behind(), "a site change reopens it");
+    }
+
+    #[test]
+    fn a_frame_inserted_behind_the_head_does_not_change_the_heads_elevations_in_the_live_view() {
+        let mut ring = FrameRing::new(RetentionPolicy { frames: 4, budget_bytes: usize::MAX });
+        ring.head_mut(volume_id(200), 35, t0()).unwrap().insert_sweep(sweep(
+            1,
+            volume_id(200),
+            35,
+            vec![grid(DisplayProduct::Reflectivity, 1, 16)],
+        ));
+        let frame = ring.behind_mut(volume_id(100), 35, t0()).unwrap();
+        frame.insert_sweep(sweep(1, volume_id(100), 35, vec![grid(DisplayProduct::Reflectivity, 1, 16)]));
+        frame.insert_sweep(sweep(2, volume_id(100), 35, vec![grid(DisplayProduct::Reflectivity, 2, 16)]));
+
+        let sweeps = live_sweeps(ring.as_deque());
+        assert_eq!(sweeps[0].volume, volume_id(200), "the newest frame wins every elevation it has");
+        assert_eq!(sweeps[1].volume, volume_id(100), "and the backfilled frame fills only what it lacks");
     }
 
     #[test]
