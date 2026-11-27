@@ -253,7 +253,7 @@ fn backfill_label(status: &IngestStatus) -> Option<String> {
 pub fn draw(ui: &mut egui::Ui, input: &ChromeInput) -> ChromeOutput {
     let ctx = ui.ctx().clone();
     status_bar(ui, input);
-    // Added after the status bar, so egui stacks it directly above it.
+    // The status bar is the top panel; the timeline row keeps the bottom.
     let scrub_to = scrubber(ui, input.resolved);
     if let Some(palette) = input.palette {
         legend(ui, palette, input.resolved.grid.as_deref(), input.view.product);
@@ -374,7 +374,7 @@ fn city_labels(ctx: &egui::Context, placed: &[PlacedLabel]) {
 fn status_bar(root: &mut egui::Ui, input: &ChromeInput) {
     let r = input.resolved;
     let product = input.view.product;
-    egui::Panel::bottom("status_bar").show(root, |ui| {
+    egui::Panel::top("status_bar").show(root, |ui| {
         ui.horizontal_wrapped(|ui| {
             ui.label(format!("{} — {}", input.site.id, input.site.name));
             ui.separator();
@@ -501,6 +501,9 @@ fn legend(root: &mut egui::Ui, palette: &Palette, grid: Option<&SweepGrid>, prod
     });
 }
 
+/// Wide enough for the widest readout line ("459.9 km  359°", "-31.5 dBZ").
+const READOUT_MIN_WIDTH: f32 = 90.0;
+
 fn cursor_readout(ctx: &egui::Context, input: &ChromeInput) {
     let (Some((wx, wy)), Some(pos)) = (input.cursor_world, ctx.pointer_latest_pos()) else { return };
     let ground_m = (wx * wx + wy * wy).sqrt();
@@ -510,7 +513,7 @@ fn cursor_readout(ctx: &egui::Context, input: &ChromeInput) {
         input.resolved.grid.as_ref().map(|g| g.elevation_deg as f64).unwrap_or(0.5),
     );
     let _ = slant_m;
-    let height_kft = height_m / 0.3048 / 1000.0;
+    let height_ft = height_m / geometry::METERS_PER_FOOT;
 
     let value_line = match input.resolved.grid.as_ref().map(|g| sample_at(g, ground_m, az_deg)) {
         Some(CursorSample::Value(v)) => {
@@ -526,9 +529,16 @@ fn cursor_readout(ctx: &egui::Context, input: &ChromeInput) {
         .fixed_pos(pos + egui::vec2(16.0, 16.0))
         .interactable(false)
         .show(ctx, |ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui| {
+            // One line per item, never wrapped, at a fixed minimum width: the
+            // box neither narrows near the window edge nor jitters as the
+            // value line changes length. 70% background over the radar.
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            ui.visuals_mut().override_text_color = Some(egui::Color32::from_gray(220));
+            let fill = ui.visuals().window_fill.gamma_multiply(0.7);
+            egui::Frame::popup(ui.style()).fill(fill).show(ui, |ui| {
+                ui.set_min_width(READOUT_MIN_WIDTH);
                 ui.label(format!("{:.1} km  {:03.0}°", ground_m / 1000.0, az_deg));
-                ui.label(format!("{height_kft:.1} kft"));
+                ui.label(format!("{height_ft:.0} ft"));
                 ui.label(value_line);
             });
         });

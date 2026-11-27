@@ -11,6 +11,8 @@ const EARTH_RADIUS_M: f64 = 6_371_000.0;
 /// earth" approximation for standard atmospheric refraction).
 const REFRACTION_K: f64 = 4.0 / 3.0;
 const KE_A: f64 = REFRACTION_K * EARTH_RADIUS_M;
+/// International foot, exact by definition.
+pub const METERS_PER_FOOT: f64 = 0.3048;
 
 /// Slant range and height above the radar for a target at ground range
 /// `ground_m` along the surface, on a beam at elevation `elev_deg`.

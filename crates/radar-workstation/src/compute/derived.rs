@@ -15,7 +15,6 @@ use crate::event::Event;
 
 pub const ECHO_TOP_THRESHOLD_DBZ: f32 = 18.0;
 const ECHO_TOP_MAX_KFT: f32 = 70.0;
-const METERS_PER_FOOT: f32 = 0.3048;
 
 pub const VIL_HAIL_CAP_DBZ: f32 = 56.0;
 const VIL_MAX_KG_M2: f32 = 80.0;
@@ -155,7 +154,7 @@ fn echo_tops(tilts: &[Arc<SweepGrid>], out: &OutputGeometry) -> Option<SweepGrid
             }
 
             if let Some(height_m) = best_height_m {
-                let kft = (height_m as f32 / METERS_PER_FOOT) / 1000.0;
+                let kft = (height_m / geometry::METERS_PER_FOOT) as f32 / 1000.0;
                 cells[a as usize * out.gate_count as usize + g as usize] = quantise(kft, ECHO_TOP_MAX_KFT);
                 filled[a as usize] = true;
             }
@@ -285,7 +284,7 @@ mod tests {
 
         let grid = echo_tops(&[low, high], &out).expect("must produce a grid");
         let (_, h) = geometry::slant_range_and_height(ground_m, 0.5);
-        let expected_kft = (h as f32 / METERS_PER_FOOT) / 1000.0;
+        let expected_kft = (h / geometry::METERS_PER_FOOT) as f32 / 1000.0;
         let got = grid.physical(0, 0).expect("must be filled");
         assert!((got - expected_kft).abs() < 0.2, "expected {expected_kft} kft, got {got}");
     }
@@ -299,7 +298,7 @@ mod tests {
 
         let grid = echo_tops(&[low, high], &out).unwrap();
         let (_, h) = geometry::slant_range_and_height(ground_m, 5.0);
-        let expected_kft = (h as f32 / METERS_PER_FOOT) / 1000.0;
+        let expected_kft = (h / geometry::METERS_PER_FOOT) as f32 / 1000.0;
         let got = grid.physical(0, 0).unwrap();
         assert!((got - expected_kft).abs() < 0.2, "expected {expected_kft} kft, got {got}");
     }

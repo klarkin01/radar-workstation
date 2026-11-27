@@ -25,7 +25,7 @@ This opens a window, starts pulling live Level II data for that site from the pu
 real-time chunk stream on AWS S3 (`unidata-nexrad-level2-chunks`, hosted by Unidata;
 see [ADR-0011](docs/adr/0011-chunk-stream-data-source.md)), and draws it as it arrives.
 No account or API key is needed. The first volume can take a little while to appear as
-data streams in. In the meantime, the status bar at the bottom reports what the pipeline
+data streams in. In the meantime, the status bar at the top reports what the pipeline
 is doing.
 
 Don't know a site's identifier? Any WSR-88D site works. Look one up by name on the
@@ -83,7 +83,7 @@ leave `SITE` out, the `site` config key is used.
   product at the selected angle (for example, after a VCP change). Nothing from another
   volume is shown in its place. Step and play skip it, and its tick on the timeline row
   is hollow.
-- **The timeline row** above the status bar appears once two or more volumes are
+- **The timeline row** at the bottom of the window appears once two or more volumes are
   retained. It has one tick per volume. The loop window is shaded, and the volume on
   screen is ringed.
 - **`Backfill k/N`** appears for about a minute after launch while the loop is filled
@@ -91,7 +91,7 @@ leave `SITE` out, the `site` config key is used.
   stops.
 - **`poll Ns ago`** shows when the last poll of the bucket succeeded. It tells you the
   network path is healthy. It does not tell you how fresh the data is.
-- **Cursor readout.** Move the mouse over the radar display and the status bar shows
+- **Cursor readout.** Move the mouse over the radar display and a box beside the cursor shows
   range, azimuth, beam height, and the data value under the cursor.
 
 ## Configuration
