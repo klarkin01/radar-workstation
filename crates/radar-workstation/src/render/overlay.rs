@@ -223,9 +223,9 @@ impl OverlayRenderer {
         let mut marker_positions: Vec<[f32; 2]> = Vec::new();
         let mut label_candidates: Vec<LabelCandidate> = Vec::new();
         for other in sites::all() {
-            if other.id == site.id {
-                continue; // reference::ReferenceRenderer already draws this one
-            }
+            //if other.id == site.id {
+            //    continue; // reference::ReferenceRenderer already draws this one
+            //}
             let (x, y) = az_eq_project(site.lat, site.lon, other.lat, other.lon);
             let (x, y) = (x as f32, y as f32);
             marker_positions.extend_from_slice(&[[x - arm_m, y], [x + arm_m, y], [x, y - arm_m], [x, y + arm_m]]);
